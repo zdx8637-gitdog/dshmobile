@@ -36,11 +36,9 @@ export function createApp(_db: Database.Database) {
     config.rateLimitPairingWindowMs,
     config.rateLimitPairingMax
   );
-  // 出码/授权/轮询面（非爆破目标）：额度放宽，插件常驻二维码会频繁出码
-  const pairingFlowLimiter = new RateLimiter(
-    config.rateLimitPairingWindowMs,
-    config.rateLimitPairingMax * 6
-  );
+  // 出码/授权/轮询面（非爆破目标）：额度放宽——插件轮询 2s/次（30/分），
+  // 且手机与电脑常同 NAT 共用一个 IP，额度必须覆盖轮询 + 用户操作。
+  const pairingFlowLimiter = new RateLimiter(config.rateLimitPairingWindowMs, 300);
 
   const app = express();
 

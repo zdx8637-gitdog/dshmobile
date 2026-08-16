@@ -246,7 +246,14 @@ class MainActivity : ComponentActivity() {
                             lifecycleScope.launch {
                                 runCatching { repo.grantDeviceLogin(r.pairingId) }
                                     .onSuccess { grantDone = true }
-                                    .onFailure { repoError(it) }
+                                    .onFailure {
+                                        val msg = it.message ?: "操作失败"
+                                        repo.setError(
+                                            if (msg.contains("Too many", ignoreCase = true))
+                                                "操作太频繁（服务器限流），请稍等几秒再点允许"
+                                            else msg
+                                        )
+                                    }
                             }
                         },
                     )
