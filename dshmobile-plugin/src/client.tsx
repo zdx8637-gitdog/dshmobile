@@ -25,6 +25,11 @@ interface CardSnapshot {
     bridgeStatus?: string;
     registerError?: string;
   } | null;
+  actions?: {
+    refreshPairing: () => Promise<void>;
+    save: (patch: Record<string, unknown>) => Promise<void>;
+    register: (req: { username: string; password: string }) => Promise<void>;
+  };
 }
 
 function drawQr(canvas: HTMLCanvasElement, text: string) {
@@ -70,6 +75,7 @@ function DshmobileCard(props: any) {
   const value = snap?.value ?? {};
   const [form, setForm] = React.useState<Record<string, string> | null>(null);
   const [left, setLeft] = React.useState(-1);
+  const [localError, setLocalError] = React.useState("");
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
 
   // 表单与宿主值同步（仅初始化一次，避免覆盖用户输入）
@@ -112,6 +118,8 @@ function DshmobileCard(props: any) {
   }, [value.pairingExpiresAt]);
 
   const edit = (k: string, v: string) => setForm((f) => ({ ...(f ?? {}), [k]: v }));
+  // 动作一律走 hooks store（已验证通道），不依赖顶层 props 透传
+  const actions = snap?.actions ?? {};
   const save = async () => {
     if (!form) return;
     const patch: Record<string, unknown> = {};
@@ -120,7 +128,7 @@ function DshmobileCard(props: any) {
       if (form[k] !== cur) patch[k] = form[k].trim();
     }
     if (Object.keys(patch).length > 0) {
-      try { await props.save(patch); } catch { /* 保存失败保持草稿 */ }
+      try { await actions.save(patch); } catch (e) { setLocalError(String(e)); }
     }
   };
   // 注册并连接：先落表单（与保存一致），再写 registerRequest 触发宿主调 /auth/register
@@ -130,8 +138,8 @@ function DshmobileCard(props: any) {
     const p = form?.password ?? "";
     if (!u || !p) return;
     try {
-      await props.register({ username: u, password: p });
-    } catch { /* 错误经 registerError 字段回显 */ }
+      await actions.register({ username: u, password: p });
+    } catch (e) { setLocalError(String(e)); }
   };
 
   return (
@@ -147,6 +155,10 @@ function DshmobileCard(props: any) {
           桥状态：{value?.bridgeStatus ?? "unknown"}
         </span>
       </div>
+      <p style={{ margin: 0, fontSize: 11, color: "#55585f" }}>
+        debug: scope={snap?.status} writable={String(snap?.writable)} actions={Object.keys(actions).join(",") || "无"}
+        {localError ? ` · ${localError}` : ""}
+      </p>
       <p style={{ margin: 0, fontSize: 12, color: "#8b8e98" }}>
         让手机远程控制本机 DeepSeek Harness：填写 relay 账号后保存，桥自动启动；手机 App 扫码即可登录同一账号。
       </p>
@@ -196,7 +208,7 @@ function DshmobileCard(props: any) {
           <div style={{ fontSize: 12, color: "#8b8e98" }}>
             {left < 0 ? "点击右侧按钮生成配对码" : left > 0 ? `剩余 ${left} 秒` : "已过期，请重新生成"}
           </div>
-          <button style={btnStyle} onClick={() => props.refreshPairing()}>生成配对码</button>
+          <button style={btnStyle} onClick={() => { try { actions.refreshPairing(); } catch (e) { setLocalError(String(e)); } }}>生成配对码</button>
         </div>
       </div>
       <p style={{ margin: 0, fontSize: 12, color: "#8b8e98" }}>
@@ -208,10 +220,24 @@ function DshmobileCard(props: any) {
 
 export function apply(ctx: any) {
   const scope = ctx.settingsScope.bind({ namespace: NS });
+
+  // 动作放在 store 里（hooks 是已验证的透传通道）；错误上抛给卡片显示
+  const actions = {
+    refreshPairing: () =>
+      scope.set("refreshPairing", true).catch((e: unknown) => { throw e; }),
+    save: (patch: Record<string, unknown>) =>
+      Promise.all(Object.entries(patch).map(([k, v]) => scope.set(k, v))).catch(
+        (e: unknown) => { throw e; },
+      ),
+    register: (req: { username: string; password: string }) =>
+      scope.set("registerRequest", JSON.stringify(req)).catch((e: unknown) => { throw e; }),
+  };
+
   const store = createSnapshotStore<CardSnapshot>({
     status: "loading",
     writable: false,
     value: null,
+    actions,
   });
 
   const publish = () => {
@@ -220,6 +246,7 @@ export function apply(ctx: any) {
       status: snap?.status ?? "unavailable",
       writable: snap?.writable ?? false,
       value: (snap?.value ?? null) as any,
+      actions,
     });
   };
   publish();
@@ -233,13 +260,6 @@ export function apply(ctx: any) {
         order: 30,
         inject: () => ({
           hooks: { dshmobileCard: store },
-          refreshPairing: () => scope.set("refreshPairing", true).catch(() => {}),
-          save: (patch: Record<string, unknown>) => {
-            const tasks = Object.entries(patch).map(([k, v]) => scope.set(k, v));
-            return Promise.all(tasks).catch(() => {});
-          },
-          register: (req: { username: string; password: string }) =>
-            scope.set("registerRequest", JSON.stringify(req)).catch(() => {}),
         }),
       },
       DshmobileCard,
