@@ -10,7 +10,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { z } from "zod";
+import z from "@deepseek-ai/schemastery";
 import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 
 export const name = "dshmobile-bridge";
@@ -34,6 +34,10 @@ const schema = z.object({
   pairingExpiresAt: z.string().default(""),
   refreshPairing: z.boolean().default(false),
   bridgeStatus: z.string().default("stopped"),
+  // 注册通道：客户端写 JSON {username,password}，宿主调 /auth/register 后清空；
+  // registerError 回显失败原因（如 "Username already exists"）。
+  registerRequest: z.string().default(""),
+  registerError: z.string().default(""),
 });
 
 /** 机器稳定标识：Windows MachineGuid，读不到则持久化随机 UUID（与显示名解耦）。 */
@@ -81,7 +85,7 @@ export function apply(ctx: any, _config: any = {}) {
     scope.update({ bridgeStatus: "stopped" }).catch(() => {});
   }
 
-  function startBridge(value: z.infer<typeof schema>) {
+  function startBridge(value: ReturnType<typeof schema>) {
     stopBridge();
     try {
       mkdirSync(STATE_DIR, { recursive: true });
@@ -120,7 +124,7 @@ export function apply(ctx: any, _config: any = {}) {
   }
 
   /** 扫码登录（方向一）：登录 relay → 出 6 位配对码 → 写回命名空间供卡片展示。 */
-  async function generatePairing(value: z.infer<typeof schema>) {
+  async function generatePairing(value: ReturnType<typeof schema>) {
     const base = value.relayUrl.replace(/\/$/, "");
     try {
       const loginRes = await fetch(`${base}/auth/login`, {
@@ -157,10 +161,31 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
-  let current: z.infer<typeof schema> | null = null;
+  /** 注册新账号（卡片写 registerRequest 触发）：成功清请求；失败回显原因。 */
+  async function handleRegister(request: string) {
+    try {
+      const { username: u, password: p } = JSON.parse(request);
+      if (!u || !p) throw new Error("账号/密码不能为空");
+      const base = (current?.relayUrl ?? "").replace(/\/$/, "");
+      const res = await fetch(`${base}/auth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: u, password: p }),
+      });
+      const body: any = await res.json().catch(() => ({}));
+      if (!res.ok || body.ok === false) {
+        throw new Error(body?.error?.message ?? `注册失败 HTTP ${res.status}`);
+      }
+      await scope.update({ registerRequest: "", registerError: "" });
+    } catch (err: any) {
+      await scope.update({ registerRequest: "", registerError: String(err?.message ?? err) });
+    }
+  }
+
+  let current: ReturnType<typeof schema> | null = null;
   let busy = false;
 
-  async function onConfig(next: z.infer<typeof schema>) {
+  async function onConfig(next: ReturnType<typeof schema>) {
     const prev = current;
     current = next;
     if (busy) return;
@@ -183,6 +208,10 @@ export function apply(ctx: any, _config: any = {}) {
       // 配对码刷新
       if (next.refreshPairing) {
         await generatePairing(next);
+      }
+      // 注册新账号
+      if (next.registerRequest) {
+        await handleRegister(next.registerRequest);
       }
     } finally {
       busy = false;

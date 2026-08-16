@@ -23,6 +23,7 @@ interface CardSnapshot {
     pairingCode?: string;
     pairingExpiresAt?: string;
     bridgeStatus?: string;
+    registerError?: string;
   } | null;
 }
 
@@ -122,6 +123,16 @@ function DshmobileCard(props: any) {
       try { await props.save(patch); } catch { /* 保存失败保持草稿 */ }
     }
   };
+  // 注册并连接：先落表单（与保存一致），再写 registerRequest 触发宿主调 /auth/register
+  const register = async () => {
+    await save();
+    const u = (form?.username ?? "").trim();
+    const p = form?.password ?? "";
+    if (!u || !p) return;
+    try {
+      await props.register({ username: u, password: p });
+    } catch { /* 错误经 registerError 字段回显 */ }
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "14px 0" }}>
@@ -158,9 +169,21 @@ function DshmobileCard(props: any) {
         <div style={labelStyle}>设备名（手机端显示）</div>
         <input style={inputStyle} value={form?.deviceLabel ?? ""} onChange={(e) => edit("deviceLabel", e.target.value)} />
       </div>
-      <div style={{ display: "flex", gap: 10 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <button style={btnStyle} onClick={save}>保存配置</button>
+        <button
+          style={{ ...btnStyle, background: "#1c1e24", border: "1px solid #2f6fed", color: "#9db8f5" }}
+          onClick={register}
+        >
+          注册并连接
+        </button>
+        {value?.registerError ? (
+          <span style={{ fontSize: 12, color: "#f87171" }}>{value.registerError}</span>
+        ) : null}
       </div>
+      <p style={{ margin: 0, fontSize: 11, color: "#8b8e98" }}>
+        没有账号？填好账号密码后点「注册并连接」，relay 上会创建新账号并自动启动桥。
+      </p>
 
       <div style={{ borderTop: "1px solid #23252b", margin: "4px 0" }} />
 
@@ -215,6 +238,8 @@ export function apply(ctx: any) {
             const tasks = Object.entries(patch).map(([k, v]) => scope.set(k, v));
             return Promise.all(tasks).catch(() => {});
           },
+          register: (req: { username: string; password: string }) =>
+            scope.set("registerRequest", JSON.stringify(req)).catch(() => {}),
         }),
       },
       DshmobileCard,

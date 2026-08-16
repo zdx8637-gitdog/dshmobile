@@ -55,6 +55,25 @@ await scope.update({ enabled: false }); // 停桥
 await sleep(1500);
 console.log("t3 after disable:", JSON.stringify(value.bridgeStatus));
 
+// 注册路径：随机新账号 → 写 registerRequest → 宿主调 /auth/register → 桥随配置自动启动
+const freshU = "smoke" + Math.random().toString(36).slice(2, 10);
+const freshP = "Smoke" + Math.random().toString(36).slice(2, 10);
+await scope.update({
+  enabled: true,
+  username: freshU,
+  password: freshP,
+  registerRequest: JSON.stringify({ username: freshU, password: freshP }),
+});
+await sleep(5000);
+console.log("t4 after register:", JSON.stringify({ user: freshU, error: value.registerError, status: value.bridgeStatus }));
+if (value.registerError) {
+  console.error("REGISTER FAILED");
+  dispose();
+  process.exit(1);
+}
+
+await scope.update({ enabled: false });
+await sleep(1000);
 dispose();
 console.log("SMOKE OK");
 process.exit(0);

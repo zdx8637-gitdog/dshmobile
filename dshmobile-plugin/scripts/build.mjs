@@ -16,7 +16,7 @@ await build({
   format: "esm",
   target: "node22",
   outfile: path.join(ROOT, "lib/index.js"),
-  external: ["@deepseek-ai/dsh-settings", "zod"],
+  external: ["@deepseek-ai/dsh-settings", "@deepseek-ai/schemastery"],
   logLevel: "info",
 });
 
