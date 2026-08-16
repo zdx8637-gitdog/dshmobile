@@ -12,6 +12,8 @@
   401 自动刷新一次）；429 自动延时重试；账号密码错误自动回退授权码。
 - 手机：登录页扫码入口合并（扫一扫 + 手输码同一面板）；设备页顶栏「扫码」；
   GrantLoginScreen 授权确认页；grant deep link + 相机扫码分流。
+- 插件入口：设置页卡片 → **左侧栏底部箭头弹窗**（`sidebar.footer.action` 槽位，
+  宽栏带文字、窄轨仅箭头；面板浮层承载全部配置与二维码）。
 - 落地页/分发：/dshmobile 静态托管（微信=下载、浏览器=跳 App、App 内=扫码）；
   APK 直链；grant 深链带 pid。
 - 踩坑：① DSH `dsh-host-apiproxy` 的 settings 命名空间白名单硬编码，第三方插件
