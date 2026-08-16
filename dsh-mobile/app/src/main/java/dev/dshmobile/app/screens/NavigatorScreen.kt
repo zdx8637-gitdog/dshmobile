@@ -47,6 +47,7 @@ fun NavigatorScreen(
     onFork: suspend (String) -> String?,
     onArchive: suspend (String) -> Boolean,
     onDeleteDevice: (DeviceSummary) -> Unit,
+    onScanRequest: () -> Unit,
     onLogout: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -81,6 +82,7 @@ fun NavigatorScreen(
                 )
             }
             Row {
+                TextButton(onClick = onScanRequest) { Text("扫码", color = MaterialTheme.colorScheme.primary) }
                 TextButton(onClick = onRefreshDevices) { Text("刷新", color = MaterialTheme.colorScheme.primary) }
                 TextButton(onClick = onLogout) { Text("退出", color = MaterialTheme.colorScheme.primary) }
             }

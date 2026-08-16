@@ -33,6 +33,7 @@ interface CardSnapshot {
     refreshPairing: () => Promise<void>;
     save: (patch: Record<string, unknown>) => Promise<void>;
     register: (req: { username: string; password: string }) => Promise<void>;
+    logout: () => Promise<void>;
   };
 }
 
@@ -181,6 +182,24 @@ function DshmobileCard(props: any) {
         >
           桥状态：{value?.bridgeStatus ?? "unknown"}
         </span>
+        {value?.username ? (
+          <>
+            <span
+              style={{
+                fontSize: 11, color: "#9db8f5", background: "#1c1e24",
+                borderRadius: 999, padding: "2px 10px",
+              }}
+            >
+              已登录：{value.username}
+            </span>
+            <button
+              style={{ ...btnStyle, background: "transparent", border: "1px solid #3a3d45", color: "#c9cbd2", fontSize: 12, padding: "3px 10px" }}
+              onClick={() => { try { actions.logout(); } catch (e) { setLocalError(String(e)); } }}
+            >
+              退出登录
+            </button>
+          </>
+        ) : null}
       </div>
       <p style={{ margin: 0, fontSize: 11, color: "#55585f" }}>
         debug: scope={snap?.status} writable={String(snap?.writable)} actions={Object.keys(actions).join(",") || "无"}
@@ -263,6 +282,7 @@ export function apply(ctx: any) {
       ),
     register: (req: { username: string; password: string }) =>
       scope.set("registerRequest", JSON.stringify(req)).catch((e: unknown) => { throw e; }),
+    logout: () => scope.set("logoutRequest", true).catch((e: unknown) => { throw e; }),
   };
 
   const store = createSnapshotStore<CardSnapshot>({

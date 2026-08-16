@@ -8,7 +8,7 @@
 //   4. 注册新账号（registerRequest 通道）。
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
@@ -42,6 +42,8 @@ const schema = z.object({
   pairError: z.string().default(""),
   registerRequest: z.string().default(""),
   registerError: z.string().default(""),
+  // 退出登录通道：清除本机会话（含手机授权登录的）并转回 grant 模式
+  logoutRequest: z.boolean().default(false),
 });
 
 /** 机器稳定标识：Windows MachineGuid，读不到则持久化随机 UUID（与显示名解耦）。 */
@@ -357,6 +359,27 @@ export function apply(ctx: any, _config: any = {}) {
       // 注册新账号
       if (next.registerRequest) {
         await handleRegister(next.registerRequest);
+      }
+      // 退出登录：清本机会话与账号显示 → 停桥 → 转回授权码模式
+      if (next.logoutRequest) {
+        session = null;
+        grantSecret = "";
+        stopPolling();
+        try {
+          rmSync(SESSION_FILE, { force: true });
+        } catch {}
+        stopBridge();
+        await scope.update({
+          logoutRequest: false,
+          username: "",
+          password: "",
+          mode: "grant",
+          pairingCode: "",
+          pairingExpiresAt: "",
+          grantPairingId: "",
+          registerError: "",
+          pairError: "",
+        });
       }
       // 常驻二维码：手动刷新清掉旧码后重出；凭据变化/过期也自动重出
       if (next.refreshPairing) {

@@ -273,6 +273,7 @@ class MainActivity : ComponentActivity() {
                         onFork = { sid -> repo.forkSession(sid) },
                         onArchive = { sid -> repo.archiveSession(sid) },
                         onDeleteDevice = { d -> lifecycleScope.launch { repo.revokeDevice(d.id) } },
+                        onScanRequest = startScan,
                         onLogout = { repo.logout() },
                     )
                     is Route.Conversation -> ConversationScreen(
