@@ -1,0 +1,40 @@
+{
+  "name": "@liustack/dshmobile-bridge",
+  "version": "0.1.0",
+  "description": "DSH 插件：手机远程桥接——bridge 子进程守护 + 设置页扫码配对卡",
+  "type": "module",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "bridge",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "devDependencies": {
+    "esbuild": "^0.25.12",
+    "qrcode-generator": "^1.4.4"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-settings": "0.1.0-rc.6",
+    "zod": "4.4.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

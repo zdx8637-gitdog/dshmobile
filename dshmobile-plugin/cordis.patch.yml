@@ -1,0 +1,5 @@
+# dshmobile bundle 层：host 半边（bridge 守护 + settings 命名空间 `dshmobile`）
+# 与 client 半边（设置页「DSH Mobile 远程桥接」卡）同属一个包、一行注册。
+- insert:
+    - id: dshmobile-bridge
+      name: '@liustack/dshmobile-bridge'
