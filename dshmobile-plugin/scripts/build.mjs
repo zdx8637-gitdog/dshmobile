@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PACKAGE_ID = "@liustack/dshmobile-bridge";
+const PACKAGE_ID = "@zdx8637-gitdog/dshmobile-bridge";
 
 // ---- host ----
 await build({

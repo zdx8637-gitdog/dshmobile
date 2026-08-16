@@ -17,7 +17,7 @@ try {
 # 2) link dependency into the profile workspace
 $pkgJson = Join-Path $profile "package.json"
 $pkg = Get-Content $pkgJson -Raw | ConvertFrom-Json
-$pkg.dependencies = @{ "@liustack/dshmobile-bridge" = "link:$plugin" }
+$pkg.dependencies = @{ "@zdx8637-gitdog/dshmobile-bridge" = "link:$plugin" }
 $pkg | ConvertTo-Json -Depth 8 | Set-Content $pkgJson -Encoding UTF8
 
 & npx.cmd --yes pnpm@9 install --dir $profile
@@ -30,7 +30,7 @@ if ($patch -notmatch "dshmobile-bridge") {
   $block = @"
 - insert:
     - id: dshmobile-bridge
-      name: '@liustack/dshmobile-bridge'
+      name: '@zdx8637-gitdog/dshmobile-bridge'
 "@
   $patch = $patch.TrimEnd() + "`n" + $block
   Set-Content $patchFile -Value $patch -Encoding UTF8
