@@ -4,8 +4,9 @@
 // `dshmobile`（宿主半边写桥状态与配对码，卡片经 settingsScope 读写）。
 import * as React from "react";
 import { createSnapshotStore } from "@deepseek-ai/dsh-client-runtime/client";
-// qrcode-generator 会被构建进本 bundle（非 external）
-import * as qrcode from "qrcode-generator";
+// qrcode-generator 会被构建进本 bundle（非 external）；CJS 库用默认导入 + 兜底
+import qrcodeDefault from "qrcode-generator";
+const qrcode: any = (qrcodeDefault as any)?.default ?? qrcodeDefault;
 
 const NS = "dshmobile";
 
