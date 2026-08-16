@@ -34,6 +34,8 @@ const schema = z.object({
   pairingExpiresAt: z.string().default(""),
   refreshPairing: z.boolean().default(false),
   bridgeStatus: z.string().default("stopped"),
+  // 出码错误独立于桥状态回显（出码只依赖账号密码，与桥是否在线无关）
+  pairError: z.string().default(""),
   // 注册通道：客户端写 JSON {username,password}，宿主调 /auth/register 后清空；
   // registerError 回显失败原因（如 "Username already exists"）。
   registerRequest: z.string().default(""),
@@ -123,9 +125,19 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
-  /** 扫码登录（方向一）：登录 relay → 出 6 位配对码 → 写回命名空间供卡片展示。 */
+  /** 扫码登录（方向一）：登录 relay → 出 6 位配对码 → 写回命名空间供卡片展示。
+   *  只依赖账号密码（relay 登录），与桥是否在线无关。 */
   async function generatePairing(value: ReturnType<typeof schema>) {
     const base = value.relayUrl.replace(/\/$/, "");
+    if (!value.username || !value.password) {
+      await scope.update({
+        refreshPairing: false,
+        pairingCode: "",
+        pairingExpiresAt: "",
+        pairError: "请先填写并保存账号和密码（出码只需要 relay 账号，不需要桥在线）",
+      });
+      return;
+    }
     try {
       const loginRes = await fetch(`${base}/auth/login`, {
         method: "POST",
@@ -133,7 +145,7 @@ export function apply(ctx: any, _config: any = {}) {
         body: JSON.stringify({ username: value.username, password: value.password }),
       });
       const login: any = await loginRes.json();
-      if (!loginRes.ok || login.ok === false) throw new Error("登录失败，无法出码");
+      if (!loginRes.ok || login.ok === false) throw new Error("账号密码错误，请先保存配置");
 
       const createRes = await fetch(`${base}/pairing-codes`, {
         method: "POST",
@@ -150,13 +162,14 @@ export function apply(ctx: any, _config: any = {}) {
         pairingCode: created.data.code,
         pairingExpiresAt: created.data.expiresAt,
         refreshPairing: false,
+        pairError: "",
       });
     } catch (err: any) {
       await scope.update({
         refreshPairing: false,
         pairingCode: "",
         pairingExpiresAt: "",
-        bridgeStatus: `pair-fail:${err?.message ?? err}`,
+        pairError: String(err?.message ?? err),
       });
     }
   }

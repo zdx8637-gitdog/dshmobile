@@ -24,6 +24,7 @@ interface CardSnapshot {
     pairingExpiresAt?: string;
     bridgeStatus?: string;
     registerError?: string;
+    pairError?: string;
   } | null;
   actions?: {
     refreshPairing: () => Promise<void>;
@@ -131,14 +132,27 @@ function DshmobileCard(props: any) {
       try { await actions.save(patch); } catch (e) { setLocalError(String(e)); }
     }
   };
-  // 注册并连接：先落表单（与保存一致），再写 registerRequest 触发宿主调 /auth/register
+  // 注册并连接：先校验 → 落表单 → 写 registerRequest 触发宿主调 /auth/register
   const register = async () => {
-    await save();
+    setLocalError("");
     const u = (form?.username ?? "").trim();
     const p = form?.password ?? "";
-    if (!u || !p) return;
+    if (u.length < 3) { setLocalError("账号至少 3 个字符（字母/数字/下划线/横线）"); return; }
+    if (p.length < 6) { setLocalError("密码至少 6 位"); return; }
+    await save();
     try {
       await actions.register({ username: u, password: p });
+    } catch (e) { setLocalError(String(e)); }
+  };
+  // 生成配对码：先校验账号密码 → 自动保存表单 → 触发宿主出码（不需要桥在线）
+  const genPairing = async () => {
+    setLocalError("");
+    const u = (form?.username ?? "").trim();
+    const p = form?.password ?? "";
+    if (!u || !p) { setLocalError("请先填写账号和密码（出码只需要 relay 账号，不需要桥在线）"); return; }
+    await save();
+    try {
+      await actions.refreshPairing();
     } catch (e) { setLocalError(String(e)); }
   };
 
@@ -208,7 +222,10 @@ function DshmobileCard(props: any) {
           <div style={{ fontSize: 12, color: "#8b8e98" }}>
             {left < 0 ? "点击右侧按钮生成配对码" : left > 0 ? `剩余 ${left} 秒` : "已过期，请重新生成"}
           </div>
-          <button style={btnStyle} onClick={() => { try { actions.refreshPairing(); } catch (e) { setLocalError(String(e)); } }}>生成配对码</button>
+          <button style={btnStyle} onClick={genPairing}>生成配对码</button>
+          {value?.pairError ? (
+            <span style={{ fontSize: 12, color: "#f87171" }}>{value.pairError}</span>
+          ) : null}
         </div>
       </div>
       <p style={{ margin: 0, fontSize: 12, color: "#8b8e98" }}>
