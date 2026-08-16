@@ -261,7 +261,14 @@ export function apply(ctx: any, _config: any = {}) {
       });
       startPolling(base, created.data.id);
     } catch (err: any) {
-      await scope.update({ pairError: String(err?.message ?? err) });
+      const msg = String(err?.message ?? err);
+      await scope.update({ pairError: msg });
+      // 触发限流时自动延时重试（二维码永远会补回来）
+      if (/too many/i.test(msg)) {
+        setTimeout(() => {
+          ensureGrantCode(current ?? value).catch(() => {});
+        }, 15_000);
+      }
     }
   }
 

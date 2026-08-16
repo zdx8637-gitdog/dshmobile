@@ -36,6 +36,11 @@ export function createApp(_db: Database.Database) {
     config.rateLimitPairingWindowMs,
     config.rateLimitPairingMax
   );
+  // 出码/授权/轮询面（非爆破目标）：额度放宽，插件常驻二维码会频繁出码
+  const pairingFlowLimiter = new RateLimiter(
+    config.rateLimitPairingWindowMs,
+    config.rateLimitPairingMax * 6
+  );
 
   const app = express();
 
@@ -49,9 +54,9 @@ export function createApp(_db: Database.Database) {
 
   app.use("/auth/login", rateLimit(authLimiter));
   app.use("/auth/refresh", rateLimit(authLimiter));
-  app.use("/pairing-codes", rateLimit(pairingLimiter));
-  // 无登录态的核销入口单独限流（防爆破 6 位码）
+  // 无登录态的核销入口单独严限流（防爆破 6 位码），必须先挂
   app.use("/pairing-codes/verify", rateLimit(pairingLimiter));
+  app.use("/pairing-codes", rateLimit(pairingFlowLimiter));
 
   app.use(pairingVerifyRoutes); // 公开：必须最先挂
   app.use(healthRoutes);
