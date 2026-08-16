@@ -1,16 +1,24 @@
 package dev.dshmobile.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import dev.dshmobile.app.net.HistoryEntry
 import dev.dshmobile.app.net.RemoteEnvelope
 import dev.dshmobile.app.net.RemoteStatus
@@ -48,6 +56,24 @@ class MainActivity : ComponentActivity() {
         return Route.PairLogin(code, data.getQueryParameter("relay"))
     }
 
+    /**
+     * 解析相机扫码结果：仅接受自家落地页 URL（https://<relay>/dshmobile/?mode=…&code=…）。
+     * 返回 (mode, code, relayOrigin)；非自家 URL 返回 null。
+     */
+    private fun parseScannedUrl(raw: String): Triple<String, String, String>? {
+        val uri = runCatching { Uri.parse(raw.trim()) }.getOrNull() ?: return null
+        if (uri.scheme !in listOf("https", "http")) return null
+        if (!uri.path.orEmpty().contains("/dshmobile")) return null
+        val mode = uri.getQueryParameter("mode") ?: "pair"
+        val code = uri.getQueryParameter("code")?.trim().orEmpty()
+        if (code.isEmpty()) return null
+        val origin = buildString {
+            append(uri.scheme).append("://").append(uri.host)
+            if (uri.port != -1) append(":").append(uri.port)
+        }
+        return Triple(mode, code, origin)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -73,6 +99,50 @@ class MainActivity : ComponentActivity() {
                 val remoteStatus by repo.remoteStatus.collectAsState()
                 val error by repo.error.collectAsState()
                 val projections by repo.projections.collectAsState()
+
+                // ---- 相机扫码（App 内扫码 → 直接分流，不进浏览器） ----
+                val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+                    val raw = result?.contents
+                    if (raw == null) {
+                        repo.setError(null)
+                    } else {
+                        val parsed = parseScannedUrl(raw)
+                        when {
+                            parsed == null -> repo.setError("无法识别的二维码：请扫描桌面端 DSH Mobile 卡片上的二维码")
+                            parsed.first == "pair" -> route = Route.PairLogin(parsed.second, parsed.third)
+                            parsed.first == "grant" -> repo.setError("「允许电脑登录」流程即将支持（S2），请先在 App 内登录账号")
+                            else -> repo.setError("无法识别的二维码模式")
+                        }
+                    }
+                }
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    if (granted) {
+                        scanLauncher.launch(
+                            ScanOptions()
+                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setOrientationLocked(false)
+                                .setBeepEnabled(true)
+                        )
+                    } else {
+                        repo.setError("需要相机权限才能扫码，请在系统设置中开启")
+                    }
+                }
+                val startScan: () -> Unit = {
+                    if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA)
+                        == PackageManager.PERMISSION_GRANTED
+                    ) {
+                        scanLauncher.launch(
+                            ScanOptions()
+                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setOrientationLocked(false)
+                                .setBeepEnabled(true)
+                        )
+                    } else {
+                        permissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
+                }
 
                 // 登录状态驱动路由
                 LaunchedEffect(auth) {
@@ -112,6 +182,7 @@ class MainActivity : ComponentActivity() {
                                     .onFailure { repoError(it) }
                             }
                         },
+                        onScanRequest = startScan,
                     )
                     is Route.PairLogin -> PairLoginScreen(
                         code = r.code,

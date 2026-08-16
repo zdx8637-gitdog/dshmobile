@@ -84,15 +84,15 @@ function DshmobileCard(props: any) {
     }
   }, [value, form]);
 
-  // 二维码渲染
+  // 二维码渲染：编码 https 落地页（微信扫码=下载页；App/浏览器扫码=自动进 App 配对）
   React.useEffect(() => {
     if (canvasRef.current) {
-      const relay = (form?.relayUrl || value.relayUrl || "").trim();
+      const relay = ((form?.relayUrl || value.relayUrl || "").trim()).replace(/\/$/, "");
       const code = value.pairingCode || "";
-      drawQr(
-        canvasRef.current,
-        code ? `dshmobile://pair?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}` : "",
-      );
+      const url = code
+        ? `${relay}/dshmobile/?mode=pair&code=${encodeURIComponent(code)}`
+        : "";
+      drawQr(canvasRef.current, url);
     }
   }, [value.pairingCode, value.relayUrl, form]);
 

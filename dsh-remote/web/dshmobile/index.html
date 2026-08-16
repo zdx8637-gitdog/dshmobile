@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DSH Mobile · 配对</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0f1115; color: #e6e7ea; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 360px; background: #17181c; border: 1px solid #23252b;
+    border-radius: 14px; padding: 28px 24px; display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 20px; text-align: center; }
+  .sub { font-size: 13px; color: #8b8e98; text-align: center; }
+  .code {
+    font-size: 34px; font-weight: 700; letter-spacing: 8px; text-align: center;
+    color: #4a9eff; background: #0f1115; border: 1px solid #23252b; border-radius: 10px;
+    padding: 14px 0;
+  }
+  .hint { font-size: 12px; color: #8b8e98; line-height: 1.7; }
+  .btn {
+    display: block; text-align: center; text-decoration: none; font-size: 15px;
+    padding: 12px; border-radius: 8px; cursor: pointer; border: none; color: #fff;
+  }
+  .primary { background: #2f6fed; }
+  .ghost { background: transparent; border: 1px solid #2f6fed; color: #9db8f5; }
+  .warn { font-size: 12px; color: #f0b429; line-height: 1.6; display: none; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>DSH Mobile</h1>
+    <div class="sub" id="sub">手机远程控制 DeepSeek Harness</div>
+    <div class="code" id="code">------</div>
+    <div class="hint" id="hint"></div>
+    <a class="btn primary" id="download" href="./DSH-Mobile-0.1.0.apk" download>下载 DSH Mobile App</a>
+    <button class="btn ghost" id="openapp">已安装？打开 App 完成配对</button>
+    <div class="warn" id="warn">微信内无法直接打开 App：请点上方按钮下载安装，再回到 App 内扫描，或手动输入配对码。</div>
+  </div>
+
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const mode = params.get("mode") || "pair";
+  const code = (params.get("code") || "").trim();
+  const forceWechat = params.get("ua") === "wechat";
+  const isWechat = forceWechat || /MicroMessenger/i.test(navigator.userAgent);
+  const relay = location.origin;
+  const elCode = document.getElementById("code");
+  const elHint = document.getElementById("hint");
+  const elWarn = document.getElementById("warn");
+
+  if (code) elCode.textContent = code;
+
+  if (mode === "grant") {
+    elHint.textContent = "这是一次授权请求：请在 DSH Mobile App 中确认允许这台电脑登录你的账号。";
+  } else {
+    elHint.textContent = "扫码后手机将登录到桌面端出示的同一账号，无需输入密码。";
+  }
+
+  const deepLink = "dshmobile://" + mode + "?relay=" + encodeURIComponent(relay) + "&code=" + encodeURIComponent(code);
+  document.getElementById("openapp").onclick = function () { location.href = deepLink; };
+
+  if (isWechat) {
+    // 微信内置浏览器禁止自定义协议跳转：只给下载路径
+    document.getElementById("openapp").style.display = "none";
+    elWarn.style.display = "block";
+  } else {
+    // 页面加载后自动尝试进 App；失败（无 App）则停留本页，下载按钮兜底
+    if (code) setTimeout(function () { location.href = deepLink; }, 500);
+  }
+})();
+</script>
+</body>
+</html>

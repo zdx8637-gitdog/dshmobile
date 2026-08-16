@@ -17,6 +17,7 @@ fun AuthScreen(
     onLogin: (String, String) -> Unit,
     onRegister: (String, String) -> Unit,
     onPairLogin: (String) -> Unit,
+    onScanRequest: () -> Unit,
 ) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -59,6 +60,9 @@ fun AuthScreen(
         }
         TextButton(onClick = { showPairDialog = true }) {
             Text("扫码登录（输入配对码）", color = MaterialTheme.colorScheme.primary)
+        }
+        TextButton(onClick = onScanRequest) {
+            Text("扫一扫登录（相机）", color = MaterialTheme.colorScheme.primary)
         }
         if (showRegister) {
             Spacer(Modifier.height(8.dp))
