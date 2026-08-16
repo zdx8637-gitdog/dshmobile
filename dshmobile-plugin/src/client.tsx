@@ -209,19 +209,19 @@ function DshmobileCard(props: any) {
         <input style={inputStyle} value={form?.deviceLabel ?? (value as any)?.deviceLabel ?? ""} onChange={(e) => edit("deviceLabel", e.target.value)} />
       </div>
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-        <button style={btnStyle} onClick={save}>保存配置</button>
+        <button style={btnStyle} onClick={save}>保存并连接（已有账号）</button>
         <button
           style={{ ...btnStyle, background: "#1c1e24", border: "1px solid #2f6fed", color: "#9db8f5" }}
           onClick={register}
         >
-          注册并连接
+          注册并连接（新账号）
         </button>
         {value?.registerError ? (
           <span style={{ fontSize: 12, color: "#f87171" }}>{value.registerError}</span>
         ) : null}
       </div>
       <p style={{ margin: 0, fontSize: 11, color: "#8b8e98" }}>
-        没有账号？填好账号密码后点「注册并连接」，relay 上会创建新账号并自动启动桥。
+        已有账号填好点左边；没有账号点右边自动注册（≥3 字符 + 密码 ≥6 位）。
       </p>
 
       <div style={{ borderTop: "1px solid #23252b", margin: "4px 0" }} />

@@ -324,7 +324,11 @@ export function apply(ctx: any, _config: any = {}) {
       });
       await scope.update({ registerRequest: "", registerError: "" });
     } catch (err: any) {
-      await scope.update({ registerRequest: "", registerError: String(err?.message ?? err) });
+      const msg = String(err?.message ?? err);
+      const friendly = /already exists/i.test(msg)
+        ? "该账号已存在：请点「保存并连接（已有账号）」直接登录"
+        : msg;
+      await scope.update({ registerRequest: "", registerError: friendly });
     }
   }
 
