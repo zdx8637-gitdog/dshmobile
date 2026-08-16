@@ -118,7 +118,16 @@ function DshmobileCard(props: any) {
     return () => clearInterval(t);
   }, [value.pairingExpiresAt]);
 
-  const edit = (k: string, v: string) => setForm((f) => ({ ...(f ?? {}), [k]: v }));
+  // 编辑时以「已保存值 + 草稿」兜底：form 可能因初始化时序只含部分字段
+  const edit = (k: string, v: string) =>
+    setForm((f) => ({
+      relayUrl: (value as any)?.relayUrl ?? "",
+      username: (value as any)?.username ?? "",
+      password: (value as any)?.password ?? "",
+      deviceLabel: (value as any)?.deviceLabel ?? "",
+      ...(f ?? {}),
+      [k]: v,
+    }));
   // 动作一律走 hooks store（已验证通道），不依赖顶层 props 透传
   const actions = snap?.actions ?? {};
   const save = async () => {
@@ -135,8 +144,8 @@ function DshmobileCard(props: any) {
   // 注册并连接：先校验 → 落表单 → 写 registerRequest 触发宿主调 /auth/register
   const register = async () => {
     setLocalError("");
-    const u = (form?.username ?? "").trim();
-    const p = form?.password ?? "";
+    const u = ((form?.username ?? (value as any)?.username) ?? "").trim();
+    const p = (form?.password ?? (value as any)?.password) ?? "";
     if (u.length < 3) { setLocalError("账号至少 3 个字符（字母/数字/下划线/横线）"); return; }
     if (p.length < 6) { setLocalError("密码至少 6 位"); return; }
     await save();
@@ -147,8 +156,8 @@ function DshmobileCard(props: any) {
   // 生成配对码：先校验账号密码 → 自动保存表单 → 触发宿主出码（不需要桥在线）
   const genPairing = async () => {
     setLocalError("");
-    const u = (form?.username ?? "").trim();
-    const p = form?.password ?? "";
+    const u = ((form?.username ?? (value as any)?.username) ?? "").trim();
+    const p = (form?.password ?? (value as any)?.password) ?? "";
     if (!u || !p) { setLocalError("请先填写账号和密码（出码只需要 relay 账号，不需要桥在线）"); return; }
     await save();
     try {
@@ -179,21 +188,21 @@ function DshmobileCard(props: any) {
 
       <div>
         <div style={labelStyle}>relay 地址</div>
-        <input style={inputStyle} value={form?.relayUrl ?? ""} onChange={(e) => edit("relayUrl", e.target.value)} />
+        <input style={inputStyle} value={form?.relayUrl ?? (value as any)?.relayUrl ?? ""} onChange={(e) => edit("relayUrl", e.target.value)} />
       </div>
       <div style={{ display: "flex", gap: 10 }}>
         <div style={{ flex: 1 }}>
           <div style={labelStyle}>账号</div>
-          <input style={inputStyle} value={form?.username ?? ""} onChange={(e) => edit("username", e.target.value)} />
+          <input style={inputStyle} value={form?.username ?? (value as any)?.username ?? ""} onChange={(e) => edit("username", e.target.value)} />
         </div>
         <div style={{ flex: 1 }}>
           <div style={labelStyle}>密码</div>
-          <input style={inputStyle} type="password" value={form?.password ?? ""} onChange={(e) => edit("password", e.target.value)} />
+          <input style={inputStyle} type="password" value={form?.password ?? (value as any)?.password ?? ""} onChange={(e) => edit("password", e.target.value)} />
         </div>
       </div>
       <div>
         <div style={labelStyle}>设备名（手机端显示）</div>
-        <input style={inputStyle} value={form?.deviceLabel ?? ""} onChange={(e) => edit("deviceLabel", e.target.value)} />
+        <input style={inputStyle} value={form?.deviceLabel ?? (value as any)?.deviceLabel ?? ""} onChange={(e) => edit("deviceLabel", e.target.value)} />
       </div>
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <button style={btnStyle} onClick={save}>保存配置</button>
