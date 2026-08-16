@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>DSH Bridge</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- 滑动容器：两个视图并排，transform 左右滑动 -->
+  <div id="slider" class="slider">
+    <!-- 登录视图 -->
+    <section id="view-login" class="view">
+      <div class="brand">
+        <div class="logo">◇</div>
+        <div>
+          <div class="title">DSH Bridge</div>
+          <div class="subtitle">DeepSeek Harness 远程桥接</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <label>服务器</label>
+        <input id="server" type="text" value="https://www.deepseek-claudex.cn" spellcheck="false" />
+        <label>用户名</label>
+        <input id="username" type="text" placeholder="relay 账号" spellcheck="false" />
+        <label>密码</label>
+        <input id="password" type="password" placeholder="密码" />
+        <label>设备名称（手机端用于区分电脑）</label>
+        <input id="devicename" type="text" placeholder="例如：家里台式机" spellcheck="false" />
+        <label class="remember">
+          <input id="remember" type="checkbox" /> 记住密码（仅本机存储）
+        </label>
+        <div id="login-error" class="error" hidden></div>
+        <div class="btn-row">
+          <button id="btn-login" class="primary">登录</button>
+          <button id="btn-quit-login" class="ghost">退出</button>
+        </div>
+        <div class="hint">登录后本机 DSH 实例将接入云端中继，手机端可远程操作</div>
+      </div>
+    </section>
+
+    <!-- 运行视图 -->
+    <section id="view-running" class="view">
+      <div class="brand">
+        <div class="logo pulse">◇</div>
+        <div>
+          <div class="title">DSH Bridge</div>
+          <div class="subtitle" id="running-subtitle">运行中</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="ok-line"><span class="ok-icon">✓</span> 登录成功</div>
+        <div class="kv"><span class="k">设备</span><span class="v" id="device-label">DSH Bridge (windows-p)</span></div>
+        <div class="kv"><span class="k">账号</span><span class="v" id="account">-</span></div>
+
+        <div class="divider"></div>
+
+        <div class="status-row">
+          <span class="dot" id="relay-dot"></span>
+          <span class="status-label">中继</span>
+          <span class="status-value" id="relay-status">未连接</span>
+          <span class="url" id="relay-url"></span>
+        </div>
+        <div class="status-row">
+          <span class="dot" id="dsh-dot"></span>
+          <span class="status-label">DSH</span>
+          <span class="status-value" id="dsh-status">未连接</span>
+          <span class="url" id="dsh-url"></span>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="log" id="log">—</div>
+
+        <div class="btn-row">
+          <button id="btn-logout" class="ghost">← 返回登录</button>
+          <button id="btn-quit-running" class="ghost">退出并断开</button>
+        </div>
+        <div class="hint">关闭窗口将最小化到系统托盘，桥接保持运行</div>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

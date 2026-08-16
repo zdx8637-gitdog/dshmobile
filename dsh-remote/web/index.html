@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DSH Remote 调试台</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, "Segoe UI", sans-serif; background: #0f1115; color: #e6e6e6; }
+  header { padding: 10px 16px; background: #171a21; border-bottom: 1px solid #2a2f3a; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  header select, header input, header button { background: #222734; color: #e6e6e6; border: 1px solid #3a4256; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  header button { cursor: pointer; }
+  header button:disabled { opacity: .5; cursor: default; }
+  .status { font-size: 12px; color: #8a93a6; }
+  .status.ok { color: #4ade80; }
+  .status.bad { color: #f87171; }
+  main { display: flex; height: calc(100vh - 53px); }
+  #sessions { width: 260px; border-right: 1px solid #2a2f3a; overflow-y: auto; padding: 8px; }
+  #sessions .s { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 6px; background: #171a21; border: 1px solid transparent; font-size: 13px; word-break: break-all; }
+  #sessions .s.active { border-color: #4a90d9; background: #1c2434; }
+  #sessions .s.sub { margin-left: 14px; background: #13161c; font-size: 12px; }
+  #sessions .s.subtoggle { background: transparent; border: 1px dashed #2a2f3a; color: #8a93a6; font-size: 12px; }
+  #sessions .s .run { color: #4ade80; font-size: 11px; }
+  #sessions .s .idle { color: #8a93a6; font-size: 11px; }
+  #chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; font-size: 14px; line-height: 1.55; }
+  #log .u, #log .a, #log .tool, #log .sys { margin-bottom: 10px; }
+  #log .u { color: #c9d8ff; }
+  #log .tool { color: #8a93a6; font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: #171a21; border-radius: 6px; padding: 6px 8px; }
+  #log .sys { color: #6b7688; font-size: 12px; }
+  #composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #2a2f3a; }
+  #composer textarea { flex: 1; background: #171a21; color: #e6e6e6; border: 1px solid #3a4256; border-radius: 8px; padding: 10px; resize: none; font-size: 14px; height: 46px; }
+  #composer button { background: #2f6feb; color: white; border: 0; border-radius: 8px; padding: 0 18px; font-size: 14px; cursor: pointer; }
+  #login { max-width: 340px; margin: 80px auto; background: #171a21; border: 1px solid #2a2f3a; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 10px; }
+  #login input, #login button { padding: 10px; border-radius: 8px; border: 1px solid #3a4256; background: #222734; color: #e6e6e6; font-size: 14px; }
+  #login button { background: #2f6feb; border: 0; cursor: pointer; }
+  .err { color: #f87171; font-size: 13px; }
+  .hint { color: #8a93a6; font-size: 12px; text-align: center; }
+  code { background: #222734; padding: 1px 5px; border-radius: 4px; }
+  /* hidden 属性必须压过各类 display 规则 */
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DSH Remote 调试台</h1>
+  <span id="conn" class="status">未连接</span>
+  <select id="device"></select>
+  <button id="btnConnect">连接</button>
+  <button id="btnNew">新建会话</button>
+  <button id="btnLogout">退出</button>
+</header>
+
+<div id="login">
+  <h3>登录 relay</h3>
+  <input id="username" placeholder="用户名" />
+  <input id="password" type="password" placeholder="密码" />
+  <button id="btnLogin">登录</button>
+  <div id="loginErr" class="err"></div>
+  <div class="hint">账号注册：<code>POST /auth/register</code></div>
+</div>
+
+<main id="app" hidden>
+  <aside id="sessions"></aside>
+  <section id="chat">
+    <div id="log"></div>
+    <div id="composer">
+      <textarea id="msg" placeholder="输入消息…（仅对远程创建的会话可写）"></textarea>
+      <button id="btnSend">发送</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let accessToken = null, refreshToken = null, ws = null, targetDeviceId = null, clientId = "web-" + Math.random().toString(36).slice(2, 8);
+let currentSession = null, pending = new Map(), logBuffer = {};
+
+// ---------- auth ----------
+async function api(path, options = {}) {
+  let res = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}), ...(options.headers || {}) } });
+  if (res.status === 401 && refreshToken) {
+    const r = await fetch("/auth/refresh", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refreshToken }) });
+    if (r.ok) { const d = await r.json(); accessToken = d.data.accessToken; refreshToken = d.data.refreshToken; return api(path, options); }
+  }
+  return res;
+}
+async function login() {
+  const res = await fetch("/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: $("username").value.trim(), password: $("password").value }) });
+  const d = await res.json();
+  if (!res.ok || !d.ok) { $("loginErr").textContent = d?.error?.message || ("HTTP " + res.status); return; }
+  accessToken = d.data.accessToken; refreshToken = d.data.refreshToken;
+  $("login").hidden = true; $("app").hidden = false;
+  setStatus("已登录", "ok");
+  loadDevices();
+}
+async function loadDevices() {
+  const res = await api("/devices");
+  const d = await res.json();
+  $("device").innerHTML = "";
+  const devs = d.data || [];
+  for (const dev of devs) {
+    const opt = document.createElement("option");
+    opt.value = dev.id; opt.textContent = `${dev.label} (${dev.status})`;
+    $("device").appendChild(opt);
+  }
+  if (devs.length === 0) {
+    setStatus("无设备：先在 DSH 机器上启动 bridge", "bad");
+    return;
+  }
+  // 自动选择在线设备并连接
+  const online = devs.find((x) => x.status === "online") || devs[0];
+  $("device").value = online.id;
+  connectWs();
+}
+
+// ---------- relay ws ----------
+let reconnectTimer = null;
+function connectWs() {
+  if (!accessToken) { setStatus("先登录", "bad"); return; }
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  targetDeviceId = $("device").value || targetDeviceId;
+  if (!targetDeviceId) { setStatus("先选设备", "bad"); return; }
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/client?targetDeviceId=${encodeURIComponent(targetDeviceId)}&clientId=${encodeURIComponent(clientId)}`, ["bearer", accessToken]);
+  ws.onopen = () => { setStatus("已连接 relay", "ok"); loadSessions(); };
+  ws.onclose = () => {
+    setStatus("relay 断开，自动重连中…", "bad");
+    ws = null;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => { if (accessToken) connectWs(); }, 2000);
+  };
+  ws.onerror = () => {};
+  ws.onmessage = (ev) => {
+    let env;
+    try { env = JSON.parse(ev.data); } catch { return; }
+    if (env.kind === "response" && pending.has(env.requestId)) {
+      pending.get(env.requestId)(env); pending.delete(env.requestId);
+    } else if (env.kind === "event" && env.type === "events.forward") {
+      renderFrame(env.payload);
+    } else if (env.kind === "error" && pending.has(env.requestId)) {
+      pending.get(env.requestId)(env); pending.delete(env.requestId);
+    }
+  };
+}
+function sendRequest(type, payload, onResponse) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { if (onResponse) onResponse({ payload: { ok: false, error: { code: "offline", message: "relay 未连接" } } }); return; }
+  const requestId = "req-" + Math.random().toString(36).slice(2, 10);
+  if (onResponse) pending.set(requestId, onResponse);
+  ws.send(JSON.stringify({ schemaVersion: 1, kind: "request", envelopeId: requestId, type, sentAt: new Date().toISOString(), requestId, actor: { role: "client", clientId }, target: { deviceId: targetDeviceId }, payload }));
+}
+setInterval(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ schemaVersion: 1, kind: "heartbeat", type: "heartbeat.ping", sentAt: new Date().toISOString(), actor: { role: "client", clientId }, payload: { now: new Date().toISOString() } })); }, 30000);
+
+// ---------- sessions ----------
+function loadSessions() {
+  sendRequest("sessions.list", {}, (env) => {
+    const sessions = env.payload?.data?.sessions || [];
+    renderSessionTree(sessions);
+  });
+}
+/** 按 parentSessionId 建树：主会话在上，子代理缩进折叠显示。 */
+function renderSessionTree(sessions) {
+  $("sessions").innerHTML = "";
+  const children = new Map();
+  for (const s of sessions) {
+    if (s.parentSessionId) {
+      if (!children.has(s.parentSessionId)) children.set(s.parentSessionId, []);
+      children.get(s.parentSessionId).push(s);
+    }
+  }
+  const roots = sessions.filter((s) => !s.parentSessionId)
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  for (const r of roots) {
+    $("sessions").appendChild(sessionItem(r, false));
+    const kids = children.get(r.sessionId) || [];
+    if (kids.length > 0) {
+      const toggle = document.createElement("div");
+      toggle.className = "s subtoggle";
+      toggle.innerHTML = `▸ ${kids.length} 个子代理会话`;
+      const holder = document.createElement("div");
+      holder.style.display = "none";
+      for (const k of kids) holder.appendChild(sessionItem(k, true));
+      toggle.onclick = () => {
+        const open = holder.style.display !== "none";
+        holder.style.display = open ? "none" : "block";
+        toggle.innerHTML = `${open ? "▸" : "▾"} ${kids.length} 个子代理会话`;
+      };
+      $("sessions").appendChild(toggle);
+      $("sessions").appendChild(holder);
+    }
+  }
+}
+function sessionItem(s, isSub) {
+  const div = document.createElement("div");
+  div.className = "s" + (s.sessionId === currentSession ? " active" : "") + (isSub ? " sub" : "");
+  const title = s.projections?.values?.title || s.sessionId.slice(0, 13);
+  div.innerHTML = `<div>${isSub ? "└ " : ""}${escapeHtml(title)}</div><div class="${s.running ? "run" : "idle"}">${s.running ? "● 运行中" : "空闲"} · ${s.cwd || ""}${s.origin === "subagent" ? " · 子代理" : ""}</div>`;
+  div.onclick = () => openSession(s.sessionId);
+  return div;
+}
+function openSession(sessionId) {
+  currentSession = sessionId;
+  document.querySelectorAll("#sessions .s").forEach((el) => el.classList.remove("active"));
+  $("log").innerHTML = `<div class="sys">会话 <code>${sessionId}</code>（只读视图，最近 10 条消息）</div>`;
+  sendRequest("sessions.history", { sessionId, maxMessages: 10 }, (env) => {
+    if (!env.payload?.ok) { logSys("history 失败: " + JSON.stringify(env.payload?.error)); return; }
+    const events = env.payload?.data?.events || [];
+    renderHistory(events);
+    sendRequest("events.subscribe", { sessionId });
+  });
+}
+function createSession() {
+  sendRequest("sessions.create", {}, (env) => {
+    if (!env.payload?.ok) { logSys("创建失败: " + JSON.stringify(env.payload?.error)); return; }
+    const sid = env.payload.data.sessionId;
+    logSys(`已创建会话 ${sid}（远程自有，可写）`);
+    loadSessions();
+    openSession(sid);
+  });
+}
+
+// ---------- render ----------
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function logSys(text) { $("log").insertAdjacentHTML("beforeend", `<div class="sys">${escapeHtml(text)}</div>`); $("log").scrollTop = $("log").scrollHeight; }
+
+/** 批量渲染 history（跳过海量 assistant/chunk 流式碎片，只渲染组装消息；一次性 innerHTML 防卡死）。 */
+function renderHistory(events) {
+  let html = "";
+  let toolCount = 0;
+  for (const e of events) {
+    const t = e.event?.type, d = e.event?.data || {};
+    if (t === "user/message") {
+      const text = (d.message?.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+      if (text) html += `<div class="u">👤 ${escapeHtml(text)}</div>`;
+    } else if (t === "assistant/message") {
+      const text = (d.message?.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+      if (text) html += `<div class="a">🤖 ${escapeHtml(text)}</div>`;
+    } else if (t === "tool/call") {
+      toolCount++;
+      if (toolCount <= 30) html += `<div class="tool">🔧 ${escapeHtml(d.name)} ${escapeHtml((d.arguments || "").slice(0, 160))}</div>`;
+    } else if (t === "tool/result") {
+      const c = d.message?.content || [];
+      const txt = c.map((b) => b.type === "text" ? b.text : `[${b.type}]`).join(" ").slice(0, 200);
+      if (txt && toolCount <= 30) html += `<div class="tool">→ ${escapeHtml(txt)}</div>`;
+    } else if (t === "turn/start") {
+      html += `<div class="sys">— 轮次 ${d.turn} 开始 —</div>`;
+    } else if (t === "turn/end") {
+      html += `<div class="sys">— 轮次 ${d.turn} 结束 (${escapeHtml(d.reason?.kind ?? "")}) —</div>`;
+    }
+    // assistant/chunk / step/* / todo 等流式与结构事件跳过
+  }
+  if (toolCount > 30) html += `<div class="sys">…其余 ${toolCount - 30} 个工具调用已折叠</div>`;
+  $("log").insertAdjacentHTML("beforeend", html);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+function renderEvent(ev) {
+  const t = ev?.type, d = ev?.data || {};
+  if (t === "user/message") {
+    const text = (d.message?.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+    if (text) $("log").insertAdjacentHTML("beforeend", `<div class="u">👤 ${escapeHtml(text)}</div>`);
+  } else if (t === "assistant/message") {
+    const text = (d.message?.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+    if (text) $("log").insertAdjacentHTML("beforeend", `<div class="a">🤖 ${escapeHtml(text)}</div>`);
+  } else if (t === "tool/call") {
+    $("log").insertAdjacentHTML("beforeend", `<div class="tool">🔧 ${escapeHtml(d.name)} ${escapeHtml((d.arguments || "").slice(0, 160))}</div>`);
+  } else if (t === "tool/result") {
+    const c = d.message?.content || [];
+    const txt = c.map((b) => b.type === "text" ? b.text : `[${b.type}]`).join(" ").slice(0, 200);
+    if (txt) $("log").insertAdjacentHTML("beforeend", `<div class="tool">→ ${escapeHtml(txt)}</div>`);
+  } else if (t === "turn/start") {
+    $("log").insertAdjacentHTML("beforeend", `<div class="sys">— 轮次 ${d.turn} 开始 —</div>`);
+  } else if (t === "turn/end") {
+    $("log").insertAdjacentHTML("beforeend", `<div class="sys">— 轮次 ${d.turn} 结束 (${escapeHtml(d.reason?.kind ?? "")}) —</div>`);
+  }
+  $("log").scrollTop = $("log").scrollHeight;
+}
+function renderFrame(payload) {
+  const f = payload?.frame;
+  if (!f) return;
+  if (f.type === "session/event") {
+    if (!currentSession || f.sessionId !== currentSession) return;
+    renderEvent(f.event);
+  } else if (f.type === "approval/requested") {
+    logSys(`⏸ 审批请求: ${f.toolName} (${f.reason || ""}) — 调试台暂不支持审批，请在桌面 GUI 处理`);
+  } else if (f.type === "question/requested") {
+    logSys(`❓ 提问: ${JSON.stringify(f.questions)}`);
+  } else if (f.type === "host/session-status" || f.type === "host/session-added" || f.type === "host/session-removed") {
+    loadSessions();
+  }
+}
+function sendMessage() {
+  const text = $("msg").value.trim();
+  if (!text || !currentSession) return;
+  $("msg").value = "";
+  $("log").insertAdjacentHTML("beforeend", `<div class="u">👤 ${escapeHtml(text)}</div>`);
+  sendRequest("sessions.run", { sessionId: currentSession, content: [{ type: "text", text }] }, (env) => {
+    if (!env.payload?.ok) logSys("发送失败: " + JSON.stringify(env.payload?.error));
+  });
+}
+function setStatus(t, cls) { const el = $("conn"); el.textContent = t; el.className = "status " + (cls || ""); }
+
+// ---------- wire ----------
+$("btnLogin").onclick = login;
+$("password").onkeydown = (e) => { if (e.key === "Enter") login(); };
+$("btnLogout").onclick = () => { location.reload(); };
+$("btnConnect").onclick = connectWs;
+$("btnNew").onclick = createSession;
+$("btnSend").onclick = sendMessage;
+$("msg").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } };
+</script>
+</body>
+</html>

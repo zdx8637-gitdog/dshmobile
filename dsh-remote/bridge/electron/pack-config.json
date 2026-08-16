@@ -1,0 +1,14 @@
+{
+  "relay": {
+    "url": "https://www.deepseek-claudex.cn",
+    "username": "",
+    "password": "",
+    "deviceLabel": "DSH Bridge",
+    "platform": "windows",
+    "clientDeviceKey": "dsh-bridge-windows-01"
+  },
+  "dsh": {
+    "url": "http://127.0.0.1:3080"
+  },
+  "stateDir": "./state"
+}

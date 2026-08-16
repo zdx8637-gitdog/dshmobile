@@ -1,0 +1,42 @@
+{
+  "name": "dsh-bridge-desktop",
+  "version": "0.1.0",
+  "description": "DSH Bridge desktop app: connect local DeepSeek Harness to the cloud relay",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "dev.dsh.bridge",
+    "productName": "DSH Bridge",
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "main.js",
+      "preload.js",
+      "bridge-runtime.mjs",
+      "src/**/*.mjs",
+      "renderer/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "pack-config.json",
+        "to": "config.json"
+      }
+    ],
+    "win": {
+      "target": "portable",
+      "sign": false
+    },
+    "portable": {
+      "artifactName": "DSH-Bridge-${version}.exe"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

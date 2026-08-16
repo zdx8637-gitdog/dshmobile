@@ -1,0 +1,24 @@
+# 构建产物 / 依赖
+node_modules/
+dist/
+build/
+.gradle/
+.kotlin/
+.idea/
+*.iml
+*.log
+
+# 本机配置与密钥（隐私：绝不入库）
+local.properties
+*.keystore
+dsh-remote/bridge/config.json
+.env
+data/
+*.db
+*.db-*
+*.db-*-*
+dsh-remote/bridge/state/
+
+# 系统杂项
+Thumbs.db
+.DS_Store

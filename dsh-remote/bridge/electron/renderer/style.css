@@ -1,0 +1,157 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel2: #1c2434;
+  --border: #2a2f3a;
+  --text: #e6e6e6;
+  --muted: #8a93a6;
+  --primary: #4a90d9;
+  --green: #4ade80;
+  --red: #f87171;
+  --yellow: #fbbf24;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* ---------- 左右滑动容器 ---------- */
+.slider {
+  display: flex;
+  width: 200%;              /* 两个 view 各 50% */
+  height: 100%;
+  transition: transform 0.38s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.slider.running { transform: translateX(-50%); }   /* 左滑到运行界面 */
+
+.view {
+  width: 50%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 24px;
+  flex-shrink: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.logo {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: #fff;
+  background: linear-gradient(135deg, #2f6feb, #4a90d9);
+  border-radius: 10px;
+}
+
+.logo.pulse {
+  animation: pulse 2.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(74, 144, 217, 0.45); }
+  50% { box-shadow: 0 0 0 7px rgba(74, 144, 217, 0); }
+}
+
+.title { font-size: 18px; font-weight: 600; }
+.subtitle { font-size: 12px; color: var(--muted); }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+label { font-size: 12px; color: var(--muted); }
+
+label.remember {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+label.remember input { width: 14px; height: 14px; accent-color: var(--primary); }
+
+input {
+  background: #222734;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  outline: none;
+}
+input:focus { border-color: var(--primary); }
+
+.error { color: var(--red); font-size: 13px; }
+
+.btn-row { display: flex; gap: 10px; margin-top: 6px; }
+
+button {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+}
+button.primary { background: #2f6feb; color: #fff; }
+button.primary:hover { background: #3d7bf5; }
+button.ghost { background: #222734; color: var(--muted); border: 1px solid var(--border); }
+button.ghost:hover { color: var(--text); border-color: var(--primary); }
+
+.hint { font-size: 11px; color: var(--muted); text-align: center; margin-top: 8px; line-height: 1.5; }
+
+.ok-line { display: flex; align-items: center; gap: 8px; color: var(--green); font-weight: 500; }
+.ok-icon {
+  width: 20px; height: 20px; border-radius: 50%;
+  background: rgba(74, 222, 128, 0.15);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px;
+}
+
+.kv { display: flex; justify-content: space-between; font-size: 13px; }
+.kv .k { color: var(--muted); }
+.kv .v { color: var(--text); }
+
+.divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+.status-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
+.dot.online { background: var(--green); box-shadow: 0 0 6px rgba(74, 222, 128, 0.5); }
+.dot.connecting { background: var(--yellow); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0.3; } }
+.status-label { color: var(--muted); width: 34px; }
+.status-value { font-weight: 500; }
+.url { color: var(--muted); font-size: 11px; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+
+.log {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  min-height: 44px;
+  line-height: 1.6;
+}
