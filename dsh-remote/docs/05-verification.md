@@ -1,5 +1,26 @@
 # 验证记录
 
+## 2026-08-16 · 扫码授权 S2 + 插件包装 S3（全链路）
+
+- relay：`/pairing-codes/device`（匿名出码+领取凭证）、`/:id/grant`（手机授权）、
+  `/:id/status?secret=`（插件轮询一次性签发会话）；迁移 009（user_id 可空 +
+  request_secret_hash + granted_to_user_id）；全量测试 117/117；生产冒烟通过。
+- 限流：verify 严限 5/分（防爆破 6 位码）；出码/授权/轮询面 300/分
+  （插件轮询 30/分 + 手机电脑同 NAT 共 IP，实测 40 连发不 429）。
+- 插件：常驻二维码双模式（pair/grant 按登录态自动切换）；grant 轮询 2s；
+  会话落盘（手机授权后重启保持登录）+「退出登录」；bridge token 模式（无密码直连，
+  401 自动刷新一次）；429 自动延时重试；账号密码错误自动回退授权码。
+- 手机：登录页扫码入口合并（扫一扫 + 手输码同一面板）；设备页顶栏「扫码」；
+  GrantLoginScreen 授权确认页；grant deep link + 相机扫码分流。
+- 落地页/分发：/dshmobile 静态托管（微信=下载、浏览器=跳 App、App 内=扫码）；
+  APK 直链；grant 深链带 pid。
+- 踩坑：① DSH `dsh-host-apiproxy` 的 settings 命名空间白名单硬编码，第三方插件
+  默认不暴露（上游标注 deferred work）——本地补丁脚本
+  `dshmobile-plugin/scripts/expose-settings-namespace.ps1` 临时解锁；
+  ② qrcode-generator CJS 命名空间被当函数调用 → 画布空白（默认导入修复）；
+  ③ 轮询耗尽共享 IP 限流额度 → 限额分层；
+  ④ 宿主 session 残留导致"未填账号却 running"——补「已登录徽标 + 退出登录」。
+
 ## 2026-08-16 · 扫码登录 S1（配对码核销链路）
 
 - relay 新增 `POST /pairing-codes/verify`（无登录态、限流、一次性核销）：全量测试

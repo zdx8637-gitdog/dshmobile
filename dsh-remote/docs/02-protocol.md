@@ -102,6 +102,35 @@ relay 自动应答 `heartbeat.pong`。bridge 侧 30s 一次，relay 45s 超时�
 自动以**新行**复活（`findByDedupKey` 只匹配未吊销行）。`clientDeviceKey`
 是机器稳定标识（Windows MachineGuid），与显示名解耦——改名不产生新行。
 
+### 2.7 配对码 REST 面（扫码登录/授权，S1+S2）
+
+一个码位、两种方向，扫码方无需思考（二维码恒为落地页 URL，见 §2.8）：
+
+| 方法 | 路径 | 鉴权 | 语义 |
+| :-- | :-- | :-- | :-- |
+| POST | `/pairing-codes` | 用户 | **方向一**出码（账号码）：6 位、300s、一次性、哈希存储 |
+| POST | `/pairing-codes/verify` | 无（严限流 5/分） | **方向一**核销：凭码换码主账号会话（一次性） |
+| POST | `/pairing-codes/device` | 无（宽限流） | **方向二**匿名出码：`{id, code, requestSecret, expiresAt}`；`requestSecret` 明文仅此一次，只存哈希 |
+| POST | `/pairing-codes/:id/grant` | 用户 | **方向二**手机授权：码绑定账号（幂等；非授权码 409） |
+| GET | `/pairing-codes/:id/status?secret=` | 领取凭证 | **方向二**插件轮询：`pending` → `granted`（一次性签发会话，取走即作废） |
+| GET/POST | `/pairing-codes` 列表 / `:id/cancel` | 用户 | 管理面 |
+
+限流约定：`verify` 是唯一爆破目标（6 位码）——严限 5/分；其余出码/授权/轮询面
+宽限 300/分（插件轮询 2s/次 ≈30/分，且手机与电脑常同 NAT 共用一个 IP）。
+
+### 2.8 扫码落地页与 deep link
+
+插件卡片二维码恒编码为落地页 URL（一个码三环境分流）：
+
+```
+https://<relay>/dshmobile/?mode=pair|grant&code=<6位>&pid=<grant时>
+  ├─ 微信扫 → 页面微信分支：仅显示下载 APK（微信禁自定义协议跳转）
+  ├─ 系统相机/浏览器扫 → 页面自动跳 dshmobile://pair|grant?… 进 App；无 App 则停留下载
+  └─ App 内扫 → 解析 URL 直接进 登录确认页 / 授权确认页（不进浏览器）
+```
+
+APK 托管：`/dshmobile/DSH-Mobile-<ver>.apk`（nginx 静态，与落地页同源）。
+
 ## 3. DSH /api（bridge 专用）
 
 ### 3.1 unary

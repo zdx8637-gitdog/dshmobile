@@ -50,6 +50,29 @@ node bridge/src/pair.mjs      # 扫码登录出码：登录 relay 账号并生�
 - 访问：`https://www.deepseek-claudex.cn/dsh-debug/`；
 - 改 UI 后浏览器需强刷（Ctrl+F5）避免缓存旧页。
 
+## 4.1 扫码分发（落地页 + APK 托管）
+
+- 静态目录：`/opt/session-control-relay/web/dshmobile/`（nginx location `/dshmobile/`）；
+- 内容：`index.html`（扫码落地页：微信=下载、浏览器=跳 App）+ `DSH-Mobile-<版本>.apk`；
+- 部署：`python scripts/deploy-dshmobile.py`（凭据走环境变量 RELAY_HOST/RELAY_SSH_PASS）；
+- 发版流程：`gradle :app:assembleRelease` → 拷到 `release\` → 跑部署脚本 → 手机扫码即领最新包。
+
+## 4.2 DSH 插件（dshmobile-bridge）安装
+
+```powershell
+# 前置：pnpm（dsh plugin 子命令依赖）；corepack enable 或 npm i -g pnpm
+powershell -File ..\dshmobile-plugin\scripts\install-dev.ps1   # 本地 link 进 web profile
+powershell -File ..\dshmobile-plugin\scripts\expose-settings-namespace.ps1  # DSH 白名单补丁（见下）
+# 重启 dsh 生效；改插件代码后：node scripts/build.mjs → 重启 dsh
+```
+
+- DSH 0.1.0-rc.6 的 settings 命名空间对第三方插件默认不暴露（`dsh-host-apiproxy`
+  硬编码白名单，上游标注 deferred work）——`expose-settings-namespace.ps1` 做本地
+  单行补丁，**dsh 升级后需重跑**；
+- 宿主冒烟：`node dshmobile-plugin/scripts/smoke-host.mjs <user> <pass>`
+  （账号密码模式）与 `smoke-grant.mjs <user> <pass>`（手机授权模式）；
+- 正式分发：发布 npm 后 `npx -y @deepseek-ai/dsh plugin --profile web add @liustack/dshmobile-bridge@latest`。
+
 ## 5. 端到端验证
 
 ```powershell
