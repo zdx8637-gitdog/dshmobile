@@ -34,12 +34,17 @@ export interface Device {
 
 export interface PairingCode {
   id: string;
-  user_id: string;
+  /** 账号码（方向一）时为码主；设备授权码（方向二，匿名出码）时为 null。 */
+  user_id: string | null;
   code_hash: string;
   expires_at: string;
   used_at: string | null;
   device_id: string | null;
   created_at: string;
+  /** 设备授权码的领取凭证哈希（只存哈希，明文只给出码方一次）。 */
+  request_secret_hash: string | null;
+  /** 手机授权后绑定的账号（S2）。 */
+  granted_to_user_id: string | null;
 }
 
 export interface AuditLog {

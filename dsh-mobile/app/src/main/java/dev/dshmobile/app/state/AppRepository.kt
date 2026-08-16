@@ -108,6 +108,14 @@ class AppRepository(
         }
     }
 
+    /** 授权（方向二）：手机已登录，允许桌面插件登录本账号。失败抛异常由 UI 展示。 */
+    suspend fun grantDeviceLogin(pairingId: String) {
+        val session = _auth.value ?: throw IllegalStateException("请先登录账号，再授权电脑")
+        withContext(Dispatchers.IO) {
+            CloudApi(cloudBaseUrl).grantPairing(session.accessToken, pairingId)
+        }
+    }
+
     fun logout() {
         remote?.disconnect()
         remote = null

@@ -59,10 +59,7 @@ fun AuthScreen(
             Text(if (showRegister) "已有账号，去登录" else "注册新账号")
         }
         TextButton(onClick = { showPairDialog = true }) {
-            Text("扫码登录（输入配对码）", color = MaterialTheme.colorScheme.primary)
-        }
-        TextButton(onClick = onScanRequest) {
-            Text("扫一扫登录（相机）", color = MaterialTheme.colorScheme.primary)
+            Text("扫码登录", color = MaterialTheme.colorScheme.primary)
         }
         if (showRegister) {
             Spacer(Modifier.height(8.dp))
@@ -78,7 +75,7 @@ fun AuthScreen(
         }
     }
 
-    // 配对码输入弹窗（扫码登录兜底：手输桌面端显示的 6 位码）
+    // 扫码登录面板：一个入口——扫一扫为主，手动输入配对码兜底
     if (showPairDialog) {
         var code by remember { mutableStateOf("") }
         AlertDialog(
@@ -86,12 +83,20 @@ fun AuthScreen(
             title = { Text("扫码登录") },
             text = {
                 Column {
+                    Button(
+                        onClick = {
+                            showPairDialog = false
+                            onScanRequest()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("扫一扫") }
+                    Spacer(Modifier.height(16.dp))
                     Text(
-                        "在电脑端打开配对二维码，输入显示的 6 位配对码。",
+                        "或手动输入桌面端显示的 6 位配对码",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = code,
                         onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) code = it },

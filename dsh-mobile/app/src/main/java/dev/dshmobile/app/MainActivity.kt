@@ -24,6 +24,7 @@ import dev.dshmobile.app.net.RemoteEnvelope
 import dev.dshmobile.app.net.RemoteStatus
 import dev.dshmobile.app.screens.AuthScreen
 import dev.dshmobile.app.screens.ConversationScreen
+import dev.dshmobile.app.screens.GrantLoginScreen
 import dev.dshmobile.app.screens.NavigatorScreen
 import dev.dshmobile.app.screens.PairLoginScreen
 import dev.dshmobile.app.screens.sessionTitleOf
@@ -39,6 +40,8 @@ sealed interface Route {
     data class Conversation(val sessionId: String, val title: String? = null) : Route
     /** 扫码登录：桌面出码后经 dshmobile://pair?relay=…&code=… 进入。 */
     data class PairLogin(val code: String, val relay: String? = null) : Route
+    /** 授权（方向二）：dshmobile://grant?relay=…&code=…&pid=… —— 允许电脑登录本账号。 */
+    data class GrantLogin(val pairingId: String, val code: String, val relay: String? = null) : Route
 }
 
 class MainActivity : ComponentActivity() {
@@ -47,6 +50,8 @@ class MainActivity : ComponentActivity() {
 
     /** deep link 触发的配对登录请求（onNewIntent/onCreate 写入，compose 消费）。 */
     private val pendingPairRoute = mutableStateOf<Route.PairLogin?>(null)
+    /** deep link 触发的授权请求（方向二）。 */
+    private val pendingGrantRoute = mutableStateOf<Route.GrantLogin?>(null)
 
     private fun parsePairIntent(intent: Intent?): Route.PairLogin? {
         val data = intent?.data ?: return null
@@ -56,11 +61,20 @@ class MainActivity : ComponentActivity() {
         return Route.PairLogin(code, data.getQueryParameter("relay"))
     }
 
+    private fun parseGrantIntent(intent: Intent?): Route.GrantLogin? {
+        val data = intent?.data ?: return null
+        if (data.scheme != "dshmobile" || data.host != "grant") return null
+        val code = data.getQueryParameter("code")?.trim().orEmpty()
+        val pid = data.getQueryParameter("pid")?.trim().orEmpty()
+        if (code.isEmpty() || pid.isEmpty()) return null
+        return Route.GrantLogin(pid, code, data.getQueryParameter("relay"))
+    }
+
     /**
-     * 解析相机扫码结果：仅接受自家落地页 URL（https://<relay>/dshmobile/?mode=…&code=…）。
-     * 返回 (mode, code, relayOrigin)；非自家 URL 返回 null。
+     * 解析相机扫码结果：仅接受自家落地页 URL（https://<relay>/dshmobile/?mode=…&code=…&pid=…）。
+     * 返回 (mode, code, pid, relayOrigin)；非自家 URL 返回 null。
      */
-    private fun parseScannedUrl(raw: String): Triple<String, String, String>? {
+    private fun parseScannedUrl(raw: String): List<String>? {
         val uri = runCatching { Uri.parse(raw.trim()) }.getOrNull() ?: return null
         if (uri.scheme !in listOf("https", "http")) return null
         if (!uri.path.orEmpty().contains("/dshmobile")) return null
@@ -71,13 +85,14 @@ class MainActivity : ComponentActivity() {
             append(uri.scheme).append("://").append(uri.host)
             if (uri.port != -1) append(":").append(uri.port)
         }
-        return Triple(mode, code, origin)
+        return listOf(mode, code, uri.getQueryParameter("pid")?.trim().orEmpty(), origin)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         parsePairIntent(intent)?.let { pendingPairRoute.value = it }
+        parseGrantIntent(intent)?.let { pendingGrantRoute.value = it }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -88,6 +103,7 @@ class MainActivity : ComponentActivity() {
         )
         lifecycleScope.launch { repo.restoreAuth() }
         parsePairIntent(intent)?.let { pendingPairRoute.value = it }
+        parseGrantIntent(intent)?.let { pendingGrantRoute.value = it }
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -109,8 +125,12 @@ class MainActivity : ComponentActivity() {
                         val parsed = parseScannedUrl(raw)
                         when {
                             parsed == null -> repo.setError("无法识别的二维码：请扫描桌面端 DSH Mobile 卡片上的二维码")
-                            parsed.first == "pair" -> route = Route.PairLogin(parsed.second, parsed.third)
-                            parsed.first == "grant" -> repo.setError("「允许电脑登录」流程即将支持（S2），请先在 App 内登录账号")
+                            parsed[0] == "pair" -> route = Route.PairLogin(parsed[1], parsed[3])
+                            parsed[0] == "grant" && parsed[2].isNotEmpty() -> {
+                                repo.setError(null)
+                                route = Route.GrantLogin(parsed[2], parsed[1], parsed[3])
+                            }
+                            parsed[0] == "grant" -> repo.setError("该授权二维码缺少设备标识，请刷新桌面端二维码后重扫")
                             else -> repo.setError("无法识别的二维码模式")
                         }
                     }
@@ -163,6 +183,23 @@ class MainActivity : ComponentActivity() {
                         pendingPairRoute.value = null
                     }
                 }
+                val pendingGrant = pendingGrantRoute.value
+                LaunchedEffect(pendingGrant) {
+                    if (pendingGrant != null) {
+                        route = pendingGrant
+                        pendingGrantRoute.value = null
+                    }
+                }
+
+                // 授权成功：显示确认后自动回设备列表
+                var grantDone by remember { mutableStateOf(false) }
+                LaunchedEffect(grantDone) {
+                    if (grantDone) {
+                        kotlinx.coroutines.delay(1600)
+                        grantDone = false
+                        route = if (auth != null) Route.Navigator else Route.Auth
+                    }
+                }
 
                 // 设备连接后自动加载会话
                 LaunchedEffect(remoteStatus) {
@@ -193,6 +230,22 @@ class MainActivity : ComponentActivity() {
                             r.relay?.takeIf { it.isNotBlank() }?.let { repo.cloudBaseUrl = it }
                             lifecycleScope.launch {
                                 runCatching { repo.loginWithPairingCode(r.code) }
+                                    .onFailure { repoError(it) }
+                            }
+                        },
+                    )
+                    is Route.GrantLogin -> GrantLoginScreen(
+                        code = r.code,
+                        username = auth?.username,
+                        error = error,
+                        granted = grantDone,
+                        onDeny = { route = if (auth != null) Route.Navigator else Route.Auth },
+                        onAllow = {
+                            repo.setError(null)
+                            r.relay?.takeIf { it.isNotBlank() }?.let { repo.cloudBaseUrl = it }
+                            lifecycleScope.launch {
+                                runCatching { repo.grantDeviceLogin(r.pairingId) }
+                                    .onSuccess { grantDone = true }
                                     .onFailure { repoError(it) }
                             }
                         },

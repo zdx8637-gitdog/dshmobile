@@ -24,6 +24,13 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="dshmobile" android:host="pair" />
             </intent-filter>
+            <!-- 授权 deep link（方向二）：dshmobile://grant?relay=…&code=…&pid=… -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="dshmobile" android:host="grant" />
+            </intent-filter>
         </activity>
     </application>
 

@@ -17,6 +17,7 @@ import "./db/migrations/005_create_audit_logs.js";
 import "./db/migrations/006_add_username_device_tokens.js";
 import "./db/migrations/007_device_dedup.js";
 import './db/migrations/008_indexed_refresh_tokens.js';
+import "./db/migrations/009_pairing_grant.js";
 
 import healthRoutes from "./routes/health.js";
 import authRoutes from "./routes/auth.js";

@@ -109,6 +109,11 @@ class CloudApi(val baseUrl: String) {
             displayName = data["user"]?.jsonObject?.get("displayName")?.jsonPrimitive?.contentOrNull,
         )
     }
+
+    /** 授权（方向二）：手机已登录，把设备授权码绑定到本账号。 */
+    fun grantPairing(token: String, pairingId: String) {
+        post("/pairing-codes/$pairingId/grant", buildJsonObject {}, token)
+    }
 }
 
 class CloudApiException(message: String) : Exception(message)

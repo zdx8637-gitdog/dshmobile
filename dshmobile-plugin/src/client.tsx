@@ -25,6 +25,8 @@ interface CardSnapshot {
     bridgeStatus?: string;
     registerError?: string;
     pairError?: string;
+    mode?: string;
+    grantPairingId?: string;
   } | null;
   actions?: {
     refreshPairing: () => Promise<void>;
@@ -91,17 +93,22 @@ function DshmobileCard(props: any) {
     }
   }, [value, form]);
 
-  // 二维码渲染：编码 https 落地页（微信扫码=下载页；App/浏览器扫码=自动进 App 配对）
+  // 二维码渲染：常驻——pair 模式=手机登录（方向一）；grant 模式=手机授权本机（方向二）
   React.useEffect(() => {
     if (canvasRef.current) {
       const relay = ((form?.relayUrl || value.relayUrl || "").trim()).replace(/\/$/, "");
       const code = value.pairingCode || "";
-      const url = code
-        ? `${relay}/dshmobile/?mode=pair&code=${encodeURIComponent(code)}`
-        : "";
+      const mode = value.mode === "grant" ? "grant" : "pair";
+      let url = "";
+      if (code) {
+        url =
+          mode === "grant"
+            ? `${relay}/dshmobile/?mode=grant&code=${encodeURIComponent(code)}&pid=${encodeURIComponent(value.grantPairingId ?? "")}`
+            : `${relay}/dshmobile/?mode=pair&code=${encodeURIComponent(code)}`;
+      }
       drawQr(canvasRef.current, url);
     }
-  }, [value.pairingCode, value.relayUrl, form]);
+  }, [value.pairingCode, value.pairingExpiresAt, value.mode, value.grantPairingId, value.relayUrl, form]);
 
   // 配对码倒计时
   React.useEffect(() => {
@@ -153,13 +160,9 @@ function DshmobileCard(props: any) {
       await actions.register({ username: u, password: p });
     } catch (e) { setLocalError(String(e)); }
   };
-  // 生成配对码：先校验账号密码 → 自动保存表单 → 触发宿主出码（不需要桥在线）
+  // 刷新二维码：两种模式都可用，无需账号前置（未登录=授权码，已登录=登录码）
   const genPairing = async () => {
     setLocalError("");
-    const u = ((form?.username ?? (value as any)?.username) ?? "").trim();
-    const p = (form?.password ?? (value as any)?.password) ?? "";
-    if (!u || !p) { setLocalError("请先填写账号和密码（出码只需要 relay 账号，不需要桥在线）"); return; }
-    await save();
     try {
       await actions.refreshPairing();
     } catch (e) { setLocalError(String(e)); }
@@ -229,9 +232,11 @@ function DshmobileCard(props: any) {
             {value?.pairingCode || "------"}
           </div>
           <div style={{ fontSize: 12, color: "#8b8e98" }}>
-            {left < 0 ? "点击右侧按钮生成配对码" : left > 0 ? `剩余 ${left} 秒` : "已过期，请重新生成"}
+            {value?.mode === "grant"
+              ? left > 0 ? `等待手机授权（剩余 ${left} 秒）——手机 App 已登录时扫码即授权本机` : "点击右侧按钮生成授权二维码"
+              : left < 0 ? "点击右侧按钮生成登录二维码" : left > 0 ? `剩余 ${left} 秒` : "已过期，请重新生成"}
           </div>
-          <button style={btnStyle} onClick={genPairing}>生成配对码</button>
+          <button style={btnStyle} onClick={genPairing}>刷新二维码</button>
           {value?.pairError ? (
             <span style={{ fontSize: 12, color: "#f87171" }}>{value.pairError}</span>
           ) : null}

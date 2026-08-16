@@ -5,7 +5,7 @@ import * as pairingCodeModel from "../models/pairing-code.js";
 import * as auditLog from "../models/audit-log.js";
 import * as userModel from "../models/user.js";
 import * as authService from "./auth-service.js";
-import { AuthError, NotFoundError } from "../lib/errors.js";
+import { AuthError, ConflictError, NotFoundError } from "../lib/errors.js";
 import type { CreatePairingCodeResponse, PairingCodeResponse } from "../types/api.js";
 
 function generatePlaintextCode(): string {
@@ -79,18 +79,19 @@ export async function verify(
   username: string;
 }> {
   const codeHash = hashDeterministic(plaintextCode);
-  const code = pairingCodeModel.findByCodeHash(codeHash);
+  const code = pairingCodeModel.findByUserCodeHash(codeHash);
   if (!code) {
     throw new AuthError("Invalid or expired pairing code", false);
   }
 
   pairingCodeModel.markUsed(code.id, null);
 
-  const { accessToken, refreshToken } = await authService.issueSession(code.user_id);
-  const user = userModel.findById(code.user_id);
+  const userId = code.user_id as string;
+  const { accessToken, refreshToken } = await authService.issueSession(userId);
+  const user = userModel.findById(userId);
 
   auditLog.insertLog({
-    userId: code.user_id,
+    userId,
     action: "pairing_code.verify",
     targetType: "pairing_code",
     targetId: code.id,
@@ -100,7 +101,108 @@ export async function verify(
   return {
     accessToken,
     refreshToken,
-    userId: code.user_id,
+    userId,
     username: user?.username ?? "",
+  };
+}
+
+// ---------------- S2：设备授权码流（RFC 8628） ----------------
+
+/**
+ * 匿名出码（插件未登录时）：生成 6 位码 + 领取凭证 requestSecret。
+ * 码与凭证都只存哈希；requestSecret 明文只返回一次，只有持码方轮询能取走结果。
+ */
+export function createDeviceCode(): {
+  id: string;
+  code: string;
+  requestSecret: string;
+  expiresAt: string;
+} {
+  const plaintext = generatePlaintextCode();
+  const requestSecret = crypto.randomBytes(32).toString("base64url");
+
+  const code = pairingCodeModel.createDeviceCode({
+    codeHash: hashDeterministic(plaintext),
+    requestSecretHash: hashDeterministic(requestSecret),
+    ttlSeconds: config.pairingCodeTTL,
+  });
+
+  auditLog.insertLog({
+    action: "pairing_code.device_create",
+    targetType: "pairing_code",
+    targetId: code.id,
+  });
+
+  return {
+    id: code.id,
+    code: plaintext,
+    requestSecret,
+    expiresAt: code.expires_at,
+  };
+}
+
+/** 手机（已登录）授权：把设备授权码绑定到该账号。同账号重复授权幂等。 */
+export function grant(userId: string, codeId: string): void {
+  const code = pairingCodeModel.findActiveById(codeId);
+  if (!code) throw new NotFoundError("Pairing code not found or expired");
+  if (code.user_id !== null) throw new ConflictError("Pairing code is not a device grant code");
+  if (code.granted_to_user_id !== null && code.granted_to_user_id !== userId) {
+    // 码已被别人绑定：不暴露细节，按无效处理
+    throw new NotFoundError("Pairing code not found or expired");
+  }
+
+  pairingCodeModel.setGranted(codeId, userId);
+
+  auditLog.insertLog({
+    userId,
+    action: "pairing_code.grant",
+    targetType: "pairing_code",
+    targetId: codeId,
+  });
+}
+
+/**
+ * 插件轮询（每 ~2s）：凭 requestSecret 查询授权状态。
+ * 未授权 → pending；已授权 → 核销并一次性签发账号会话（取走即作废）。
+ */
+export async function pollStatus(
+  codeId: string,
+  requestSecret: string
+): Promise<
+  | { status: "pending" }
+  | {
+      status: "granted";
+      accessToken: string;
+      refreshToken: string;
+      user: { id: string; username: string };
+    }
+> {
+  const code = pairingCodeModel.findByRequestSecretHash(
+    hashDeterministic(requestSecret)
+  );
+  if (!code || code.id !== codeId) {
+    throw new AuthError("Invalid or expired pairing secret", false);
+  }
+  if (code.granted_to_user_id === null) {
+    return { status: "pending" };
+  }
+
+  const userId = code.granted_to_user_id;
+  const { accessToken, refreshToken } = await authService.issueSession(userId);
+  pairingCodeModel.markUsed(code.id, null);
+  const user = userModel.findById(userId);
+
+  auditLog.insertLog({
+    userId,
+    action: "pairing_code.consume",
+    targetType: "pairing_code",
+    targetId: code.id,
+  });
+
+  return {
+    status: "granted",
+    accessToken,
+    refreshToken,
+    user: { id: userId, username: user?.username ?? "" },
   };
 }

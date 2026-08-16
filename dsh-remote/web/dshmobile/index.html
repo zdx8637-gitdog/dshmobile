@@ -64,7 +64,11 @@
     elHint.textContent = "扫码后手机将登录到桌面端出示的同一账号，无需输入密码。";
   }
 
-  const deepLink = "dshmobile://" + mode + "?relay=" + encodeURIComponent(relay) + "&code=" + encodeURIComponent(code);
+  const deepLink = mode === "grant"
+    ? "dshmobile://grant?relay=" + encodeURIComponent(relay)
+      + "&code=" + encodeURIComponent(code)
+      + "&pid=" + encodeURIComponent(params.get("pid") || "")
+    : "dshmobile://pair?relay=" + encodeURIComponent(relay) + "&code=" + encodeURIComponent(code);
   document.getElementById("openapp").onclick = function () { location.href = deepLink; };
 
   if (isWechat) {

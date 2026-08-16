@@ -2,10 +2,13 @@
 import { randomUUID } from "node:crypto";
 
 export class RelayBridge {
-  constructor({ url, username, password, deviceLabel, platform, clientDeviceKey, stateDir }) {
+  constructor({ url, username, password, deviceLabel, platform, clientDeviceKey, stateDir, accessToken, refreshToken }) {
     this.url = url.replace(/\/$/, "");
     this.username = username;
     this.password = password;
+    // 插件授权模式：手机扫码授予的会话（无密码，token 直用）
+    this.accessToken = accessToken;
+    this.refreshToken = refreshToken;
     this.deviceLabel = deviceLabel;
     this.platform = platform;
     this.clientDeviceKey = clientDeviceKey;
@@ -32,21 +35,28 @@ export class RelayBridge {
     const res = await fetch(`${this.url}${path}`, options);
     const body = await res.json().catch(() => ({}));
     if (!res.ok || body?.ok === false) {
-      throw new Error(`${path} failed: HTTP ${res.status} ${JSON.stringify(body?.error ?? body)}`);
+      const err = new Error(`${path} failed: HTTP ${res.status} ${JSON.stringify(body?.error ?? body)}`);
+      err.status = res.status;
+      throw err;
     }
     return body;
   }
 
-  /** 登录拿 access token，然后注册/复用设备拿 device token。 */
-  async provision() {
+  /** 拿一个可用的 access token：优先已有会话（token 直用，过期则刷新一次），否则账号密码登录。 */
+  async #obtainAccessToken() {
+    if (this.accessToken) {
+      return this.accessToken;
+    }
     const login = await this.#restJson("/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ username: this.username, password: this.password }),
     });
-    const accessToken = login.data.accessToken;
+    return login.data.accessToken;
+  }
 
-    // 同一 clientDeviceKey 重复注册会返回同一个 deviceId + 新 token（幂等）
+  /** 注册/复用设备（幂等，同 clientDeviceKey 返回同一 deviceId + 新 token）。 */
+  async #registerDevice(accessToken) {
     const reg = await this.#restJson("/devices/register", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
@@ -58,7 +68,30 @@ export class RelayBridge {
     });
     this.deviceId = reg.data.device.id;
     this.deviceToken = reg.data.deviceToken;
-    return { deviceId: this.deviceId };
+  }
+
+  /** 登录/授权拿 access token，然后注册/复用设备拿 device token。 */
+  async provision() {
+    let accessToken;
+    try {
+      accessToken = await this.#obtainAccessToken();
+      await this.#registerDevice(accessToken);
+      return { deviceId: this.deviceId };
+    } catch (err) {
+      // token 模式且注册被拒（401/403）：尝试刷新会话一次
+      if (this.accessToken && this.refreshToken && (err.status === 401 || err.status === 403)) {
+        const rf = await this.#restJson("/auth/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ refreshToken: this.refreshToken }),
+        });
+        this.accessToken = rf.data.accessToken;
+        this.refreshToken = rf.data.refreshToken ?? this.refreshToken;
+        await this.#registerDevice(this.accessToken);
+        return { deviceId: this.deviceId };
+      }
+      throw err;
+    }
   }
 
   connect() {

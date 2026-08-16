@@ -1,10 +1,11 @@
 // @liustack/dshmobile-bridge · host 半边
 // 职责：
-//   1. 注册 settings 命名空间 `dshmobile`（连接配置 + 桥状态 + 配对码展示字段）；
-//   2. bridge 子进程守护：按配置启停（spawn 包内 bridge/main.js，配置经
-//      DSHMOBILE_BRIDGE_CONFIG 环境变量注入，协议与独立版 bridge 完全一致）；
-//   3. 扫码登录（方向一）出码：客户端卡写 refreshPairing=true → 此处登录 relay
-//      生成一次性配对码 → 写回命名空间，卡片展示二维码；手机核销链路复用 S1。
+//   1. settings 命名空间 `dshmobile`（连接配置 + 桥状态 + 二维码展示字段）；
+//   2. **常驻二维码**：与插件登录态无关，永远可扫——
+//      · 有账号密码/会话 → mode=pair（手机扫码登录该账号，方向一）；
+//      · 无任何凭据 → mode=grant（匿名出码 + 轮询，手机授权后本机登录，方向二）；
+//   3. bridge 子进程守护：账号密码模式或手机授权 token 模式（包内 bridge 支持两种）；
+//   4. 注册新账号（registerRequest 通道）。
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -23,6 +24,7 @@ const STATE_DIR = path.join(HERE, "..", "state");
 const BRIDGE_MAIN = path.join(HERE, "..", "bridge", "main.js");
 const CONFIG_FILE = path.join(STATE_DIR, "config.json");
 const KEY_FILE = path.join(STATE_DIR, "machine-key.txt");
+const SESSION_FILE = path.join(STATE_DIR, "session.json");
 
 const schema = z.object({
   enabled: z.boolean().default(true),
@@ -30,14 +32,14 @@ const schema = z.object({
   username: z.string().default(""),
   password: z.string().default(""),
   deviceLabel: z.string().default("DSH Bridge"),
+  // 常驻二维码（两种模式共用一个码位，内容按登录态切换）
+  mode: z.string().default("grant"), // "pair" | "grant"
   pairingCode: z.string().default(""),
   pairingExpiresAt: z.string().default(""),
+  grantPairingId: z.string().default(""),
   refreshPairing: z.boolean().default(false),
   bridgeStatus: z.string().default("stopped"),
-  // 出码错误独立于桥状态回显（出码只依赖账号密码，与桥是否在线无关）
   pairError: z.string().default(""),
-  // 注册通道：客户端写 JSON {username,password}，宿主调 /auth/register 后清空；
-  // registerError 回显失败原因（如 "Username already exists"）。
   registerRequest: z.string().default(""),
   registerError: z.string().default(""),
 });
@@ -72,11 +74,36 @@ function stableMachineKey(): string {
   }
 }
 
+interface Session {
+  accessToken: string;
+  refreshToken: string;
+  username: string;
+}
+
+function loadSession(): Session | null {
+  try {
+    if (!existsSync(SESSION_FILE)) return null;
+    const s = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
+    if (s?.accessToken && s?.refreshToken && s?.username) return s;
+  } catch {}
+  return null;
+}
+
+function saveSession(s: Session) {
+  mkdirSync(STATE_DIR, { recursive: true });
+  writeFileSync(SESSION_FILE, JSON.stringify(s));
+}
+
 export function apply(ctx: any, _config: any = {}) {
   const scope = ctx.settings.register(NS, schema, { applies: "live" });
 
   let child: ReturnType<typeof spawn> | null = null;
   let stopped = false;
+  let session: Session | null = loadSession();
+  let grantSecret = ""; // 领取凭证：只存内存，绝不下地
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let current: z.infer<typeof schema> | null = null;
+  let busy = false;
 
   function stopBridge() {
     if (child) {
@@ -87,15 +114,18 @@ export function apply(ctx: any, _config: any = {}) {
     scope.update({ bridgeStatus: "stopped" }).catch(() => {});
   }
 
-  function startBridge(value: ReturnType<typeof schema>) {
+  function startBridge(value: z.infer<typeof schema>) {
     stopBridge();
     try {
       mkdirSync(STATE_DIR, { recursive: true });
       const cfg = {
         relay: {
           url: value.relayUrl,
-          username: value.username,
-          password: value.password,
+          username: value.username || session?.username || "",
+          password: value.password || "",
+          // 手机授权模式：token 直用（无密码）；账号密码模式：这两个为空
+          accessToken: session?.accessToken ?? "",
+          refreshToken: session?.refreshToken ?? "",
           deviceLabel: value.deviceLabel || "DSH Bridge",
           platform: "windows",
           clientDeviceKey: stableMachineKey(),
@@ -109,11 +139,8 @@ export function apply(ctx: any, _config: any = {}) {
         stdio: "ignore",
       });
       child.on("exit", (code) => {
-        // 主动 kill 的 code 为 null（stopBridge 已写 "stopped"），只有真实退出才覆盖
         if (!stopped && code !== null) {
-          scope
-            .update({ bridgeStatus: `exited:${code}` })
-            .catch(() => {});
+          scope.update({ bridgeStatus: `exited:${code}` }).catch(() => {});
         }
       });
       child.on("error", (err) => {
@@ -125,88 +152,193 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
-  /** 扫码登录（方向一）：登录 relay → 出 6 位配对码 → 写回命名空间供卡片展示。
-   *  只依赖账号密码（relay 登录），与桥是否在线无关。 */
-  async function generatePairing(value: ReturnType<typeof schema>) {
-    const base = value.relayUrl.replace(/\/$/, "");
-    if (!value.username || !value.password) {
-      await scope.update({
-        refreshPairing: false,
-        pairingCode: "",
-        pairingExpiresAt: "",
-        pairError: "请先填写并保存账号和密码（出码只需要 relay 账号，不需要桥在线）",
-      });
-      return;
+  async function restJson(base: string, pathname: string, options: any = {}): Promise<any> {
+    const res = await fetch(`${base}${pathname}`, {
+      ...options,
+      headers: { "content-type": "application/json", ...(options.headers ?? {}) },
+    });
+    const body: any = await res.json().catch(() => ({}));
+    if (!res.ok || body.ok === false) {
+      const err: any = new Error(body?.error?.message ?? `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
     }
+    return body;
+  }
+
+  /** 拿可用 access token：会话优先，否则账号密码登录。 */
+  async function obtainAccessToken(base: string): Promise<string> {
+    if (session?.accessToken) return session.accessToken;
+    const v = current;
+    if (!v?.username || !v?.password) {
+      throw new Error("本机尚未登录：请用手机 App 扫码授权，或在卡片填写账号密码");
+    }
+    const login = await restJson(base, "/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username: v.username, password: v.password }),
+    });
+    return login.data.accessToken;
+  }
+
+  /** 方向一：账号/会话出码（mode=pair）。 */
+  async function ensurePairCode(value: z.infer<typeof schema>) {
+    const base = value.relayUrl.replace(/\/$/, "");
+    const hasValid =
+      value.mode === "pair" &&
+      value.pairingCode &&
+      value.pairingExpiresAt &&
+      new Date(value.pairingExpiresAt).getTime() > Date.now() + 30_000;
+    if (hasValid) return;
     try {
-      const loginRes = await fetch(`${base}/auth/login`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username: value.username, password: value.password }),
-      });
-      const login: any = await loginRes.json();
-      if (!loginRes.ok || login.ok === false) throw new Error("账号密码错误，请先保存配置");
-
-      const createRes = await fetch(`${base}/pairing-codes`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${login.data.accessToken}`,
-        },
-        body: "{}",
-      });
-      const created: any = await createRes.json();
-      if (!createRes.ok || created.ok === false) throw new Error("出码失败");
-
+      const accessToken = await obtainAccessToken(base);
+      let created;
+      try {
+        created = await restJson(base, "/pairing-codes", {
+          method: "POST",
+          headers: { authorization: `Bearer ${accessToken}` },
+          body: "{}",
+        });
+      } catch (err: any) {
+        if (session?.refreshToken && (err.status === 401 || err.status === 403)) {
+          const rf = await restJson(base, "/auth/refresh", {
+            method: "POST",
+            body: JSON.stringify({ refreshToken: session.refreshToken }),
+          });
+          session = {
+            ...session!,
+            accessToken: rf.data.accessToken,
+            refreshToken: rf.data.refreshToken ?? session!.refreshToken,
+          };
+          saveSession(session);
+          created = await restJson(base, "/pairing-codes", {
+            method: "POST",
+            headers: { authorization: `Bearer ${rf.data.accessToken}` },
+            body: "{}",
+          });
+        } else {
+          throw err;
+        }
+      }
       await scope.update({
+        mode: "pair",
         pairingCode: created.data.code,
         pairingExpiresAt: created.data.expiresAt,
-        refreshPairing: false,
+        grantPairingId: "",
         pairError: "",
       });
     } catch (err: any) {
-      await scope.update({
-        refreshPairing: false,
-        pairingCode: "",
-        pairingExpiresAt: "",
-        pairError: String(err?.message ?? err),
-      });
+      await scope.update({ pairError: String(err?.message ?? err) });
     }
   }
 
-  /** 注册新账号（卡片写 registerRequest 触发）：成功清请求；失败回显原因。 */
+  /** 方向二：匿名出码（mode=grant）+ 轮询授权。 */
+  async function ensureGrantCode(value: z.infer<typeof schema>) {
+    const base = value.relayUrl.replace(/\/$/, "");
+    const hasValid =
+      value.mode === "grant" &&
+      value.pairingCode &&
+      value.pairingExpiresAt &&
+      new Date(value.pairingExpiresAt).getTime() > Date.now() + 30_000 &&
+      value.grantPairingId &&
+      grantSecret;
+    if (hasValid && pollTimer) return;
+    stopPolling();
+    try {
+      const created = await restJson(base, "/pairing-codes/device", { method: "POST", body: "{}" });
+      grantSecret = created.data.requestSecret;
+      await scope.update({
+        mode: "grant",
+        pairingCode: created.data.code,
+        pairingExpiresAt: created.data.expiresAt,
+        grantPairingId: created.data.id,
+        pairError: "",
+      });
+      startPolling(base, created.data.id);
+    } catch (err: any) {
+      await scope.update({ pairError: String(err?.message ?? err) });
+    }
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function startPolling(base: string, pairingId: string) {
+    stopPolling();
+    pollTimer = setInterval(async () => {
+      if (!grantSecret) return;
+      try {
+        const res = await restJson(
+          base,
+          `/pairing-codes/${pairingId}/status?secret=${encodeURIComponent(grantSecret)}`,
+          { method: "GET" }
+        );
+        if (res.data?.status === "granted") {
+          stopPolling();
+          grantSecret = "";
+          session = {
+            accessToken: res.data.accessToken,
+            refreshToken: res.data.refreshToken,
+            username: res.data.user?.username ?? "",
+          };
+          saveSession(session);
+          const v = current;
+          await scope.update({
+            username: v?.username || session.username,
+            mode: "pair",
+            pairingCode: "",
+            pairingExpiresAt: "",
+            grantPairingId: "",
+            bridgeStatus: "granted",
+          });
+          if (v && v.enabled) startBridge(v);
+          ensurePairCode(current!).catch(() => {});
+        }
+      } catch {
+        /* 单次轮询失败忽略，下轮重试；码过期由 ensureGrantCode 重新出码 */
+      }
+    }, 2000);
+  }
+
+  /** 常驻二维码总开关：按当前凭据状态选方向。 */
+  async function ensureQr(value: z.infer<typeof schema>) {
+    if (session || (value.username && value.password)) {
+      await ensurePairCode(value);
+    } else {
+      await ensureGrantCode(value);
+    }
+  }
+
+  /** 注册新账号（卡片写 registerRequest 触发）。 */
   async function handleRegister(request: string) {
     try {
       const { username: u, password: p } = JSON.parse(request);
       if (!u || !p) throw new Error("账号/密码不能为空");
       const base = (current?.relayUrl ?? "").replace(/\/$/, "");
-      const res = await fetch(`${base}/auth/register`, {
+      await restJson(base, "/auth/register", {
         method: "POST",
-        headers: { "content-type": "application/json" },
         body: JSON.stringify({ username: u, password: p }),
       });
-      const body: any = await res.json().catch(() => ({}));
-      if (!res.ok || body.ok === false) {
-        throw new Error(body?.error?.message ?? `注册失败 HTTP ${res.status}`);
-      }
       await scope.update({ registerRequest: "", registerError: "" });
     } catch (err: any) {
       await scope.update({ registerRequest: "", registerError: String(err?.message ?? err) });
     }
   }
 
-  let current: ReturnType<typeof schema> | null = null;
-  let busy = false;
-
-  async function onConfig(next: ReturnType<typeof schema>) {
+  async function onConfig(next: z.infer<typeof schema>) {
     const prev = current;
     current = next;
     if (busy) return;
     busy = true;
     try {
       // 桥启停（配置变化或首次装载）
-      const shouldRun = next.enabled && next.username && next.password;
-      const prevShouldRun = prev ? prev.enabled && prev.username && prev.password : false;
+      const shouldRun = next.enabled && (session !== null || Boolean(next.username && next.password));
+      const prevShouldRun = prev
+        ? prev.enabled && (session !== null || Boolean(prev.username && prev.password))
+        : false;
       const cfgChanged =
         !prev ||
         prev.relayUrl !== next.relayUrl ||
@@ -218,13 +350,17 @@ export function apply(ctx: any, _config: any = {}) {
         if (shouldRun) startBridge(next);
         else stopBridge();
       }
-      // 配对码刷新
-      if (next.refreshPairing) {
-        await generatePairing(next);
-      }
       // 注册新账号
       if (next.registerRequest) {
         await handleRegister(next.registerRequest);
+      }
+      // 常驻二维码：手动刷新清掉旧码后重出；凭据变化/过期也自动重出
+      if (next.refreshPairing) {
+        await scope.update({ refreshPairing: false, pairingCode: "", pairingExpiresAt: "" });
+      }
+      const credsChanged = !prev || prev.username !== next.username || prev.password !== next.password;
+      if (next.refreshPairing || credsChanged || !next.pairingCode) {
+        await ensureQr(next);
       }
     } finally {
       busy = false;
@@ -234,12 +370,12 @@ export function apply(ctx: any, _config: any = {}) {
   const offWatch = scope.watch((next) => {
     onConfig(next).catch(() => {});
   });
-  // 初始装载：带默认值触发一次
   onConfig(scope.get()).catch(() => {});
 
   return () => {
     stopped = true;
     offWatch();
+    stopPolling();
     stopBridge();
   };
 }
