@@ -60,12 +60,19 @@ describe("Devices CRUD", () => {
 
     expect(res.status).toBe(200);
 
-    // Verify it's gone from list
+    // 吊销后从列表消失（软删除过滤，见 D6/F23）
     const list = await request
       .get("/devices")
       .set("Authorization", `Bearer ${accessToken}`);
     const revoked = list.body.data.find((d: any) => d.id === create.body.data.id);
-    expect(revoked.revokedAt).toBeDefined();
+    expect(revoked).toBeUndefined();
+
+    // 单查仍可见且带 revokedAt（审计可查）
+    const single = await request
+      .get(`/devices/${create.body.data.id}`)
+      .set("Authorization", `Bearer ${accessToken}`);
+    expect(single.status).toBe(200);
+    expect(single.body.data.revokedAt).toBeDefined();
   });
 
   it("returns 404 for non-existent device", async () => {

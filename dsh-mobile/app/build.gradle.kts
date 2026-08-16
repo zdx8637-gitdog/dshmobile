@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -21,7 +23,7 @@ android {
         create("release") {
             // 签名密钥不入仓库：keystore 文件（../release.keystore）与口令均只存在于
             // 本机 local.properties（或环境变量 DSHMOBILE_*），见仓库 README 隐私说明。
-            val localProps = java.util.Properties().apply {
+            val localProps = Properties().apply {
                 val f = rootProject.file("local.properties")
                 if (f.exists()) f.inputStream().use { load(it) }
             }

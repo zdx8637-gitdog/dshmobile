@@ -96,6 +96,19 @@ class CloudApi(val baseUrl: String) {
     fun revokeDevice(token: String, deviceId: String) {
         post("/devices/$deviceId/revoke", buildJsonObject {}, token)
     }
+
+    /** 扫码登录（方向一）：无登录态，凭一次性配对码核销换取账号会话。 */
+    fun verifyPairingCode(code: String): AuthSession {
+        val obj = post("/pairing-codes/verify", buildJsonObject { put("code", code) })
+        val data = obj["data"]!!.jsonObject
+        return AuthSession(
+            cloudBaseUrl = baseUrl,
+            accessToken = data["accessToken"]!!.jsonPrimitive.content,
+            refreshToken = data["refreshToken"]!!.jsonPrimitive.content,
+            username = data["user"]?.jsonObject?.get("username")?.jsonPrimitive?.content ?: "",
+            displayName = data["user"]?.jsonObject?.get("displayName")?.jsonPrimitive?.contentOrNull,
+        )
+    }
 }
 
 class CloudApiException(message: String) : Exception(message)

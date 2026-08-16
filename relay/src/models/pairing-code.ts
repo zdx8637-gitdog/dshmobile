@@ -54,7 +54,17 @@ export function findByIdAndUser(
     .get(id, userId) as PairingCode | undefined;
 }
 
-export function markUsed(id: string, deviceId: string): void {
+/** 按码哈希找"未使用且未过期"的配对码（verify 用，无登录态）。 */
+export function findByCodeHash(codeHash: string): PairingCode | undefined {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM pairing_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?"
+    )
+    .get(codeHash, new Date().toISOString()) as PairingCode | undefined;
+}
+
+export function markUsed(id: string, deviceId: string | null): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.prepare("UPDATE pairing_codes SET used_at = ?, device_id = ? WHERE id = ?").run(

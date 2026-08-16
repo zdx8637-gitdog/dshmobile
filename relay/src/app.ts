@@ -23,6 +23,8 @@ import authRoutes from "./routes/auth.js";
 import meRoutes from "./routes/me.js";
 import devicesRoutes from "./routes/devices.js";
 import pairingCodesRoutes from "./routes/pairing-codes.js";
+// 公开核销入口：必须先于其它带 authenticate 的路由器挂载
+import pairingVerifyRoutes from "./routes/pairing-verify.js";
 
 export function createApp(_db: Database.Database) {
   const authLimiter = new RateLimiter(
@@ -47,7 +49,10 @@ export function createApp(_db: Database.Database) {
   app.use("/auth/login", rateLimit(authLimiter));
   app.use("/auth/refresh", rateLimit(authLimiter));
   app.use("/pairing-codes", rateLimit(pairingLimiter));
+  // 无登录态的核销入口单独限流（防爆破 6 位码）
+  app.use("/pairing-codes/verify", rateLimit(pairingLimiter));
 
+  app.use(pairingVerifyRoutes); // 公开：必须最先挂
   app.use(healthRoutes);
   app.use(authRoutes);
   app.use(meRoutes);

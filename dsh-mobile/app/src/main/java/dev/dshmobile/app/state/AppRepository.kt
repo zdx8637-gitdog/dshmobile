@@ -99,6 +99,15 @@ class AppRepository(
         }
     }
 
+    /** 扫码登录（方向一）：凭一次性配对码核销会话（无登录态）。失败抛异常由 UI 展示。 */
+    suspend fun loginWithPairingCode(code: String) {
+        withContext(Dispatchers.IO) {
+            val session = CloudApi(cloudBaseUrl).verifyPairingCode(code)
+            _auth.value = session
+            tokenStore.save(session)
+        }
+    }
+
     fun logout() {
         remote?.disconnect()
         remote = null

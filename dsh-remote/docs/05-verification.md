@@ -1,5 +1,19 @@
 # 验证记录
 
+## 2026-08-16 · 扫码登录 S1（配对码核销链路）
+
+- relay 新增 `POST /pairing-codes/verify`（无登录态、限流、一次性核销）：全量测试
+  111/111 通过；nginx 补 `/pairing-codes` 代理块；生产冒烟（登录→出码→核销→新 token
+  访问 /devices→二次核销 401）通过。
+- 踩坑记录：① verify 路由曾挂载在其它带 `router.use(authenticate)` 的路由器之后
+  被误拦（无路径 use 中间件匹配所有请求）——修复为独立公开路由器最先挂载；
+  ② 配对码哈希此前用 bcrypt 随机盐无法按哈希查找——改为 SHA-256 确定性哈希
+  （防爆破靠限流+TTL）；③ `markUsed` 传空串违反 device_id 外键——改传 null。
+- 桌面出码：`bridge/src/pair.mjs`；electron 运行视图新增配对卡（二维码/倒计时/刷新）。
+- 手机端：deep link `dshmobile://pair?relay=…&code=…`（含 onNewIntent）+ 登录页
+  手输码入口；错码显示 "Invalid or expired pairing code"；有效码登录直达设备列表。
+  模拟器实测通过（deep link 成功 / 手输码成功 / 错码报错三路径）。
+
 ## 2026-08-15：P1 智能体控制面验证
 
 | 项 | 结果 |

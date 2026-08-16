@@ -143,6 +143,46 @@ ipcMain.handle("logout", () => {
   sendState();
 });
 
+// 扫码登录（方向一）：以当前登录账号出一次性配对码（6 位，300s 有效）。
+ipcMain.handle("pairing-generate", async () => {
+  const relay = runtime?.relay;
+  if (!relay?.username || !relay?.password) {
+    return { ok: false, error: "尚未登录" };
+  }
+  try {
+    const base = relay.url.replace(/\/$/, "");
+    const loginRes = await fetch(`${base}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: relay.username, password: relay.password }),
+    });
+    const login = await loginRes.json();
+    if (!loginRes.ok || login.ok === false) {
+      return { ok: false, error: "登录失败，无法出码" };
+    }
+    const createRes = await fetch(`${base}/pairing-codes`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${login.data.accessToken}`,
+      },
+      body: "{}",
+    });
+    const created = await createRes.json();
+    if (!createRes.ok || created.ok === false) {
+      return { ok: false, error: "出码失败" };
+    }
+    return {
+      ok: true,
+      code: created.data.code,
+      expiresAt: created.data.expiresAt,
+      relay: base,
+    };
+  } catch (err) {
+    return { ok: false, error: String(err?.message ?? err) };
+  }
+});
+
 ipcMain.handle("quit", () => {
   runtime?.stop();
   app.quit();

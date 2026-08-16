@@ -1,5 +1,6 @@
 package dev.dshmobile.app
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,6 +17,7 @@ import dev.dshmobile.app.net.RemoteStatus
 import dev.dshmobile.app.screens.AuthScreen
 import dev.dshmobile.app.screens.ConversationScreen
 import dev.dshmobile.app.screens.NavigatorScreen
+import dev.dshmobile.app.screens.PairLoginScreen
 import dev.dshmobile.app.screens.sessionTitleOf
 import dev.dshmobile.app.state.AppRepository
 import dev.dshmobile.app.storage.TokenStore
@@ -27,11 +29,30 @@ sealed interface Route {
     data object Auth : Route
     data object Navigator : Route
     data class Conversation(val sessionId: String, val title: String? = null) : Route
+    /** 扫码登录：桌面出码后经 dshmobile://pair?relay=…&code=… 进入。 */
+    data class PairLogin(val code: String, val relay: String? = null) : Route
 }
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var repo: AppRepository
+
+    /** deep link 触发的配对登录请求（onNewIntent/onCreate 写入，compose 消费）。 */
+    private val pendingPairRoute = mutableStateOf<Route.PairLogin?>(null)
+
+    private fun parsePairIntent(intent: Intent?): Route.PairLogin? {
+        val data = intent?.data ?: return null
+        if (data.scheme != "dshmobile" || data.host != "pair") return null
+        val code = data.getQueryParameter("code")?.trim().orEmpty()
+        if (code.isEmpty()) return null
+        return Route.PairLogin(code, data.getQueryParameter("relay"))
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        parsePairIntent(intent)?.let { pendingPairRoute.value = it }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,6 +61,7 @@ class MainActivity : ComponentActivity() {
             tokenStore = TokenStore(applicationContext),
         )
         lifecycleScope.launch { repo.restoreAuth() }
+        parsePairIntent(intent)?.let { pendingPairRoute.value = it }
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -62,6 +84,16 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // deep link 请求优先于登录态（消费后清空）。
+                // 注意声明顺序必须在 LaunchedEffect(auth) 之后，避免首帧被覆盖。
+                val pending = pendingPairRoute.value
+                LaunchedEffect(pending) {
+                    if (pending != null) {
+                        route = pending
+                        pendingPairRoute.value = null
+                    }
+                }
+
                 // 设备连接后自动加载会话
                 LaunchedEffect(remoteStatus) {
                     if (remoteStatus == RemoteStatus.CONNECTED) {
@@ -74,6 +106,25 @@ class MainActivity : ComponentActivity() {
                         error = error,
                         onLogin = { u, p -> lifecycleScope.launch { runCatching { repo.login(u, p) }.onFailure { repoError(it) } } },
                         onRegister = { u, p -> lifecycleScope.launch { runCatching { repo.register(u, p) }.onFailure { repoError(it) } } },
+                        onPairLogin = { code ->
+                            lifecycleScope.launch {
+                                runCatching { repo.loginWithPairingCode(code) }
+                                    .onFailure { repoError(it) }
+                            }
+                        },
+                    )
+                    is Route.PairLogin -> PairLoginScreen(
+                        code = r.code,
+                        error = error,
+                        onBack = { route = if (auth != null) Route.Navigator else Route.Auth },
+                        onLogin = {
+                            repo.setError(null)
+                            r.relay?.takeIf { it.isNotBlank() }?.let { repo.cloudBaseUrl = it }
+                            lifecycleScope.launch {
+                                runCatching { repo.loginWithPairingCode(r.code) }
+                                    .onFailure { repoError(it) }
+                            }
+                        },
                     )
                     is Route.Navigator -> NavigatorScreen(
                         devices = devices,

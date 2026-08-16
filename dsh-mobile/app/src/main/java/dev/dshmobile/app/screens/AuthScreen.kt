@@ -16,10 +16,12 @@ fun AuthScreen(
     error: String?,
     onLogin: (String, String) -> Unit,
     onRegister: (String, String) -> Unit,
+    onPairLogin: (String) -> Unit,
 ) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var showRegister by remember { mutableStateOf(false) }
+    var showPairDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 32.dp),
@@ -55,6 +57,9 @@ fun AuthScreen(
         TextButton(onClick = { showRegister = !showRegister }) {
             Text(if (showRegister) "已有账号，去登录" else "注册新账号")
         }
+        TextButton(onClick = { showPairDialog = true }) {
+            Text("扫码登录（输入配对码）", color = MaterialTheme.colorScheme.primary)
+        }
         if (showRegister) {
             Spacer(Modifier.height(8.dp))
             Button(
@@ -67,5 +72,44 @@ fun AuthScreen(
             Spacer(Modifier.height(16.dp))
             Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
+    }
+
+    // 配对码输入弹窗（扫码登录兜底：手输桌面端显示的 6 位码）
+    if (showPairDialog) {
+        var code by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showPairDialog = false },
+            title = { Text("扫码登录") },
+            text = {
+                Column {
+                    Text(
+                        "在电脑端打开配对二维码，输入显示的 6 位配对码。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) code = it },
+                        singleLine = true,
+                        label = { Text("配对码") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = code.length == 6,
+                    onClick = {
+                        showPairDialog = false
+                        onPairLogin(code)
+                    },
+                ) { Text("登录", color = MaterialTheme.colorScheme.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPairDialog = false }) { Text("取消", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            },
+        )
     }
 }

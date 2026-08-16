@@ -139,6 +139,28 @@ export async function logout(refreshToken: string): Promise<void> {
   }
 }
 
+/** 为指定用户直接签发一对会话 token（扫码配对核销用；不动用户密码）。 */
+export async function issueSession(
+  userId: string
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const accessToken = signAccessToken(userId);
+  const { token: refreshToken, selector } = generateRefreshToken();
+  const refreshHash = await hashSecret(refreshToken);
+  const finalSecretHash = await hashSecret(
+    refreshToken.slice(refreshToken.indexOf(".") + 1)
+  );
+
+  sessionModel.createSession({
+    userId,
+    refreshTokenHash: refreshHash,
+    ttlSeconds: config.refreshTokenTTL,
+    tokenSelector: selector,
+    tokenSecretHash: finalSecretHash,
+  });
+
+  return { accessToken, refreshToken };
+}
+
 async function findSessionByRefreshToken(token: string): Promise<any | null> {
   const db = (await import("../db/connection.js")).getDb();
 

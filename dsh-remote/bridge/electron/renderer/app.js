@@ -36,6 +36,9 @@ function saveRemember() {
 }
 
 // ---------- 状态应用 ----------
+let wasRunning = false;
+let pairTimer = null;
+
 function applyState(s) {
   const running = s.view === "running";
   slider.classList.toggle("running", running);
@@ -50,11 +53,61 @@ function applyState(s) {
     setDot($("dsh-dot"), $("dsh-status"), s.dshOnline, s.dshConnecting);
 
     $("log").textContent = s.lastEvent || "—";
+
+    // 进入运行视图时自动出码（扫码登录方向一）
+    if (!wasRunning) generatePairing();
   } else {
     $("server").value = s.server || $("server").value;
     $("login-error").hidden = !s.error;
     $("login-error").textContent = s.error || "";
+    clearInterval(pairTimer);
   }
+  wasRunning = running;
+}
+
+// ---------- 配对码（手机扫码登录） ----------
+function drawQr(text) {
+  const canvas = $("pair-qr");
+  const ctx = canvas.getContext("2d");
+  try {
+    const qr = qrcode(0, "M");
+    qr.addData(text);
+    qr.make();
+    const n = qr.getModuleCount();
+    const cell = Math.floor(canvas.width / (n + 4));
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#0f1115";
+    const off = Math.floor((canvas.width - n * cell) / 2);
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        if (qr.isDark(r, c)) ctx.fillRect(off + c * cell, off + r * cell, cell, cell);
+      }
+    }
+  } catch {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+}
+
+async function generatePairing() {
+  clearInterval(pairTimer);
+  const res = await window.bridge.generatePairing();
+  if (!res?.ok) {
+    $("pair-code").textContent = res?.error || "生成失败";
+    $("pair-expire").textContent = "";
+    drawQr("");
+    return;
+  }
+  $("pair-code").textContent = res.code;
+  $("pair-expire").textContent = `剩余 300 秒`;
+  drawQr(`dshmobile://pair?relay=${encodeURIComponent(res.relay)}&code=${encodeURIComponent(res.code)}`);
+  const exp = new Date(res.expiresAt).getTime();
+  pairTimer = setInterval(() => {
+    const left = Math.max(0, Math.round((exp - Date.now()) / 1000));
+    $("pair-expire").textContent = left > 0 ? `剩余 ${left} 秒` : "已过期，请点刷新";
+    if (left <= 0) clearInterval(pairTimer);
+  }, 1000);
 }
 
 function setDot(dotEl, statusEl, online, connecting) {
@@ -81,6 +134,7 @@ $("password").addEventListener("keydown", (e) => {
 $("btn-quit-login").addEventListener("click", () => window.bridge.quit());
 $("btn-quit-running").addEventListener("click", () => window.bridge.quit());
 $("btn-logout").addEventListener("click", () => window.bridge.logout());
+$("btn-pair-refresh").addEventListener("click", generatePairing);
 
 // ---------- 启动 ----------
 loadRemember();

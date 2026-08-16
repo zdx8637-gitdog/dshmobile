@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld("bridge", {
   login: (payload) => ipcRenderer.invoke("login", payload),
   logout: () => ipcRenderer.invoke("logout"),
   quit: () => ipcRenderer.invoke("quit"),
+  generatePairing: () => ipcRenderer.invoke("pairing-generate"),
   onState: (cb) => ipcRenderer.on("state", (_e, state) => cb(state)),
 });

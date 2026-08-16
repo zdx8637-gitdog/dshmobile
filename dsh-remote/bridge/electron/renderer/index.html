@@ -56,6 +56,19 @@
 
         <div class="divider"></div>
 
+        <div class="pair-title">手机扫码登录</div>
+        <div class="pair-row">
+          <canvas id="pair-qr" width="136" height="136"></canvas>
+          <div class="pair-info">
+            <div class="pair-code" id="pair-code">—</div>
+            <div class="pair-expire" id="pair-expire"></div>
+            <button id="btn-pair-refresh" class="ghost">刷新配对码</button>
+          </div>
+        </div>
+        <div class="hint">打开手机 App 扫描二维码（或输入配对码），即可登录同一账号</div>
+
+        <div class="divider"></div>
+
         <div class="status-row">
           <span class="dot" id="relay-dot"></span>
           <span class="status-label">中继</span>
@@ -82,6 +95,7 @@
     </section>
   </div>
 
+  <script src="qrcode.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
