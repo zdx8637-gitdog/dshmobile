@@ -304,21 +304,75 @@ export function apply(ctx: any) {
   publish();
   const off = scope.subscribe(publish);
 
-  ctx.slots.inject("settings.plugin.item", function* () {
+  // 左侧栏底部的可折叠入口：箭头点开 → 弹出面板（复用卡片内容）→ 再点收起
+  ctx.slots.inject("sidebar.footer.action", function* () {
     yield ctx.slots.register(
       {
-        name: "settings.plugin.item",
+        name: "sidebar.footer.action",
         id: "dshmobile",
-        order: 30,
+        order: 10,
         inject: () => ({
           hooks: { dshmobileCard: store },
         }),
       },
-      DshmobileCard,
+      DshmobileSidebarAction,
     );
   });
 
   return () => {
     off();
   };
+}
+
+/** 侧栏动作：箭头开关 + 浮层面板。宽栏显示文字，窄轨只显示箭头。 */
+function DshmobileSidebarAction(props: any) {
+  const [open, setOpen] = React.useState(false);
+  const wide = Boolean(props.wide);
+  return (
+    <div style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={open ? "收起 DSH Mobile" : "打开 DSH Mobile 远程桥接"}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          cursor: "pointer",
+          background: open ? "#232a3d" : "transparent",
+          border: "1px solid transparent",
+          borderRadius: 6,
+          color: open ? "#9db8f5" : "#8b8e98",
+          fontSize: 13,
+          padding: "4px 8px",
+          width: wide ? "auto" : undefined,
+        }}
+      >
+        <span style={{ fontSize: 11, transform: open ? "rotate(180deg)" : "none", display: "inline-block" }}>
+          ▶
+        </span>
+        {wide ? <span>DSH Mobile</span> : null}
+      </button>
+      {open ? (
+        <div
+          style={{
+            position: "fixed",
+            left: wide ? 236 : 64,
+            bottom: 56,
+            width: 380,
+            maxHeight: "78vh",
+            overflowY: "auto",
+            zIndex: 9999,
+            background: "#17181c",
+            border: "1px solid #2a2c33",
+            borderRadius: 12,
+            boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+            padding: "14px 18px",
+          }}
+        >
+          <DshmobileCard {...props} />
+        </div>
+      ) : null}
+    </div>
+  );
 }
