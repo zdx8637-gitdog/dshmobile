@@ -10,6 +10,7 @@
 | [04-operations.md](04-operations.md) | 部署与运维：服务器组件、bridge 启停、web UI 部署、账号、故障排查 |
 | [05-verification.md](05-verification.md) | 验证记录：探针、端到端测试、已修复问题清单 |
 | [06-mobile-requirements.md](06-mobile-requirements.md) | 手机端需求：产品定位、功能映射、内容模型、待确认决策 |
+| [07-plugin-remote-design.md](07-plugin-remote-design.md) | 下一步形态：DSH 插件化（桥守护+设置卡）与扫码双登录设计（设计稿） |
 
 ## 快速开始
 
