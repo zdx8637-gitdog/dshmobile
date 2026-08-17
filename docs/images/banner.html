@@ -1,13 +1,4 @@
-// 生成 docs/images/banner.html（1280×640 横幅源文件，用真实截图叠层排版）
-// 布局：左 = 文字区（品牌/卖点/三端），中缝分隔线，右 = 插件面板主图 + 三张手机截图扇形叠层
-// 用法: node gen-banner.mjs   → 再用 Edge 无头截图 banner.html 得 banner.png
-import { writeFileSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const here = dirname(fileURLToPath(import.meta.url))
-
-const html = `<!DOCTYPE html>
+<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
   html, body { margin: 0; padding: 0; width: 1280px; height: 640px; overflow: hidden;
@@ -59,8 +50,4 @@ const html = `<!DOCTYPE html>
   <img class="phone p1" src="phone-1.jpg" alt=""/>
   <img class="phone p2" src="phone-2.jpg" alt=""/>
   <img class="phone p3" src="phone-3.jpg" alt=""/>
-</body></html>`
-
-mkdirSync(here, { recursive: true })
-writeFileSync(join(here, 'banner.html'), html)
-console.log('banner.html written')
+</body></html>
