@@ -1,21 +1,20 @@
 // @zdx8637/dshmobile-bridge · client 半边
 // 更名记录：@liustack/dshmobile-bridge → @zdx8637/dshmobile-bridge（改用自有 scope 以便发布 npm 社区）
-// 设置页「插件」tab 下的一张卡：桥状态、连接配置（可编辑保存）、
-// 扫码配对（二维码 + 6 位码 + 倒计时 + 刷新）。数据面 = settings 命名空间
-// `dshmobile`（宿主半边写桥状态与配对码，卡片经 settingsScope 读写）。
+// 左侧栏弹窗卡片：桥状态、连接配置（可编辑保存）、扫码配对（二维码 + 6 位码 + 倒计时 + 刷新）。
+// 数据面：不再走 settings 命名空间（rc.6 不暴露第三方命名空间），改为
+// 轮询宿主 127.0.0.1:17653 的 GET /state + POST /action —— 免补丁、跨平台、跨 DSH 版本。
 import * as React from "react";
 import { createSnapshotStore } from "@deepseek-ai/dsh-client-runtime/client";
 // qrcode-generator 会被构建进本 bundle（非 external）；CJS 库用默认导入 + 兜底
 import qrcodeDefault from "qrcode-generator";
 const qrcode: any = (qrcodeDefault as any)?.default ?? qrcodeDefault;
 
-const NS = "dshmobile";
+const PANEL_HTTP = "http://127.0.0.1:17653";
 
-export const inject = ["slots", "settingsScope"];
+export const inject = ["slots"];
 
 interface CardSnapshot {
   status: string;
-  writable: boolean;
   value: {
     enabled?: boolean;
     relayUrl?: string;
@@ -203,7 +202,7 @@ function DshmobileCard(props: any) {
         ) : null}
       </div>
       <p style={{ margin: 0, fontSize: 11, color: "#55585f" }}>
-        debug: scope={snap?.status} writable={String(snap?.writable)} actions={Object.keys(actions).join(",") || "无"}
+        debug: channel=localhost status={snap?.status} actions={Object.keys(actions).join(",") || "无"}
         {localError ? ` · ${localError}` : ""}
       </p>
       <p style={{ margin: 0, fontSize: 12, color: "#8b8e98" }}>
@@ -271,39 +270,51 @@ function DshmobileCard(props: any) {
 }
 
 export function apply(ctx: any) {
-  const scope = ctx.settingsScope.bind({ namespace: NS });
+  const post = async (path: string, body: any): Promise<void> => {
+    const res = await fetch(PANEL_HTTP + path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.ok === false) {
+      throw new Error(j?.error?.message ?? `HTTP ${res.status}`);
+    }
+  };
 
-  // 动作放在 store 里（hooks 是已验证的透传通道）；错误上抛给卡片显示
+  // 动作一律走本地 HTTP 通道（宿主 127.0.0.1:17653）；错误上抛给卡片显示
   const actions = {
-    refreshPairing: () =>
-      scope.set("refreshPairing", true).catch((e: unknown) => { throw e; }),
-    save: (patch: Record<string, unknown>) =>
-      Promise.all(Object.entries(patch).map(([k, v]) => scope.set(k, v))).catch(
-        (e: unknown) => { throw e; },
-      ),
+    refreshPairing: () => post("/action", { action: "refreshPairing" }),
+    save: (patch: Record<string, unknown>) => post("/action", { action: "save", payload: patch }),
     register: (req: { username: string; password: string }) =>
-      scope.set("registerRequest", JSON.stringify(req)).catch((e: unknown) => { throw e; }),
-    logout: () => scope.set("logoutRequest", true).catch((e: unknown) => { throw e; }),
+      post("/action", { action: "register", payload: req }),
+    logout: () => post("/action", { action: "logout" }),
   };
 
   const store = createSnapshotStore<CardSnapshot>({
-    status: "loading",
-    writable: false,
+    status: "connecting",
     value: null,
     actions,
   });
 
-  const publish = () => {
-    const snap = scope.getSnapshot() as any;
-    store.set({
-      status: snap?.status ?? "unavailable",
-      writable: snap?.writable ?? false,
-      value: (snap?.value ?? null) as any,
-      actions,
-    });
-  };
-  publish();
-  const off = scope.subscribe(publish);
+  // 轮询宿主状态（1s）；失败保留上次快照并显示原因
+  let alive = true;
+  let lastValue: CardSnapshot["value"] = null;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    while (alive) {
+      try {
+        const res = await fetch(`${PANEL_HTTP}/state`, { cache: "no-store" });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.ok !== true) throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
+        lastValue = (body?.data ?? null) as CardSnapshot["value"];
+        store.set({ status: "ok", value: lastValue, actions });
+      } catch (e: any) {
+        store.set({ status: `unavailable: ${e?.message ?? e}`, value: lastValue, actions });
+      }
+      await sleep(1000);
+    }
+  })();
 
   // 左侧栏底部的可折叠入口：箭头点开 → 弹出面板（复用卡片内容）→ 再点收起
   ctx.slots.inject("sidebar.footer.action", function* () {
@@ -321,7 +332,7 @@ export function apply(ctx: any) {
   });
 
   return () => {
-    off();
+    alive = false;
   };
 }
 

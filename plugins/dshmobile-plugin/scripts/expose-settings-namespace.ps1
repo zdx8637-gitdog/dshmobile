@@ -35,7 +35,13 @@ foreach ($f in $candidates) {
     continue
   }
   Copy-Item $f "$f.bak-dshmobile" -Force
+  $before = $t
   $t = $t.Replace('"web-search-deepseek"' + "`n" + ']', '"web-search-deepseek",' + "`n" + '	"dshmobile"' + "`n" + ']')
+  if (-not ($t -match '"dshmobile"')) {
+    Write-Host "FAILED: pattern not found in $f (DSH 版本文件格式可能已变化，未做任何修改)"
+    Write-Host "  请把该文件内容发给维护者，或在 dsh 升级后重试"
+    exit 1
+  }
   [System.IO.File]::WriteAllText($f, $t, [System.Text.UTF8Encoding]::new($false))
   Write-Host "patched: $f"
 }

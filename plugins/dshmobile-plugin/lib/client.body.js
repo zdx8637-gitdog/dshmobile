@@ -1728,8 +1728,8 @@ var import_client = require("@deepseek-ai/dsh-client-runtime/client");
 var import_qrcode_generator = __toESM(require_qrcode(), 1);
 var import_jsx_runtime = require("react/jsx-runtime");
 var qrcode = import_qrcode_generator.default?.default ?? import_qrcode_generator.default;
-var NS = "dshmobile";
-var inject = ["slots", "settingsScope"];
+var PANEL_HTTP = "http://127.0.0.1:17653";
+var inject = ["slots"];
 function drawQr(canvas, text) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -1922,10 +1922,8 @@ function DshmobileCard(props) {
       ] }) : null
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", { style: { margin: 0, fontSize: 11, color: "#55585f" }, children: [
-      "debug: scope=",
+      "debug: channel=localhost status=",
       snap?.status,
-      " writable=",
-      String(snap?.writable),
       " actions=",
       Object.keys(actions).join(",") || "\u65E0",
       localError ? ` \xB7 ${localError}` : ""
@@ -1976,40 +1974,45 @@ function DshmobileCard(props) {
   ] });
 }
 function apply(ctx) {
-  const scope = ctx.settingsScope.bind({ namespace: NS });
+  const post = async (path, body) => {
+    const res = await fetch(PANEL_HTTP + path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.ok === false) {
+      throw new Error(j?.error?.message ?? `HTTP ${res.status}`);
+    }
+  };
   const actions = {
-    refreshPairing: () => scope.set("refreshPairing", true).catch((e) => {
-      throw e;
-    }),
-    save: (patch) => Promise.all(Object.entries(patch).map(([k, v]) => scope.set(k, v))).catch(
-      (e) => {
-        throw e;
-      }
-    ),
-    register: (req) => scope.set("registerRequest", JSON.stringify(req)).catch((e) => {
-      throw e;
-    }),
-    logout: () => scope.set("logoutRequest", true).catch((e) => {
-      throw e;
-    })
+    refreshPairing: () => post("/action", { action: "refreshPairing" }),
+    save: (patch) => post("/action", { action: "save", payload: patch }),
+    register: (req) => post("/action", { action: "register", payload: req }),
+    logout: () => post("/action", { action: "logout" })
   };
   const store = (0, import_client.createSnapshotStore)({
-    status: "loading",
-    writable: false,
+    status: "connecting",
     value: null,
     actions
   });
-  const publish = () => {
-    const snap = scope.getSnapshot();
-    store.set({
-      status: snap?.status ?? "unavailable",
-      writable: snap?.writable ?? false,
-      value: snap?.value ?? null,
-      actions
-    });
-  };
-  publish();
-  const off = scope.subscribe(publish);
+  let alive = true;
+  let lastValue = null;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    while (alive) {
+      try {
+        const res = await fetch(`${PANEL_HTTP}/state`, { cache: "no-store" });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.ok !== true) throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
+        lastValue = body?.data ?? null;
+        store.set({ status: "ok", value: lastValue, actions });
+      } catch (e) {
+        store.set({ status: `unavailable: ${e?.message ?? e}`, value: lastValue, actions });
+      }
+      await sleep(1e3);
+    }
+  })();
   ctx.slots.inject("sidebar.footer.action", function* () {
     yield ctx.slots.register(
       {
@@ -2024,7 +2027,7 @@ function apply(ctx) {
     );
   });
   return () => {
-    off();
+    alive = false;
   };
 }
 function DshmobileSidebarAction(props) {

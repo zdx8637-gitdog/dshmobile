@@ -2,39 +2,64 @@
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import z from "@deepseek-ai/schemastery";
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 var name = "dshmobile-bridge";
-var inject = ["settings"];
-var NS = settingsNamespace("dshmobile");
 var HERE = path.dirname(fileURLToPath(import.meta.url));
-var STATE_DIR = path.join(HERE, "..", "state");
+var STATE_DIR = process.env.DSHMOBILE_STATE_DIR || path.join(HERE, "..", "state");
 var BRIDGE_MAIN = path.join(HERE, "..", "bridge", "main.js");
 var CONFIG_FILE = path.join(STATE_DIR, "config.json");
 var KEY_FILE = path.join(STATE_DIR, "machine-key.txt");
 var SESSION_FILE = path.join(STATE_DIR, "session.json");
-var schema = z.object({
-  enabled: z.boolean().default(true),
-  relayUrl: z.string().default("https://www.deepseek-claudex.cn"),
-  username: z.string().default(""),
-  password: z.string().default(""),
-  deviceLabel: z.string().default("DSH Bridge"),
-  // 常驻二维码（两种模式共用一个码位，内容按登录态切换）
-  mode: z.string().default("grant"),
-  // "pair" | "grant"
-  pairingCode: z.string().default(""),
-  pairingExpiresAt: z.string().default(""),
-  grantPairingId: z.string().default(""),
-  refreshPairing: z.boolean().default(false),
-  bridgeStatus: z.string().default("stopped"),
-  pairError: z.string().default(""),
-  registerRequest: z.string().default(""),
-  registerError: z.string().default(""),
-  // 退出登录通道：清除本机会话（含手机授权登录的）并转回 grant 模式
-  logoutRequest: z.boolean().default(false)
-});
+var PANEL_FILE = path.join(STATE_DIR, "panel.json");
+var HTTP_PORT = parseInt(process.env.DSHMOBILE_HTTP_PORT ?? "17653", 10);
+function defaultState() {
+  return {
+    enabled: true,
+    relayUrl: "https://www.deepseek-claudex.cn",
+    username: "",
+    password: "",
+    deviceLabel: "DSH Bridge",
+    mode: "grant",
+    pairingCode: "",
+    pairingExpiresAt: "",
+    grantPairingId: "",
+    bridgeStatus: "stopped",
+    pairError: "",
+    registerError: ""
+  };
+}
+function loadPanelState() {
+  try {
+    if (!existsSync(PANEL_FILE)) return {};
+    const v = JSON.parse(readFileSync(PANEL_FILE, "utf8"));
+    const out = {};
+    for (const k of ["enabled", "relayUrl", "username", "password", "deviceLabel"]) {
+      if (typeof v[k] === "string" || typeof v[k] === "boolean") out[k] = v[k];
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+function savePanelState(s) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(
+      PANEL_FILE,
+      JSON.stringify({
+        enabled: s.enabled,
+        relayUrl: s.relayUrl,
+        username: s.username,
+        password: s.password,
+        deviceLabel: s.deviceLabel
+      })
+    );
+  } catch (err) {
+    console.error("[dshmobile] persist panel state failed:", err?.message);
+  }
+}
 function machineGuid() {
   try {
     const out = execSync('reg query "HKLM\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid', {
@@ -76,15 +101,21 @@ function saveSession(s) {
   mkdirSync(STATE_DIR, { recursive: true });
   writeFileSync(SESSION_FILE, JSON.stringify(s));
 }
-function apply(ctx, _config = {}) {
-  const scope = ctx.settings.register(NS, schema, { applies: "live" });
+function apply(_ctx, _config = {}) {
+  let state = { ...defaultState(), ...loadPanelState() };
   let child = null;
   let stopped = false;
   let session = loadSession();
   let grantSecret = "";
   let pollTimer = null;
-  let current = null;
-  let busy = false;
+  let lastConfig = null;
+  function patchState(patch) {
+    state = { ...state, ...patch };
+  }
+  let chain = Promise.resolve();
+  function scheduleConfig() {
+    chain = chain.then(() => onConfig()).catch((err) => console.error("[dshmobile] config error:", err?.message ?? err));
+  }
   function stopBridge() {
     if (child) {
       const p = child;
@@ -94,8 +125,7 @@ function apply(ctx, _config = {}) {
       } catch {
       }
     }
-    scope.update({ bridgeStatus: "stopped" }).catch(() => {
-    });
+    patchState({ bridgeStatus: "stopped" });
   }
   function startBridge(value) {
     stopBridge();
@@ -123,19 +153,15 @@ function apply(ctx, _config = {}) {
       });
       child.on("exit", (code) => {
         if (!stopped && code !== null) {
-          scope.update({ bridgeStatus: `exited:${code}` }).catch(() => {
-          });
+          patchState({ bridgeStatus: `exited:${code}` });
         }
       });
       child.on("error", (err) => {
-        scope.update({ bridgeStatus: `error:${err.message}` }).catch(() => {
-        });
+        patchState({ bridgeStatus: `error:${err.message}` });
       });
-      scope.update({ bridgeStatus: "running" }).catch(() => {
-      });
+      patchState({ bridgeStatus: "running" });
     } catch (err) {
-      scope.update({ bridgeStatus: `error:${err?.message ?? err}` }).catch(() => {
-      });
+      patchState({ bridgeStatus: `error:${err?.message ?? err}` });
     }
   }
   async function restJson(base, pathname, options = {}) {
@@ -153,19 +179,18 @@ function apply(ctx, _config = {}) {
   }
   async function obtainAccessToken(base) {
     if (session?.accessToken) return session.accessToken;
-    const v = current;
-    if (!v?.username || !v?.password) {
+    if (!state.username || !state.password) {
       throw new Error("\u672C\u673A\u5C1A\u672A\u767B\u5F55\uFF1A\u8BF7\u7528\u624B\u673A App \u626B\u7801\u6388\u6743\uFF0C\u6216\u5728\u5361\u7247\u586B\u5199\u8D26\u53F7\u5BC6\u7801");
     }
     const login = await restJson(base, "/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username: v.username, password: v.password })
+      body: JSON.stringify({ username: state.username, password: state.password })
     });
     return login.data.accessToken;
   }
-  async function ensurePairCode(value) {
-    const base = value.relayUrl.replace(/\/$/, "");
-    const hasValid = value.mode === "pair" && value.pairingCode && value.pairingExpiresAt && new Date(value.pairingExpiresAt).getTime() > Date.now() + 3e4;
+  async function ensurePairCode() {
+    const base = state.relayUrl.replace(/\/$/, "");
+    const hasValid = state.mode === "pair" && state.pairingCode && state.pairingExpiresAt && new Date(state.pairingExpiresAt).getTime() > Date.now() + 3e4;
     if (hasValid) return;
     try {
       const accessToken = await obtainAccessToken(base);
@@ -197,7 +222,7 @@ function apply(ctx, _config = {}) {
           throw err;
         }
       }
-      await scope.update({
+      patchState({
         mode: "pair",
         pairingCode: created.data.code,
         pairingExpiresAt: created.data.expiresAt,
@@ -205,37 +230,10 @@ function apply(ctx, _config = {}) {
         pairError: ""
       });
     } catch (err) {
-      await scope.update({
+      patchState({
         pairError: `\u8D26\u53F7\u5BC6\u7801\u9519\u8BEF\uFF08${String(err?.message ?? err)}\uFF09\uFF0C\u5DF2\u5207\u6362\u4E3A\u6388\u6743\u4E8C\u7EF4\u7801\uFF1A\u7528\u624B\u673A App \u626B\u7801\u5373\u53EF\u6388\u6743\u672C\u673A\u767B\u5F55`
       });
-      await ensureGrantCode(value);
-    }
-  }
-  async function ensureGrantCode(value) {
-    const base = value.relayUrl.replace(/\/$/, "");
-    const hasValid = value.mode === "grant" && value.pairingCode && value.pairingExpiresAt && new Date(value.pairingExpiresAt).getTime() > Date.now() + 3e4 && value.grantPairingId && grantSecret;
-    if (hasValid && pollTimer) return;
-    stopPolling();
-    try {
-      const created = await restJson(base, "/pairing-codes/device", { method: "POST", body: "{}" });
-      grantSecret = created.data.requestSecret;
-      await scope.update({
-        mode: "grant",
-        pairingCode: created.data.code,
-        pairingExpiresAt: created.data.expiresAt,
-        grantPairingId: created.data.id,
-        pairError: ""
-      });
-      startPolling(base, created.data.id);
-    } catch (err) {
-      const msg = String(err?.message ?? err);
-      await scope.update({ pairError: msg });
-      if (/too many/i.test(msg)) {
-        setTimeout(() => {
-          ensureGrantCode(current ?? value).catch(() => {
-          });
-        }, 15e3);
-      }
+      await ensureGrantCode();
     }
   }
   function stopPolling() {
@@ -263,109 +261,206 @@ function apply(ctx, _config = {}) {
             username: res.data.user?.username ?? ""
           };
           saveSession(session);
-          const v = current;
-          await scope.update({
-            username: v?.username || session.username,
+          patchState({
+            username: state.username || session.username,
             mode: "pair",
             pairingCode: "",
             pairingExpiresAt: "",
             grantPairingId: "",
             bridgeStatus: "granted"
           });
-          if (v && v.enabled) startBridge(v);
-          ensurePairCode(current).catch(() => {
+          if (state.enabled) startBridge(state);
+          ensurePairCode().catch(() => {
           });
         }
       } catch {
       }
     }, 2e3);
   }
-  async function ensureQr(value) {
-    if (session || value.username && value.password) {
-      await ensurePairCode(value);
-    } else {
-      await ensureGrantCode(value);
+  async function ensureGrantCode() {
+    const base = state.relayUrl.replace(/\/$/, "");
+    const hasValid = state.mode === "grant" && state.pairingCode && state.pairingExpiresAt && new Date(state.pairingExpiresAt).getTime() > Date.now() + 3e4 && state.grantPairingId && grantSecret;
+    if (hasValid && pollTimer) return;
+    stopPolling();
+    try {
+      const created = await restJson(base, "/pairing-codes/device", { method: "POST", body: "{}" });
+      grantSecret = created.data.requestSecret;
+      patchState({
+        mode: "grant",
+        pairingCode: created.data.code,
+        pairingExpiresAt: created.data.expiresAt,
+        grantPairingId: created.data.id,
+        pairError: ""
+      });
+      startPolling(base, created.data.id);
+    } catch (err) {
+      const msg = String(err?.message ?? err);
+      patchState({ pairError: msg });
+      if (/too many/i.test(msg)) {
+        setTimeout(() => {
+          ensureGrantCode().catch(() => {
+          });
+        }, 15e3);
+      }
     }
   }
-  async function handleRegister(request) {
+  async function ensureQr() {
+    if (session || state.username && state.password) {
+      await ensurePairCode();
+    } else {
+      await ensureGrantCode();
+    }
+  }
+  async function handleRegister(username, password) {
     try {
-      const { username: u, password: p } = JSON.parse(request);
-      if (!u || !p) throw new Error("\u8D26\u53F7/\u5BC6\u7801\u4E0D\u80FD\u4E3A\u7A7A");
-      const base = (current?.relayUrl ?? "").replace(/\/$/, "");
+      const base = state.relayUrl.replace(/\/$/, "");
       await restJson(base, "/auth/register", {
         method: "POST",
-        body: JSON.stringify({ username: u, password: p })
+        body: JSON.stringify({ username, password })
       });
-      await scope.update({ registerRequest: "", registerError: "" });
+      patchState({ registerError: "" });
     } catch (err) {
       const msg = String(err?.message ?? err);
       const friendly = /already exists/i.test(msg) ? "\u8BE5\u8D26\u53F7\u5DF2\u5B58\u5728\uFF1A\u8BF7\u70B9\u300C\u4FDD\u5B58\u5E76\u8FDE\u63A5\uFF08\u5DF2\u6709\u8D26\u53F7\uFF09\u300D\u76F4\u63A5\u767B\u5F55" : msg;
-      await scope.update({ registerRequest: "", registerError: friendly });
+      patchState({ registerError: friendly });
     }
   }
-  async function onConfig(next) {
-    const prev = current;
-    current = next;
-    if (busy) return;
-    busy = true;
+  async function handleLogout() {
+    session = null;
+    grantSecret = "";
+    stopPolling();
     try {
-      const shouldRun = next.enabled && (session !== null || Boolean(next.username && next.password));
-      const prevShouldRun = prev ? prev.enabled && (session !== null || Boolean(prev.username && prev.password)) : false;
-      const cfgChanged = !prev || prev.relayUrl !== next.relayUrl || prev.username !== next.username || prev.password !== next.password || prev.deviceLabel !== next.deviceLabel || prev.enabled !== next.enabled;
-      if (cfgChanged || !child && shouldRun) {
-        if (shouldRun) startBridge(next);
-        else stopBridge();
-      }
-      if (next.registerRequest) {
-        await handleRegister(next.registerRequest);
-      }
-      if (next.logoutRequest) {
-        session = null;
-        grantSecret = "";
-        stopPolling();
-        try {
-          rmSync(SESSION_FILE, { force: true });
-        } catch {
-        }
-        stopBridge();
-        await scope.update({
-          logoutRequest: false,
-          username: "",
-          password: "",
-          mode: "grant",
-          pairingCode: "",
-          pairingExpiresAt: "",
-          grantPairingId: "",
-          registerError: "",
-          pairError: ""
-        });
-      }
-      if (next.refreshPairing) {
-        await scope.update({ refreshPairing: false, pairingCode: "", pairingExpiresAt: "" });
-      }
-      const credsChanged = !prev || prev.username !== next.username || prev.password !== next.password;
-      if (next.refreshPairing || credsChanged || !next.pairingCode) {
-        await ensureQr(next);
-      }
-    } finally {
-      busy = false;
+      rmSync(SESSION_FILE, { force: true });
+    } catch {
+    }
+    stopBridge();
+    patchState({
+      username: "",
+      password: "",
+      mode: "grant",
+      pairingCode: "",
+      pairingExpiresAt: "",
+      grantPairingId: "",
+      registerError: "",
+      pairError: ""
+    });
+    savePanelState(state);
+    scheduleConfig();
+  }
+  async function onConfig() {
+    const next = { ...state };
+    const prev = lastConfig;
+    lastConfig = next;
+    const shouldRun = next.enabled && (session !== null || Boolean(next.username && next.password));
+    const prevShouldRun = prev ? prev.enabled && (session !== null || Boolean(prev.username && prev.password)) : false;
+    const cfgChanged = !prev || prev.relayUrl !== next.relayUrl || prev.username !== next.username || prev.password !== next.password || prev.deviceLabel !== next.deviceLabel || prev.enabled !== next.enabled;
+    if (cfgChanged || !child && shouldRun) {
+      if (shouldRun) startBridge(next);
+      else stopBridge();
+    }
+    const credsChanged = !prev || prev.username !== next.username || prev.password !== next.password;
+    if (credsChanged || !next.pairingCode) {
+      await ensureQr();
     }
   }
-  const offWatch = scope.watch((next) => {
-    onConfig(next).catch(() => {
+  async function handleAction(action, payload) {
+    switch (action) {
+      case "save": {
+        for (const k of ["relayUrl", "username", "password", "deviceLabel", "enabled"]) {
+          if (payload && payload[k] !== void 0) state[k] = payload[k];
+        }
+        savePanelState(state);
+        scheduleConfig();
+        break;
+      }
+      case "register": {
+        const u = String(payload?.username ?? "").trim();
+        const p = String(payload?.password ?? "");
+        if (!u || !p) throw new Error("\u8D26\u53F7/\u5BC6\u7801\u4E0D\u80FD\u4E3A\u7A7A");
+        state.username = u;
+        state.password = p;
+        savePanelState(state);
+        handleRegister(u, p).catch((err) => console.error("[dshmobile] register error:", err?.message ?? err));
+        scheduleConfig();
+        break;
+      }
+      case "logout": {
+        await handleLogout();
+        break;
+      }
+      case "refreshPairing": {
+        patchState({ pairingCode: "", pairingExpiresAt: "" });
+        scheduleConfig();
+        break;
+      }
+      default:
+        throw new Error("unknown action: " + action);
+    }
+  }
+  function startServer() {
+    const server2 = createServer((req, res) => {
+      const origin = String(req.headers.origin ?? "");
+      const corsOk = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin);
+      const headers = {
+        "Access-Control-Allow-Origin": corsOk ? origin : "null",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      };
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, headers);
+        res.end();
+        return;
+      }
+      const send = (code, body) => {
+        res.writeHead(code, headers);
+        res.end(JSON.stringify(body));
+      };
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/state") {
+        send(200, { ok: true, data: state });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/action") {
+        let raw = "";
+        req.on("data", (c) => {
+          raw += c;
+        });
+        req.on("end", () => {
+          (async () => {
+            try {
+              const body = JSON.parse(raw || "{}");
+              await handleAction(body.action, body.payload);
+              send(200, { ok: true });
+            } catch (err) {
+              send(200, { ok: false, error: { message: String(err?.message ?? err) } });
+            }
+          })();
+        });
+        return;
+      }
+      send(404, { ok: false, error: { message: "not found" } });
     });
-  });
-  onConfig(scope.get()).catch(() => {
-  });
+    server2.on("error", (err) => {
+      console.error(`[dshmobile] panel http server error (port ${HTTP_PORT}):`, err?.message ?? err);
+    });
+    server2.listen(HTTP_PORT, "127.0.0.1");
+    return server2;
+  }
+  const server = startServer();
+  scheduleConfig();
   return () => {
     stopped = true;
-    offWatch();
     stopPolling();
     stopBridge();
+    try {
+      server.close();
+    } catch {
+    }
   };
 }
 export {
   apply,
-  inject,
   name
 };

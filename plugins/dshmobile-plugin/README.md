@@ -23,19 +23,15 @@ npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@lates
 手机 App：扫描面板二维码 → 落地页下载 APK（或从
 [发布页](https://github.com/zdx8637-gitdog/dshmobile/releases)获取）。
 
-## ⚠️ 已知限制（DSH 0.1.0-rc.6）
+## 免补丁：面板走本地通道
 
-第三方插件的 settings 命名空间默认**不对 Web 界面暴露**（DSH 上游标注为
-deferred work）。本插件需要一行本地补丁，否则面板会显示
-`scope=unavailable`：
+DSH 0.1.0-rc.6 默认不向浏览器暴露第三方 settings 命名空间（上游标注为
+deferred work）。本插件**不依赖该通道**：面板与宿主通过 `127.0.0.1:17653`
+的本地 HTTP 通信（轮询状态 + 下发动作，CORS 仅放行本机来源），因此
 
-```powershell
-powershell -File "$env:LOCALAPPDATA\npm-cache\_npx\*\node_modules\@zdx8637\dshmobile-bridge\scripts\expose-settings-namespace.ps1"
-# 或直接运行：npx 安装目录下 node_modules/@zdx8637/dshmobile-bridge/scripts/expose-settings-namespace.ps1
-# 每个 dsh 安装目录运行一次；dsh 升级后需重跑
-```
-
-上游开放"插件自注册命名空间即可远程暴露"后，此补丁可移除。
+- 一条命令安装即用，**无需任何本地补丁**；
+- Windows/macOS/Linux 通用；
+- DSH 升级不受影响（历史版本 0.1.0-beta.3 及更早需要 `scripts/expose-settings-namespace.ps1` 补丁，已废弃）。
 
 ## relay 说明
 
