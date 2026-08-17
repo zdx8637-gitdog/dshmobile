@@ -4,7 +4,7 @@
 审批、提问应答、模型切换、文件浏览。
 
 **电脑端以 DSH 插件形态分发**（`dshmobile-plugin/`，npm 包
-`@zdx8637-gitdog/dshmobile-bridge`）：Web 左侧栏底部箭头弹窗，常驻二维码——
+`@zdx8637/dshmobile-bridge`）：Web 左侧栏底部箭头弹窗，常驻二维码——
 微信扫=下载 App、相机扫=跳 App、App 内扫=登录/授权，一个码全搞定。
 
 ```
@@ -21,7 +21,7 @@
 ## 用户安装（电脑端）
 
 ```sh
-npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637-gitdog/dshmobile-bridge@latest
+npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest
 ```
 
 > 前置 pnpm；DSH 0.1.0-rc.6 需运行插件附带的 settings 暴露补丁（上游 deferred work，

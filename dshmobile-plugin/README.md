@@ -1,4 +1,4 @@
-# @zdx8637-gitdog/dshmobile-bridge
+# @zdx8637/dshmobile-bridge
 
 DSH 插件：让手机远程控制本机 DeepSeek Harness（dshmobile 三端里的「电脑端」）。
 
@@ -11,7 +11,7 @@ DSH 插件：让手机远程控制本机 DeepSeek Harness（dshmobile 三端里�
 ## 安装
 
 ```sh
-npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637-gitdog/dshmobile-bridge@latest
+npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest
 # 重启 dsh 后，Web 左侧栏底部出现 ▶ 箭头，点开即配置面板
 ```
 
@@ -29,7 +29,7 @@ deferred work）。本插件需要一行本地补丁，否则面板会显示
 
 ```powershell
 powershell -File "$env:LOCALAPPDATA\npm-cache\_npx\*\node_modules\@zdx8637-gitdog\dshmobile-bridge\scripts\expose-settings-namespace.ps1"
-# 或直接运行：npx 安装目录下 node_modules/@zdx8637-gitdog/dshmobile-bridge/scripts/expose-settings-namespace.ps1
+# 或直接运行：npx 安装目录下 node_modules/@zdx8637/dshmobile-bridge/scripts/expose-settings-namespace.ps1
 # 每个 dsh 安装目录运行一次；dsh 升级后需重跑
 ```
 

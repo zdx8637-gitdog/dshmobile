@@ -2,4 +2,4 @@
 # 与 client 半边（设置页「DSH Mobile 远程桥接」卡）同属一个包、一行注册。
 - insert:
     - id: dshmobile-bridge
-      name: '@zdx8637-gitdog/dshmobile-bridge'
+      name: '@zdx8637/dshmobile-bridge'
