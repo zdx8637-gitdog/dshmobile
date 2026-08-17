@@ -153,6 +153,11 @@ export function apply(_ctx: any, _config: any = {}) {
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let lastConfig: PanelState | null = null;
 
+  // 手机授权登录的会话重启后不回填账号（panel.json 只存手填值）→ 面板需显示已登录账号与退出按钮
+  if (!state.username && session?.username) {
+    state = { ...state, username: session.username };
+  }
+
   function patchState(patch: Partial<PanelState>) {
     state = { ...state, ...patch };
   }

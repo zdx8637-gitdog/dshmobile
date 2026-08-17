@@ -109,6 +109,9 @@ function apply(_ctx, _config = {}) {
   let grantSecret = "";
   let pollTimer = null;
   let lastConfig = null;
+  if (!state.username && session?.username) {
+    state = { ...state, username: session.username };
+  }
   function patchState(patch) {
     state = { ...state, ...patch };
   }
