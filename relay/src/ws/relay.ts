@@ -416,8 +416,11 @@ class RelayManager {
     envelope: RelayEnvelope
   ): void {
     const msgType = typeof envelope.type === "string" ? envelope.type : "unknown";
+    // 安全（审计 P1）：pending 请求按 (设备, requestId) 复合键索引——客户端提供的
+    // requestId 不再能跨设备覆盖/劫持他人请求，避免响应错投到错误客户端。
+    const scopedKey = `${client.targetDeviceId}:${requestId}`;
     const resourceSubscriptionId =
-      msgType === "resources.subscribe" ? `pending:${requestId}` : undefined;
+      msgType === "resources.subscribe" ? `pending:${scopedKey}` : undefined;
     if (resourceSubscriptionId !== undefined) {
       this.addResourceSubscription({
         subscriptionId: resourceSubscriptionId,
@@ -425,7 +428,7 @@ class RelayManager {
         afterSequence: getAfterSequence(envelope),
       });
     }
-    this.pendingRequests.set(requestId, {
+    this.pendingRequests.set(scopedKey, {
       requestId,
       clientWs: client.ws,
       deviceId: client.targetDeviceId,
@@ -439,11 +442,12 @@ class RelayManager {
   }
 
   resolvePendingRequest(
+    deviceId: string,
     requestId: string
   ): PendingRequest | undefined {
-    const pending = this.pendingRequests.get(requestId);
+    const pending = this.pendingRequests.get(`${deviceId}:${requestId}`);
     if (pending) {
-      this.pendingRequests.delete(requestId);
+      this.pendingRequests.delete(`${deviceId}:${requestId}`);
     }
     return pending;
   }
@@ -485,6 +489,15 @@ export const relayManager = new RelayManager();
 
 // ---- Validation ----
 
+function safeDecodeComponent(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    // 畸形编码（如 /ws/client?x=%）不应导致进程崩溃：静默丢弃该参数
+    return "";
+  }
+}
+
 function parseQueryParams(
   url: string | undefined
 ): Record<string, string> {
@@ -494,8 +507,12 @@ function parseQueryParams(
   const qs = url.slice(idx + 1);
   const params: Record<string, string> = {};
   for (const part of qs.split("&")) {
-    const [key, val] = part.split("=");
-    if (key) params[decodeURIComponent(key)] = decodeURIComponent(val ?? "");
+    if (!part) continue;
+    const eq = part.indexOf("=");
+    const key = eq === -1 ? part : part.slice(0, eq);
+    const val = eq === -1 ? "" : part.slice(eq + 1);
+    const k = safeDecodeComponent(key);
+    if (k) params[k] = safeDecodeComponent(val);
   }
   return params;
 }
@@ -874,7 +891,7 @@ export function handleBridgeConnection(
       const responseType = typeof envelopeRecord.type === "string"
         ? envelopeRecord.type
         : "unknown";
-      const pending = relayManager.resolvePendingRequest(requestId);
+      const pending = relayManager.resolvePendingRequest(deviceId, requestId);
       if (pending && pending.clientWs.readyState === WebSocket.OPEN) {
         if (responseType === "resources.subscribe") {
           const subscriptionId =
@@ -966,6 +983,16 @@ export function handleClientConnection(
     if (!targetDeviceId) {
       logger.warn({ connId }, "client rejected - missing targetDeviceId");
       ws.close(4002, "missing targetDeviceId");
+      return;
+    }
+
+    // 安全（审计 P1→实为 P0 级）：连接即校验设备归属——任何已登录用户只能订阅
+    // 自己账号下的设备事件流，否则知道 deviceId 即可实时读取他人会话内容。
+    // 统一回 4003（与"设备不存在"同码），不向未授权者泄露设备存在性。
+    const ownedDevice = deviceModel.findByIdAndUser(targetDeviceId, userId);
+    if (!ownedDevice || ownedDevice.revoked_at) {
+      logger.warn({ connId, targetDeviceId }, "client rejected - device not owned or revoked");
+      ws.close(4003, "device not found");
       return;
     }
   }

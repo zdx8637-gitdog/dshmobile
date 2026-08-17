@@ -111,7 +111,7 @@ describe("Phase 6-D Fix: Bearer Product Path", () => {
   // 2. Cross-user isolation
   // ═══════════════════════════════════════════════════════
   describe("Cross-user isolation", () => {
-    it("userB cannot access userA device — gets FORBIDDEN", async () => {
+    it("userB cannot access userA device — connection rejected at handshake", async () => {
       const { userId: userA } = await createUser(ctx.db, "usera");
       const { userId: userB } = await createUser(ctx.db, "userb");
       await createDevice(ctx.db, userA, "device-a");
@@ -120,40 +120,20 @@ describe("Phase 6-D Fix: Bearer Product Path", () => {
       const deviceTokenA = signDeviceToken("device-a", userA);
       const bridgeA = await connectAuthWs(ctx, "/ws/bridge", deviceTokenA);
 
-      // Client for userB (with userB accessToken)
+      // userB 的 accessToken 有效，但无权访问 userA 的设备 → 连接建立即被服务端关闭
+      // （4003，与"设备不存在"同码，不泄露设备存在性），收不到任何事件。
       const accessTokenB = signAccessToken(userB);
       const clientB = await connectAuthWs(
         ctx, `/ws/client?clientId=evil-client&targetDeviceId=device-a`, accessTokenB
       );
-      await clientB.nextMessage(); // device.status
+      const closeCode = await clientB.waitForClose();
+      expect(closeCode).toBe(4003);
 
-      // userB tries to access userA's device
-      clientB.ws.send(JSON.stringify({
-        schemaVersion: 1,
-        envelopeId: "cross-owner-1",
-        kind: "request",
-        requestId: "cross-owner-1",
-        type: "local.health.get",
-        sentAt: now(),
-        actor: { clientId: "evil-client" },
-        target: { deviceId: "device-a" },
-        payload: {},
-      }));
-
-      // Client must receive FORBIDDEN error
-      const msg = await clientB.nextMessage();
-      expect(msg.kind).toBe("error");
-      const payload = msg.payload as Record<string, unknown>;
-      expect(payload.ok).toBe(false);
-      expect((payload.error as Record<string, unknown>)?.code).toBe("FORBIDDEN");
-
-      // BridgeA must NOT receive the request
-      const drained = bridgeA.drainMessages();
-      const crossed = drained.filter((m: any) => m.requestId === "cross-owner-1");
-      expect(crossed.length).toBe(0);
+      // 无 device.status，更无任何转发事件
+      const drained = clientB.drainMessages();
+      expect(drained.length).toBe(0);
 
       bridgeA.ws.close();
-      clientB.ws.close();
     });
   });
 

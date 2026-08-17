@@ -287,7 +287,7 @@ describe("Phase 6-D Web: Browser Protocol Auth (Sec-WebSocket-Protocol)", () => 
   // 6. Ownership check still enforced with protocol auth
   // ═══════════════════════════════════════════════════════
   describe("ownership check with protocol auth", () => {
-    it("userB via protocol auth cannot access userA device", async () => {
+    it("userB via protocol auth cannot access userA device — rejected at handshake", async () => {
       const { userId: userA } = await createUser(ctx.db, "ownera");
       const { userId: userB } = await createUser(ctx.db, "ownerb");
       await createDevice(ctx.db, userA, "owned-dev-a");
@@ -296,32 +296,16 @@ describe("Phase 6-D Web: Browser Protocol Auth (Sec-WebSocket-Protocol)", () => 
       const deviceTokenA = signDeviceToken("owned-dev-a", userA);
       const bridge = await connectAuthWs(ctx, "/ws/bridge", deviceTokenA);
 
-      // Client for userB via protocol auth
+      // userB via protocol auth：连接建立即被服务端关闭（4003），收不到任何事件
       const accessTokenB = signAccessToken(userB);
       const clientB = await connectProtocolWs(
         ctx, `/ws/client?clientId=evil-proto&targetDeviceId=owned-dev-a`, accessTokenB
       );
-      await clientB.nextMessage(); // device.status
-
-      clientB.ws.send(JSON.stringify({
-        schemaVersion: 1,
-        envelopeId: "proto-cross",
-        kind: "request",
-        requestId: "proto-cross",
-        type: "local.health.get",
-        sentAt: now(),
-        actor: { clientId: "evil-proto" },
-        target: { deviceId: "owned-dev-a" },
-        payload: {},
-      }));
-
-      const msg = await clientB.nextMessage();
-      expect(msg.kind).toBe("error");
-      const payload = msg.payload as Record<string, unknown>;
-      expect((payload.error as Record<string, unknown>)?.code).toBe("FORBIDDEN");
+      const closeCode = await clientB.waitForClose();
+      expect(closeCode).toBe(4003);
+      expect(clientB.drainMessages().length).toBe(0);
 
       bridge.ws.close();
-      clientB.ws.close();
     });
   });
 });

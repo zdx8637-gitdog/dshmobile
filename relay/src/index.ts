@@ -27,10 +27,22 @@ server.on("upgrade", (req, socket, head) => {
 
   if (pathname === "/ws/bridge" || pathname === "/ws/client") {
     wss.handleUpgrade(req, socket, head, (ws) => {
-      if (pathname === "/ws/bridge") {
-        handleBridgeConnection(ws, req);
-      } else {
-        handleClientConnection(ws, req);
+      // 纵深防御（审计 P0）：连接建立阶段的任何意外异常都只关闭该连接，
+      // 绝不允许抛出到 upgrade 事件之外导致进程崩溃（DoS）。
+      try {
+        if (pathname === "/ws/bridge") {
+          handleBridgeConnection(ws, req);
+        } else {
+          handleClientConnection(ws, req);
+        }
+      } catch (err) {
+        logger.error(
+          { path: pathname, error: (err as Error)?.message ?? String(err) },
+          "connection setup threw - closing socket"
+        );
+        try {
+          ws.close(1011, "internal error");
+        } catch {}
       }
     });
     return;

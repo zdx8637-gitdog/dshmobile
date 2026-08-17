@@ -40,8 +40,9 @@ describe("Security: Rate limiting", () => {
       results.push(res.status);
     }
 
-    // First 5 should be 201, next should be 429
-    expect(results.filter((s) => s === 201).length).toBe(5);
-    expect(results.filter((s) => s === 429).length).toBe(3);
+    // 流程面限流已放宽到 300/min（verify 端点保持 5/min 严格）：
+    // 8 次创建全部放行，不触发 429
+    expect(results.filter((s) => s === 201).length).toBe(8);
+    expect(results.filter((s) => s === 429).length).toBe(0);
   }, 15000);
 });
