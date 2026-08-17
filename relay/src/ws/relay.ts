@@ -1,6 +1,6 @@
 import { WebSocket, WebSocketServer } from "ws";
 import { IncomingMessage } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { config } from "../config.js";
 import { logger } from "../lib/logger.js";
 import { verifyAccessToken, verifyDeviceToken } from "../lib/jwt.js";
@@ -502,10 +502,11 @@ function parseQueryParams(
 
 function validateDevToken(params: Record<string, string>): boolean {
   const token = params.devToken;
-  if (!token || token !== config.relayDevToken) {
-    return false;
-  }
-  return true;
+  const expected = config.relayDevToken;
+  if (!token || !expected) return false;
+  const a = Buffer.from(token);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function validateEnvelope(
