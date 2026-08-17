@@ -1,4 +1,5 @@
-// @liustack/dshmobile-bridge · client 半边
+// @zdx8637/dshmobile-bridge · client 半边
+// 更名记录：@liustack/dshmobile-bridge → @zdx8637/dshmobile-bridge（改用自有 scope 以便发布 npm 社区）
 // 设置页「插件」tab 下的一张卡：桥状态、连接配置（可编辑保存）、
 // 扫码配对（二维码 + 6 位码 + 倒计时 + 刷新）。数据面 = settings 命名空间
 // `dshmobile`（宿主半边写桥状态与配对码，卡片经 settingsScope 读写）。

@@ -1,4 +1,5 @@
-// @liustack/dshmobile-bridge · host 半边
+// @zdx8637/dshmobile-bridge · host 半边
+// 更名记录：@liustack/dshmobile-bridge → @zdx8637/dshmobile-bridge（改用自有 scope 以便发布 npm 社区）
 // 职责：
 //   1. settings 命名空间 `dshmobile`（连接配置 + 桥状态 + 二维码展示字段）；
 //   2. **常驻二维码**：与插件登录态无关，永远可扫——

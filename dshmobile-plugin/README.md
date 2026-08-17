@@ -28,7 +28,7 @@ deferred work）。本插件需要一行本地补丁，否则面板会显示
 `scope=unavailable`：
 
 ```powershell
-powershell -File "$env:LOCALAPPDATA\npm-cache\_npx\*\node_modules\@zdx8637-gitdog\dshmobile-bridge\scripts\expose-settings-namespace.ps1"
+powershell -File "$env:LOCALAPPDATA\npm-cache\_npx\*\node_modules\@zdx8637\dshmobile-bridge\scripts\expose-settings-namespace.ps1"
 # 或直接运行：npx 安装目录下 node_modules/@zdx8637/dshmobile-bridge/scripts/expose-settings-namespace.ps1
 # 每个 dsh 安装目录运行一次；dsh 升级后需重跑
 ```
