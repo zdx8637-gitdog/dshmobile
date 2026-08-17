@@ -11,21 +11,40 @@
 // 收益：一条命令安装即用、跨平台、DSH 升级不受影响、无需任何本地补丁。
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const name = "dshmobile-bridge";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const STATE_DIR = process.env.DSHMOBILE_STATE_DIR || path.join(HERE, "..", "state");
+// 状态目录放在用户主目录（与包目录解耦）：插件升级/重装不会丢登录态与面板配置。
+const STATE_DIR = process.env.DSHMOBILE_STATE_DIR || path.join(homedir(), ".dsh-mobile");
 const BRIDGE_MAIN = path.join(HERE, "..", "bridge", "main.js");
 const CONFIG_FILE = path.join(STATE_DIR, "config.json");
 const KEY_FILE = path.join(STATE_DIR, "machine-key.txt");
 const SESSION_FILE = path.join(STATE_DIR, "session.json");
 const PANEL_FILE = path.join(STATE_DIR, "panel.json");
 const HTTP_PORT = parseInt(process.env.DSHMOBILE_HTTP_PORT ?? "17653", 10);
+
+/** 迁移 ≤0.1.0-beta.5 时代的包内 state 目录（升级后旧目录可能已随包消失；存在则搬走）。 */
+function migrateLegacyState() {
+  const legacy = process.env.DSHMOBILE_STATE_DIR ? null : path.join(HERE, "..", "state");
+  if (!legacy || !existsSync(legacy)) return;
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    for (const f of ["session.json", "panel.json", "machine-key.txt"]) {
+      const from = path.join(legacy, f);
+      const to = path.join(STATE_DIR, f);
+      if (existsSync(from) && !existsSync(to)) copyFileSync(from, to);
+    }
+  } catch (err: any) {
+    console.error("[dshmobile] legacy state migration failed:", err?.message);
+  }
+}
+migrateLegacyState();
 
 interface PanelState {
   enabled: boolean;

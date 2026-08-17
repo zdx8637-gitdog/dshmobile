@@ -1,19 +1,35 @@
 // src/index.ts
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 var name = "dshmobile-bridge";
 var HERE = path.dirname(fileURLToPath(import.meta.url));
-var STATE_DIR = process.env.DSHMOBILE_STATE_DIR || path.join(HERE, "..", "state");
+var STATE_DIR = process.env.DSHMOBILE_STATE_DIR || path.join(homedir(), ".dsh-mobile");
 var BRIDGE_MAIN = path.join(HERE, "..", "bridge", "main.js");
 var CONFIG_FILE = path.join(STATE_DIR, "config.json");
 var KEY_FILE = path.join(STATE_DIR, "machine-key.txt");
 var SESSION_FILE = path.join(STATE_DIR, "session.json");
 var PANEL_FILE = path.join(STATE_DIR, "panel.json");
 var HTTP_PORT = parseInt(process.env.DSHMOBILE_HTTP_PORT ?? "17653", 10);
+function migrateLegacyState() {
+  const legacy = process.env.DSHMOBILE_STATE_DIR ? null : path.join(HERE, "..", "state");
+  if (!legacy || !existsSync(legacy)) return;
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    for (const f of ["session.json", "panel.json", "machine-key.txt"]) {
+      const from = path.join(legacy, f);
+      const to = path.join(STATE_DIR, f);
+      if (existsSync(from) && !existsSync(to)) copyFileSync(from, to);
+    }
+  } catch (err) {
+    console.error("[dshmobile] legacy state migration failed:", err?.message);
+  }
+}
+migrateLegacyState();
 function defaultState() {
   return {
     enabled: true,
