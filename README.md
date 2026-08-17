@@ -1,6 +1,13 @@
-# dshmobile — DeepSeek Harness 手机远程控制套件
+# dshmobile — DeepSeek Harness 的 Paseo
 
 <p align="center"><img src="docs/images/banner.png" width="760" alt="dshmobile banner"/></p>
+
+**开箱即用的手机远程客户端**：装插件 → 扫码 → 手机接着干。不是把 DSH Web 暴露到公网的
+Remote Access，而是为 DSH 建立一个真正的 Remote Client——**不需要懂 Tailscale、隧道、
+端口、NAT 或任何网络概念**，不需要修改 DSH，一条命令装完即可用。
+
+> 架构灵感来自 [Paseo](https://github.com/getpaseo/paseo)（开源界的「手机操控 coding agent」
+> 品类先行者）——手机 App ↔ 云端 relay ↔ PC bridge 三段式。我们是 DSH 生态里的那个 Paseo。
 
 在手机上远程控制本机 DeepSeek Harness（DSH）：扫码配对 → 设备 → 会话树 → 对话、
 审批、提问应答、模型切换、文件浏览。

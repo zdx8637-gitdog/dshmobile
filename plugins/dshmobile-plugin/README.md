@@ -1,6 +1,7 @@
 # @zdx8637/dshmobile-bridge
 
-DSH 插件：让手机远程控制本机 DeepSeek Harness（dshmobile 三端里的「电脑端」）。
+**DeepSeek Harness 的 Paseo · 开箱即用**：一条命令安装，无需任何网络配置、无需本地补丁，
+重启 dsh 后左侧栏即出现常驻二维码面板（跨平台，DSH 升级免疫）。
 
 - **常驻二维码**（Web 左侧栏底部箭头弹窗）：与登录态无关，永远可扫——
   · 电脑已登录 → 手机（哪怕未登录）扫码直接登录同账号；
