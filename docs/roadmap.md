@@ -1,10 +1,9 @@
-# dshmobile 路线图：DeepSeek Harness 的 Paseo
+# dshmobile 路线图：开箱即用的手机 Remote Client
 
 > 定位一句话：**其他 Remote 项目解决 Remote Access（把 DSH Web 暴露出来），
 > dshmobile 解决 Remote Client（拿着手机，最快继续电脑上的 DSH 工作）。**
->
-> 架构灵感来自 [Paseo](https://github.com/getpaseo/paseo)（开源界「手机操控 coding agent」
-> 品类先行者）：Android App ↔ 云端 relay ↔ PC bridge。我们是 DSH 生态里的那个 Paseo。
+
+> 注：App ↔ relay ↔ bridge 三段式架构的灵感来自 Paseo（getpaseo/paseo）。
 
 ## 设计原则
 
