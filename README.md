@@ -1,5 +1,7 @@
 # dshmobile — DeepSeek Harness 手机远程控制套件
 
+<p align="center"><img src="docs/images/banner.png" width="760" alt="dshmobile banner"/></p>
+
 在手机上远程控制本机 DeepSeek Harness（DSH）：扫码配对 → 设备 → 会话树 → 对话、
 审批、提问应答、模型切换、文件浏览。
 
@@ -17,6 +19,20 @@
                                                         │ DeepSeek Harness │
                                                         └──────────────────┘
 ```
+
+## 界面一览
+
+手机端（左→右：扫码登录 → 会话/设备 → 对话）：
+
+<p align="center">
+  <img src="docs/images/phone-1.jpg" width="200" alt="扫码登录"/>
+  <img src="docs/images/phone-2.jpg" width="200" alt="会话/设备"/>
+  <img src="docs/images/phone-3.jpg" width="200" alt="对话"/>
+</p>
+
+电脑端插件面板（Web 左侧栏底部箭头 → 弹窗，常驻二维码与登录态无关）：
+
+<p align="center"><img src="docs/images/plugin-panel.jpg" width="520" alt="DSH 插件面板"/></p>
 
 ## 用户安装（电脑端）
 

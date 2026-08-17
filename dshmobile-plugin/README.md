@@ -8,6 +8,8 @@ DSH 插件：让手机远程控制本机 DeepSeek Harness（dshmobile 三端里�
 - **bridge 子进程守护**：账号密码模式或手机授权 token 模式（无密码直连，401 自动刷新）；
 - 手机端一码三用：微信扫=下载 App、相机扫=跳 App 配对、App 内扫=直接登录/授权。
 
+<p align="center"><img src="https://raw.githubusercontent.com/zdx8637-gitdog/dshmobile/main/docs/images/plugin-panel.jpg" width="480" alt="DSH 插件面板（左侧栏常驻二维码）"/></p>
+
 ## 安装
 
 ```sh
