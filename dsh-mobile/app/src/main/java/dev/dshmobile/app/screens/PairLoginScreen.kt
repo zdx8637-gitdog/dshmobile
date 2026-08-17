@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.dshmobile.app.state.normalizeRelayOrigin
 
 /**
  * 扫码登录（方向一）确认页：桌面端已登录并出码，手机凭 6 位配对码换取同账号会话。
@@ -14,10 +15,14 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun PairLoginScreen(
     code: String,
+    relay: String?,
+    currentRelay: String?,
     error: String?,
     onBack: () -> Unit,
     onLogin: () -> Unit,
 ) {
+    val crossServer = !relay.isNullOrBlank() && !currentRelay.isNullOrBlank() &&
+        normalizeRelayOrigin(relay) != normalizeRelayOrigin(currentRelay)
     Column(
         modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 32.dp),
         verticalArrangement = Arrangement.Center,
@@ -30,6 +35,14 @@ fun PairLoginScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (crossServer) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "注意：该二维码来自另一台服务器（$relay），与你当前登录的服务器（$currentRelay）不同，登录后将切换到该服务器。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
         Spacer(Modifier.height(24.dp))
         Text("配对码", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
         Text(

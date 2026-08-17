@@ -223,6 +223,8 @@ class MainActivity : ComponentActivity() {
                     )
                     is Route.PairLogin -> PairLoginScreen(
                         code = r.code,
+                        relay = r.relay,
+                        currentRelay = auth?.cloudBaseUrl,
                         error = error,
                         onBack = { route = if (auth != null) Route.Navigator else Route.Auth },
                         onLogin = {
@@ -237,14 +239,16 @@ class MainActivity : ComponentActivity() {
                     is Route.GrantLogin -> GrantLoginScreen(
                         code = r.code,
                         username = auth?.username,
+                        relay = r.relay,
                         error = error,
                         granted = grantDone,
                         onDeny = { route = if (auth != null) Route.Navigator else Route.Auth },
                         onAllow = {
                             repo.setError(null)
-                            r.relay?.takeIf { it.isNotBlank() }?.let { repo.cloudBaseUrl = it }
+                            // 安全：绝不把 deep link 的 relay 写入 baseUrl——授权前在仓库内做
+                            // 服务器绑定校验，域名不一致直接拒绝，防止登录令牌外泄。
                             lifecycleScope.launch {
-                                runCatching { repo.grantDeviceLogin(r.pairingId) }
+                                runCatching { repo.grantDeviceLogin(r.pairingId, r.relay) }
                                     .onSuccess { grantDone = true }
                                     .onFailure {
                                         val msg = it.message ?: "操作失败"

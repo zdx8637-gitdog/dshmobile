@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 fun GrantLoginScreen(
     code: String,
     username: String?,
+    relay: String?,
     error: String?,
     granted: Boolean,
     onAllow: () -> Unit,
@@ -40,6 +41,14 @@ fun GrantLoginScreen(
         )
         Spacer(Modifier.height(8.dp))
         Text("授权码 $code", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+        if (!relay.isNullOrBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "目标服务器：$relay",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
         Spacer(Modifier.height(28.dp))
 
         if (granted) {

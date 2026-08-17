@@ -23,6 +23,24 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
+/** 归一化 relay 地址为 scheme://host[:port]（忽略路径/尾部斜杠/大小写），用于跨服务器比较。 */
+internal fun normalizeRelayOrigin(url: String): String {
+    val s = url.trim().trimEnd('/')
+    return try {
+        val u = java.net.URI(s)
+        val scheme = (u.scheme ?: "https").lowercase()
+        val host = (u.host ?: "").lowercase()
+        if (host.isEmpty()) {
+            s.lowercase()
+        } else {
+            val port = if (u.port > 0) ":${u.port}" else ""
+            "$scheme://$host$port"
+        }
+    } catch (_: Exception) {
+        s.lowercase()
+    }
+}
+
 /** 单一状态仓库：内存态（无会话数据落盘），退出即弃。 */
 class AppRepository(
     var cloudBaseUrl: String,
@@ -108,9 +126,22 @@ class AppRepository(
         }
     }
 
-    /** 授权（方向二）：手机已登录，允许桌面插件登录本账号。失败抛异常由 UI 展示。 */
-    suspend fun grantDeviceLogin(pairingId: String) {
-        if (_auth.value == null) throw IllegalStateException("请先登录账号，再授权电脑")
+    /**
+     * 授权（方向二）：手机已登录，允许桌面插件登录本账号。失败抛异常由 UI 展示。
+     * expectedRelay = 二维码携带的 relay 域名。与当前会话的服务器不一致时直接拒绝——
+     * 防止恶意二维码/网页把登录令牌发往任意域名（token exfil）。
+     */
+    suspend fun grantDeviceLogin(pairingId: String, expectedRelay: String? = null) {
+        val session = _auth.value ?: throw IllegalStateException("请先登录账号，再授权电脑")
+        if (!expectedRelay.isNullOrBlank()) {
+            val pinned = normalizeRelayOrigin(session.cloudBaseUrl)
+            val target = normalizeRelayOrigin(expectedRelay)
+            if (target != pinned) {
+                throw IllegalStateException(
+                    "该二维码来自其他服务器，与当前登录的服务器不一致，已拒绝发送登录凭证",
+                )
+            }
+        }
         withContext(Dispatchers.IO) {
             withFreshToken { CloudApi(cloudBaseUrl).grantPairing(it, pairingId) }
         }
