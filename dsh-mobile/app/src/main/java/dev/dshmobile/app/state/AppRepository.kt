@@ -110,9 +110,32 @@ class AppRepository(
 
     /** 授权（方向二）：手机已登录，允许桌面插件登录本账号。失败抛异常由 UI 展示。 */
     suspend fun grantDeviceLogin(pairingId: String) {
-        val session = _auth.value ?: throw IllegalStateException("请先登录账号，再授权电脑")
+        if (_auth.value == null) throw IllegalStateException("请先登录账号，再授权电脑")
         withContext(Dispatchers.IO) {
-            CloudApi(cloudBaseUrl).grantPairing(session.accessToken, pairingId)
+            withFreshToken { CloudApi(cloudBaseUrl).grantPairing(it, pairingId) }
+        }
+    }
+
+    /**
+     * 带自动刷新的 REST 调用：access token 过期时用 refresh token 换新并重试一次。
+     * 刷新失败则把原异常抛给调用方（一般意味着会话不可恢复）。
+     */
+    private suspend fun <T> withFreshToken(block: (String) -> T): T {
+        val session = _auth.value ?: throw IllegalStateException("未登录")
+        return try {
+            block(session.accessToken)
+        } catch (e: Exception) {
+            val msg = e.message ?: ""
+            val authish = msg.contains("expired", ignoreCase = true) ||
+                msg.contains("invalid", ignoreCase = true) ||
+                msg.contains("unauthorized", ignoreCase = true) ||
+                msg.contains("token", ignoreCase = true)
+            if (!authish) throw e
+            val (at, rt) = CloudApi(cloudBaseUrl).refresh(session.refreshToken)
+            val updated = session.copy(accessToken = at, refreshToken = rt)
+            _auth.value = updated
+            tokenStore.save(updated)
+            block(at)
         }
     }
 
@@ -130,20 +153,32 @@ class AppRepository(
         val session = _auth.value ?: return
         try {
             _devices.value = withContext(Dispatchers.IO) {
-                CloudApi(cloudBaseUrl).devices(session.accessToken)
+                withFreshToken { CloudApi(cloudBaseUrl).devices(it) }
             }
+            setError(null)
         } catch (e: Exception) {
-            setError("设备列表失败: ${e.message}")
+            val msg = e.message ?: ""
+            val authish = msg.contains("expired", ignoreCase = true) ||
+                msg.contains("invalid", ignoreCase = true) ||
+                msg.contains("unauthorized", ignoreCase = true) ||
+                msg.contains("token", ignoreCase = true)
+            if (authish) {
+                // access 与 refresh 都已失效：会话不可恢复，回登录页重新扫码
+                logout()
+                setError("登录已过期，请重新扫码登录")
+            } else {
+                setError("设备列表失败: $msg")
+            }
         }
     }
 
     /** 删除设备条目 = 服务器吊销（软删除）。误删不丢：
      *  电脑端 bridge 重新注册（同 clientDeviceKey）会自动以新行回到列表。 */
     suspend fun revokeDevice(deviceId: String): Boolean {
-        val session = _auth.value ?: return false
+        if (_auth.value == null) return false
         return try {
             withContext(Dispatchers.IO) {
-                CloudApi(cloudBaseUrl).revokeDevice(session.accessToken, deviceId)
+                withFreshToken { CloudApi(cloudBaseUrl).revokeDevice(it, deviceId) }
             }
             refreshDevices()
             true
