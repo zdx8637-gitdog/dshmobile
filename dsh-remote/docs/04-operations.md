@@ -71,7 +71,7 @@ powershell -File ..\dshmobile-plugin\scripts\expose-settings-namespace.ps1  # DS
   单行补丁，**dsh 升级后需重跑**；
 - 插件入口：Web 左侧栏底部（设置旁）的 `▶` 箭头——点开弹出面板（二维码/桥状态/
   账号配置），再点收起；数据面仍是 settings 命名空间 `dshmobile`；
-- 宿主冒烟：`node dshmobile-plugin/scripts/smoke-host.mjs <user> <pass>`
+- 宿主冒烟：`node plugins/dshmobile-plugin/scripts/smoke-host.mjs <user> <pass>`
   （账号密码模式）与 `smoke-grant.mjs <user> <pass>`（手机授权模式）；
 - 正式分发：发布 npm 后 `npx -y @deepseek-ai/dsh plugin --profile web add @liustack/dshmobile-bridge@latest`。
 

@@ -5,7 +5,7 @@
 在手机上远程控制本机 DeepSeek Harness（DSH）：扫码配对 → 设备 → 会话树 → 对话、
 审批、提问应答、模型切换、文件浏览。
 
-**电脑端以 DSH 插件形态分发**（`dshmobile-plugin/`，npm 包
+**电脑端以 DSH 插件形态分发**（`plugins/dshmobile-plugin/`，npm 包
 `@zdx8637/dshmobile-bridge`）：Web 左侧栏底部箭头弹窗，常驻二维码——
 微信扫=下载 App、相机扫=跳 App、App 内扫=登录/授权，一个码全搞定。
 
@@ -41,14 +41,14 @@ npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@lates
 ```
 
 > 前置 pnpm；DSH 0.1.0-rc.6 需运行插件附带的 settings 暴露补丁（上游 deferred work，
-> 详见 `dshmobile-plugin/README.md`）。手机 App 扫码即下载（默认使用作者自营 relay，
+> 详见 `plugins/dshmobile-plugin/README.md`）。手机 App 扫码即下载（默认使用作者自营 relay，
 > 可自建——见 `relay/` 与 `dsh-remote/docs/04-operations.md`）。
 
 ## 目录
 
 | 目录 | 内容 |
 | :-- | :-- |
-| `dshmobile-plugin/` | **DSH 插件**（npm 包）：host 桥守护 + 常驻二维码双模式 + Web 侧栏弹窗 |
+| `plugins/dshmobile-plugin/` | **DSH 插件**（npm 包）：host 桥守护 + 常驻二维码双模式 + Web 侧栏弹窗 |
 | `dsh-mobile/` | Android 客户端（Kotlin + Compose，minSdk 26，无 GMS 依赖） |
 | `dsh-remote/` | bridge（Node / Electron 打包）、扫码落地页、Web 调试台、协议与运维文档、测试脚本 |
 | `relay/` | 云 relay 服务（Node + Express + SQLite + WS）：用户/设备/配对/审计，仅路由不执行 agent 逻辑 |

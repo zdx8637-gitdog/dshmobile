@@ -18,7 +18,7 @@
   APK 直链；grant 深链带 pid。
 - 踩坑：① DSH `dsh-host-apiproxy` 的 settings 命名空间白名单硬编码，第三方插件
   默认不暴露（上游标注 deferred work）——本地补丁脚本
-  `dshmobile-plugin/scripts/expose-settings-namespace.ps1` 临时解锁；
+  `plugins/dshmobile-plugin/scripts/expose-settings-namespace.ps1` 临时解锁；
   ② qrcode-generator CJS 命名空间被当函数调用 → 画布空白（默认导入修复）；
   ③ 轮询耗尽共享 IP 限流额度 → 限额分层；
   ④ 宿主 session 残留导致"未填账号却 running"——补「已登录徽标 + 退出登录」。
