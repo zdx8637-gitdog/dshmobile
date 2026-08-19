@@ -210,3 +210,64 @@ WebSocket 升级，帧格式：
 - sessionId 全链路**不透明字符串透传**：DSH 输出 → bridge → relay → client → 回传，任何环节不解析/规范化/截断；
 - 客户端只能使用 `session.list` / `session.create` 返回的 id；
 - relay 对 payload 零改写（仅路由），不新增 id 语义。
+
+## 7. Data Plane（文件传输）
+
+### 7.1 原则
+
+- **控制面/数据面分离**：WS JSON 信封（§2）只承载传输控制消息（投递指令/进度/完成回执）；
+  文件字节流走 HTTPS REST，不塞进 WebSocket，大文件不阻塞聊天与实时事件。
+- **内容寻址**：`fileId = SHA-256(文件内容)`（hex）。同（用户, 设备, fileId）的传输天然幂等去重，
+  断点续传靠 relay 返回已收字节数 + 服务端 offset 强校验。
+- **relay 不长期存文件**：spool 仅作过渡（uploading → ready → delivered 即删；TTL 兜底清理）。
+
+### 7.2 生命周期
+
+```
+手机                 relay                     bridge                电脑
+ │ POST /transfers      │                         │                    │
+ │  (announce, 校验归属)│                         │                    │
+ │ PUT …/chunks × N ────▶ spool 追加(offset 校验)   │                    │
+ │ POST …/complete ────▶ size+SHA-256 校验 → ready  │                    │
+ │                      │ ── WS 请求 transfer.deliver ──▶ 拉流下载          │
+ │                      │ ◀── WS 响应 {ok, path} ──────────┤ 校验+落盘(workspace 内)
+ │  ◀─ WS 事件 transfer.progress（fanout 节流）────────────┘                    │
+ │                      │ spool 删除（delivered）    │                    │
+```
+
+### 7.3 REST 端点（数据面）
+
+| 方法 | 路径 | 鉴权 | 语义 |
+| :-- | :-- | :-- | :-- |
+| POST | `/transfers` | 用户 accessToken | announce：`{deviceId, fileId, name, size, sha256, targetPath}` → `{transferId, received, status}`；同 (用户,设备,fileId) 有活动传输时幂等返回原 transferId（续传） |
+| PUT | `/transfers/:transferId/chunks` | 用户 | 分块追加：header `X-Chunk-Offset: <bytes>` + 原始字节 body；offset 必须等于当前已收字节数，否则 `409 chunk-offset-mismatch`；返回 `{received}` |
+| GET | `/transfers/:transferId` | 用户 | 状态：`{fileId, name, size, received, status}`（`uploading`/`ready`/`delivered`/`failed`） |
+| POST | `/transfers/:transferId/complete` | 用户 | 收尾：校验 size 与 sha256 → `ready` 并通知 bridge 投递；失败 `422 checksum-mismatch` |
+| GET | `/transfers/:transferId/download` | 设备 deviceToken | bridge 拉取 spool 内容（仅 `ready` 状态、且 deviceToken 的设备与传输一致） |
+
+归属校验：announce/上传/状态/complete 要求 userId 拥有 deviceId（`findByIdAndUser`）；
+download 要求 deviceToken 解出的 deviceId 与传输一致。限流：数据面复用流程面额度（300/分）。
+
+### 7.4 控制面消息
+
+- relay → bridge（投递指令，复用请求/响应通道，actor.role="relay"，requestId 由 relay 生成并
+  以 `${deviceId}:${requestId}` 复合键跟踪，10 分钟超时）：
+  ```json
+  { "schemaVersion": 1, "kind": "request", "type": "transfer.deliver", "requestId": "r-…",
+    "actor": { "role": "relay" }, "target": { "deviceId": "…" },
+    "payload": { "transferId": "…", "fileId": "…", "name": "…", "size": 123, "sha256": "…",
+                 "targetPath": "docs/test.pdf" } }
+  ```
+- bridge → relay 响应：`payload: { "ok": true, "data": { "path": "/abs/落盘路径" } }`
+  或 `{ "ok": false, "error": { "code": "deliver-failed", "message": "…" } }`。
+- bridge → relay 事件（进度，fanout 给该设备全部客户端）：
+  `{ "kind": "event", "type": "transfer.progress", "payload": { "transferId": "…", "fileId": "…", "received": 123, "total": 456 } }`
+
+### 7.5 边界与安全
+
+- `targetPath` 是**相对路径**；bridge 在 `workspaceRoot` 内解析：拒绝绝对路径、`..` 穿越、
+  解析后逃逸出 root（路径规范化后必须以 root 开头）。默认 root = `<stateDir>/deliveries`。
+- 大小上限 2GB（可配）、分块 body 上限 8MB（可配）、传输 TTL 24h（可配）；
+  `delivered` 后 spool 在 1h 宽限内删除，兜底 sweep 每 5 分钟跑一次。
+- relay 只存文件字节（spool），不落数据库；审计日志记录 transferId 元数据。
+- 控制面消息体不含文件内容；progress 事件节流（bridge 侧每 1s 最多一条）。

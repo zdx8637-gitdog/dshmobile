@@ -26,6 +26,7 @@ import devicesRoutes from "./routes/devices.js";
 import pairingCodesRoutes from "./routes/pairing-codes.js";
 // 公开核销入口：必须先于其它带 authenticate 的路由器挂载
 import pairingVerifyRoutes from "./routes/pairing-verify.js";
+import transfersRoutes, { transferDownloadRouter } from "./routes/transfers.js";
 
 export function createApp(_db: Database.Database) {
   const authLimiter = new RateLimiter(
@@ -39,6 +40,8 @@ export function createApp(_db: Database.Database) {
   // 出码/授权/轮询面（非爆破目标）：额度放宽——插件轮询 2s/次（30/分），
   // 且手机与电脑常同 NAT 共用一个 IP，额度必须覆盖轮询 + 用户操作。
   const pairingFlowLimiter = new RateLimiter(config.rateLimitPairingWindowMs, 300);
+  // Data plane（文件传输）同样按流程面额度（300/分）
+  const transferLimiter = new RateLimiter(config.rateLimitPairingWindowMs, 300);
 
   const app = express();
 
@@ -55,6 +58,7 @@ export function createApp(_db: Database.Database) {
   // 无登录态的核销入口单独严限流（防爆破 6 位码），必须先挂
   app.use("/pairing-codes/verify", rateLimit(pairingLimiter));
   app.use("/pairing-codes", rateLimit(pairingFlowLimiter));
+  app.use("/transfers", rateLimit(transferLimiter));
 
   app.use(pairingVerifyRoutes); // 公开：必须最先挂
   app.use(healthRoutes);
@@ -62,6 +66,8 @@ export function createApp(_db: Database.Database) {
   app.use(meRoutes);
   app.use(devicesRoutes);
   app.use(pairingCodesRoutes);
+  app.use(transfersRoutes);
+  app.use(transferDownloadRouter);
 
   app.use(errorHandler);
 

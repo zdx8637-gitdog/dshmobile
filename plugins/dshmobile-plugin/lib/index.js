@@ -162,7 +162,7 @@ function apply(_ctx, _config = {}) {
           platform: "windows",
           clientDeviceKey: stableMachineKey()
         },
-        dsh: { url: "http://127.0.0.1:3080" },
+        dsh: { url: "http://127.0.0.1:3080", workspaceRoot: path.join(STATE_DIR, "deliveries") },
         stateDir: STATE_DIR
       };
       writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));

@@ -8,11 +8,18 @@ import { config } from "./config.js";
 import {
   handleBridgeConnection,
   handleClientConnection,
+  relayManager,
 } from "./ws/relay.js";
+import * as transferService from "./services/transfer-service.js";
 
 const db = initDb();
 runMigrations(db);
 logger.info("Database initialized and migrations applied");
+
+// 桥上线 → 重投该设备 ready 状态的传输（Data plane）
+relayManager.onBridgeOnline = (deviceId) => {
+  transferService.redeliverForDevice(deviceId);
+};
 
 const app = createApp(db);
 

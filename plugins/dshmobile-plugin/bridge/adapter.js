@@ -1,7 +1,9 @@
 // relay 信封 ↔ DSH API 适配器。写权限模型：进入会话即可对话（与桌面 GUI 一致）。
-import { mkdir, opendir, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import { mkdir, opendir, rename, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const READ_ONLY_TYPES = new Set(["sessions.list", "sessions.history", "session.models", "commands.list", "events.subscribe", "events.unsubscribe", "workspace.list", "host.listDirectory", "host.listDrives"]);
 const WRITE_TYPES = new Set(["sessions.create", "sessions.run", "sessions.interrupt", "sessions.steer", "session.selectModel", "commands.execute", "approvals.respond", "questions.respond", "sessions.rename", "sessions.fork", "sessions.archive", "sessions.updateQueue", "host.createDirectory"]);
@@ -42,10 +44,30 @@ function compactHistoryEvents(events) {
   return kept;
 }
 
+/**
+ * 在 workspaceRoot 内解析相对路径：拒绝绝对路径、`..` 穿越、空字节，
+ * 规范化后必须仍在 root 内（防符号链接/拼接逃逸）。
+ */
+export function resolveInRoot(root, rel) {
+  const base = resolve(root);
+  if (typeof rel !== "string" || !rel.trim() || rel.includes("\0")) {
+    throw new Error("empty or invalid target path");
+  }
+  if (isAbsolute(rel)) throw new Error("absolute paths not allowed");
+  const target = resolve(base, rel);
+  const relResolved = relative(base, target);
+  if (relResolved === ".." || relResolved.startsWith(".." + sep) || isAbsolute(relResolved)) {
+    throw new Error("path escapes workspace root");
+  }
+  return target;
+}
+
 export class Adapter {
-  constructor({ dsh, relay }) {
+  constructor({ dsh, relay, workspaceRoot }) {
     this.dsh = dsh;
     this.relay = relay;
+    // Data plane 落盘根目录（默认由 main.js 注入 <stateDir>/deliveries）
+    this.workspaceRoot = workspaceRoot || join(homedir(), "dsh-deliveries");
     // sessionId -> Set<订阅标记>（MVP: 仅记录，事件 fanout 给全部客户端由 relay 完成）
     this.subscribed = new Map();
     // 待应答请求暂存：question/requested、approval/requested 帧到达时如果没有客户端订阅，
@@ -66,6 +88,8 @@ export class Adapter {
     if (typeof requestId !== "string") return;
     console.log("[adapter] request:", type, "from", env.actor?.clientId ?? "?", "payload:", JSON.stringify(payload).slice(0, 400));
 
+    if (type === "transfer.deliver") return this.#deliver(payload, requestId);
+
     if (READ_ONLY_TYPES.has(type)) return this.#read(type, payload, requestId);
     if (WRITE_TYPES.has(type)) return this.#write(type, payload, requestId);
 
@@ -73,6 +97,68 @@ export class Adapter {
       ok: false,
       error: { code: "UNSUPPORTED", message: `message type '${type}' is not implemented by this bridge` },
     });
+  }
+
+  /**
+   * Data plane 投递：从 relay 拉流下载 → 流式 SHA-256 校验 → workspace 内落盘。
+   * 进度经控制面事件转发（节流 1s）。
+   */
+  async #deliver(payload, requestId) {
+    const { transferId, fileId, name, size, sha256, targetPath } = payload ?? {};
+    const fail = (code, message) =>
+      this.relay.respond(requestId, "transfer.deliver", { ok: false, error: { code, message } });
+    if (typeof transferId !== "string" || typeof name !== "string") {
+      return fail("bad-request", "transferId/name required");
+    }
+    let target;
+    try {
+      target = resolveInRoot(this.workspaceRoot, targetPath || name);
+    } catch (err) {
+      return fail("bad-path", String(err?.message ?? err));
+    }
+    const tmp = `${target}.part-${randomUUID()}`;
+    let lastProgress = 0;
+    try {
+      const res = await fetch(
+        `${this.relay.url}/transfers/${encodeURIComponent(transferId)}/download`,
+        { headers: { authorization: `Bearer ${this.relay.deviceToken}` } },
+      );
+      if (!res.ok || !res.body) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(`download failed: HTTP ${res.status} ${body?.error?.message ?? ""}`);
+      }
+      await mkdir(dirname(target), { recursive: true });
+      const hash = createHash("sha256");
+      const out = createWriteStream(tmp);
+      let received = 0;
+      for await (const chunk of res.body) {
+        const buf = Buffer.from(chunk);
+        hash.update(buf);
+        received += buf.length;
+        out.write(buf);
+        const now = Date.now();
+        if (now - lastProgress >= 1000) {
+          lastProgress = now;
+          this.relay.forwardEvent({ transferId, fileId, received, total: size }, "transfer.progress");
+        }
+      }
+      await new Promise((r, j) => { out.end(r); out.on("error", j); });
+      if (Number.isInteger(size) && received !== size) {
+        throw new Error(`size mismatch: got ${received}, want ${size}`);
+      }
+      const digest = hash.digest("hex");
+      if (sha256 && digest !== sha256) {
+        throw new Error(`sha256 mismatch: got ${digest}, want ${sha256}`);
+      }
+      await rename(tmp, target);
+      this.relay.forwardEvent({ transferId, fileId, received, total: size }, "transfer.progress");
+      console.log("[adapter] deliver ok:", target);
+      return this.relay.respond(requestId, "transfer.deliver", { ok: true, data: { path: target } });
+    } catch (err) {
+      try { await rename(tmp, `${tmp}.failed`); } catch {}
+      console.error("[adapter] deliver failed:", err?.message);
+      return fail("deliver-failed", String(err?.message ?? err));
+    }
   }
 
   async #read(type, payload, requestId) {

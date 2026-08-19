@@ -50,4 +50,26 @@ export const config = {
   dbPath: process.env.DB_PATH ?? "data/relay.db",
   logLevel: process.env.LOG_LEVEL ?? "info",
   nodeEnv: process.env.NODE_ENV ?? "development",
+  // ---- Data plane（文件传输 spool）----
+  spoolDir: process.env.SPOOL_DIR ?? "data/spool",
+  maxTransferSizeBytes: parseInt(
+    process.env.MAX_TRANSFER_SIZE_BYTES ?? String(2 * 1024 ** 3),
+    10
+  ),
+  transferTTLMs: parseInt(
+    process.env.TRANSFER_TTL_MS ?? String(24 * 3600 * 1000),
+    10
+  ),
+  transferDeliveredGraceMs: parseInt(
+    process.env.TRANSFER_DELIVERED_GRACE_MS ?? String(3600 * 1000),
+    10
+  ),
+  transferChunkMaxBytes: parseInt(
+    process.env.TRANSFER_CHUNK_MAX_BYTES ?? String(8 * 1024 * 1024),
+    10
+  ),
+  transferDeliverTimeoutMs: parseInt(
+    process.env.TRANSFER_DELIVER_TIMEOUT_MS ?? String(10 * 60 * 1000),
+    10
+  ),
 } as const;

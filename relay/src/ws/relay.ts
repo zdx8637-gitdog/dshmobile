@@ -106,12 +106,17 @@ class RelayManager {
   private bridges = new Map<string, BridgeState>();
   // targetDeviceId -> ClientState[]
   private clients = new Map<string, ClientState[]>();
-  // requestId -> PendingRequest (for targeted response routing)
+  // (deviceId:requestId) -> PendingRequest (for targeted response routing)
   private pendingRequests = new Map<string, PendingRequest>();
+  // (deviceId:requestId) -> relay 自己发起的请求（如 transfer.deliver），响应直接回传给调用方
+  private relayRequests = new Map<string, { resolve: (p: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
   // subscriptionId -> client subscription for resources.changed fanout
   private resourceSubscriptions = new Map<string, ResourceSubscription>();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+  /** 桥上线回调（组合根注入：transfer 服务借此重投 ready 传输）。 */
+  onBridgeOnline: ((deviceId: string) => void) | null = null;
 
   private startCleanup() {
     if (this.cleanupInterval) return;
@@ -184,6 +189,13 @@ class RelayManager {
       "bridge connected"
     );
     this.broadcastDeviceStatus(deviceId, userId, true, "bridge_connected");
+    if (this.onBridgeOnline) {
+      try {
+        this.onBridgeOnline(deviceId);
+      } catch (err: any) {
+        logger.error({ deviceId, err: err?.message }, "onBridgeOnline hook failed");
+      }
+    }
   }
 
   removeBridge(deviceId: string, reason = "bridge_disconnected"): void {
@@ -229,6 +241,54 @@ class RelayManager {
   isBridgeOnline(deviceId: string): boolean {
     const bridge = this.bridges.get(deviceId);
     return bridge !== undefined && bridge.ws.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * relay 发起 → bridge 的请求（Data Plane 投递指令等）。桥响应由
+   * resolveRelayRequest 回传；超时 reject。桥离线直接抛错（调用方决定重试）。
+   */
+  sendRequestToBridge(
+    deviceId: string,
+    type: string,
+    payload: unknown,
+    timeoutMs = 60_000,
+  ): Promise<any> {
+    const bridge = this.bridges.get(deviceId);
+    if (!bridge || bridge.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("bridge offline"));
+    }
+    const requestId = randomUUID();
+    const key = `${deviceId}:${requestId}`;
+    bridge.ws.send(
+      JSON.stringify({
+        schemaVersion: 1,
+        envelopeId: randomUUID(),
+        kind: "request",
+        type,
+        requestId,
+        sentAt: new Date().toISOString(),
+        actor: { role: "relay" },
+        target: { deviceId },
+        payload,
+      }),
+    );
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.relayRequests.delete(key);
+        reject(new Error(`relay request ${type} timed out`));
+      }, timeoutMs);
+      this.relayRequests.set(key, { resolve, timer });
+    });
+  }
+
+  /** 桥对 relay 发起的请求做出响应：命中 relayRequests 则回传并返回 true。 */
+  resolveRelayRequest(deviceId: string, requestId: string, payload: unknown): boolean {
+    const entry = this.relayRequests.get(`${deviceId}:${requestId}`);
+    if (!entry) return false;
+    clearTimeout(entry.timer);
+    this.relayRequests.delete(`${deviceId}:${requestId}`);
+    entry.resolve(payload);
+    return true;
   }
 
   addClient(
@@ -830,6 +890,17 @@ export function handleBridgeConnection(
       return;
     }
 
+    // Data plane 进度：fanout 给该设备全部客户端（控制面消息，无文件内容）
+    if (envelopeRecord.type === "transfer.progress") {
+      const deviceClients = relayManager.getClientsForDevice(deviceId);
+      for (const client of deviceClients) {
+        if (client.ws.readyState === WebSocket.OPEN) {
+          relayManager.routeToClientByWs(client.ws, envelopeRecord);
+        }
+      }
+      return;
+    }
+
     // Handle events.forward - route to subscribed clients
     if (envelope.type === "events.forward") {
       const deviceClients = relayManager.getClientsForDevice(deviceId);
@@ -891,6 +962,20 @@ export function handleBridgeConnection(
       const responseType = typeof envelopeRecord.type === "string"
         ? envelopeRecord.type
         : "unknown";
+      // relay 自己发起的请求（如 transfer.deliver）优先回传，不进客户端 pending 通道
+      if (
+        relayManager.resolveRelayRequest(
+          deviceId,
+          requestId,
+          (envelopeRecord.payload ?? {}) as unknown,
+        )
+      ) {
+        logger.debug(
+          { connId, deviceId, requestId, type: responseType },
+          "relay-originated response resolved"
+        );
+        return;
+      }
       const pending = relayManager.resolvePendingRequest(deviceId, requestId);
       if (pending && pending.clientWs.readyState === WebSocket.OPEN) {
         if (responseType === "resources.subscribe") {

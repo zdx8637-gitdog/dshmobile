@@ -13,7 +13,9 @@ const config = JSON.parse(readFileSync(configPath, "utf8"));
 
 const relay = new RelayBridge({ ...config.relay, stateDir: config.stateDir });
 const dsh = new DshClient(config.dsh.url);
-const adapter = new Adapter({ dsh, relay });
+// Data plane 落盘根目录：默认 <stateDir>/deliveries（可在 config.dsh.workspaceRoot 覆盖）
+const workspaceRoot = config.dsh?.workspaceRoot || join(config.stateDir || ".", "deliveries");
+const adapter = new Adapter({ dsh, relay, workspaceRoot });
 
 let dshStreams = [];
 let stopping = false;
