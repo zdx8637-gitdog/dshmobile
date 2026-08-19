@@ -328,8 +328,14 @@ export function apply(_ctx: any, _config: any = {}) {
       });
     } catch (err: any) {
       // 二维码永远在：账号密码错时不卡死，回退为授权二维码（手机扫码授权本机登录）
+      const msg = String(err?.message ?? err);
+      // 会话刷新也失败（refresh token 已被吊销/过期）→ 清除死会话，避免每次启动重复 401 舞步
+      if (session && /expired|invalid|Token/i.test(msg)) {
+        session = null;
+        try { rmSync(SESSION_FILE, { force: true }); } catch {}
+      }
       patchState({
-        pairError: `账号密码错误（${String(err?.message ?? err)}），已切换为授权二维码：用手机 App 扫码即可授权本机登录`,
+        pairError: `账号密码错误（${msg}），已切换为授权二维码：用手机 App 扫码即可授权本机登录`,
       });
       await ensureGrantCode();
     }

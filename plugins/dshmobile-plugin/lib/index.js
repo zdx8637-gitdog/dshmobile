@@ -262,8 +262,16 @@ function apply(_ctx, _config = {}) {
         pairError: ""
       });
     } catch (err) {
+      const msg = String(err?.message ?? err);
+      if (session && /expired|invalid|Token/i.test(msg)) {
+        session = null;
+        try {
+          rmSync(SESSION_FILE, { force: true });
+        } catch {
+        }
+      }
       patchState({
-        pairError: `\u8D26\u53F7\u5BC6\u7801\u9519\u8BEF\uFF08${String(err?.message ?? err)}\uFF09\uFF0C\u5DF2\u5207\u6362\u4E3A\u6388\u6743\u4E8C\u7EF4\u7801\uFF1A\u7528\u624B\u673A App \u626B\u7801\u5373\u53EF\u6388\u6743\u672C\u673A\u767B\u5F55`
+        pairError: `\u8D26\u53F7\u5BC6\u7801\u9519\u8BEF\uFF08${msg}\uFF09\uFF0C\u5DF2\u5207\u6362\u4E3A\u6388\u6743\u4E8C\u7EF4\u7801\uFF1A\u7528\u624B\u673A App \u626B\u7801\u5373\u53EF\u6388\u6743\u672C\u673A\u767B\u5F55`
       });
       await ensureGrantCode();
     }
