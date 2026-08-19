@@ -125,6 +125,7 @@ function apply(_ctx, _config = {}) {
   let grantSecret = "";
   let pollTimer = null;
   let lastConfig = null;
+  let lastRespawnAt = 0;
   if (!state.username && session?.username) {
     state = { ...state, username: session.username };
   }
@@ -166,16 +167,27 @@ function apply(_ctx, _config = {}) {
         stateDir: STATE_DIR
       };
       writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
-      child = spawn(process.execPath, [BRIDGE_MAIN], {
+      const p = spawn(process.execPath, [BRIDGE_MAIN], {
         env: { ...process.env, DSHMOBILE_BRIDGE_CONFIG: CONFIG_FILE },
         stdio: "ignore"
       });
-      child.on("exit", (code) => {
-        if (!stopped && code !== null) {
-          patchState({ bridgeStatus: `exited:${code}` });
+      child = p;
+      p.on("exit", (code) => {
+        if (stopped || child !== p) return;
+        patchState({ bridgeStatus: `exited:${code}\uFF0C3 \u79D2\u540E\u81EA\u52A8\u91CD\u542F` });
+        const now = Date.now();
+        if (now - lastRespawnAt > 6e4) {
+          lastRespawnAt = now;
+          setTimeout(() => {
+            if (!stopped && state.enabled && (session !== null || Boolean(state.username && state.password))) {
+              startBridge(state);
+            }
+          }, 3e3);
+        } else {
+          patchState({ bridgeStatus: `exited:${code}\uFF0860 \u79D2\u5185\u5DF2\u91CD\u542F\u8FC7\uFF0C\u505C\u6B62\u81EA\u52A8\u62C9\u8D77\uFF0C\u7B49\u5F85\u914D\u7F6E\u53D8\u5316\uFF09` });
         }
       });
-      child.on("error", (err) => {
+      p.on("error", (err) => {
         patchState({ bridgeStatus: `error:${err.message}` });
       });
       patchState({ bridgeStatus: "running" });
@@ -232,6 +244,7 @@ function apply(_ctx, _config = {}) {
             refreshToken: rf.data.refreshToken ?? session.refreshToken
           };
           saveSession(session);
+          if (child && state.enabled) startBridge(state);
           created = await restJson(base, "/pairing-codes", {
             method: "POST",
             headers: { authorization: `Bearer ${rf.data.accessToken}` },

@@ -171,6 +171,7 @@ export function apply(_ctx: any, _config: any = {}) {
   let grantSecret = ""; // 领取凭证：只存内存，绝不下地
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let lastConfig: PanelState | null = null;
+  let lastRespawnAt = 0;
 
   // 手机授权登录的会话重启后不回填账号（panel.json 只存手填值）→ 面板需显示已登录账号与退出按钮
   if (!state.username && session?.username) {
@@ -218,16 +219,29 @@ export function apply(_ctx: any, _config: any = {}) {
         stateDir: STATE_DIR,
       };
       writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
-      child = spawn(process.execPath, [BRIDGE_MAIN], {
+      const p = spawn(process.execPath, [BRIDGE_MAIN], {
         env: { ...process.env, DSHMOBILE_BRIDGE_CONFIG: CONFIG_FILE },
         stdio: "ignore",
       });
-      child.on("exit", (code) => {
-        if (!stopped && code !== null) {
-          patchState({ bridgeStatus: `exited:${code}` });
+      child = p;
+      p.on("exit", (code) => {
+        // child !== p → 已被新桥替换或主动停止，忽略该退出事件
+        if (stopped || child !== p) return;
+        // 异常退出则 3 秒后自动拉起（60 秒内最多一次，防崩溃循环）
+        patchState({ bridgeStatus: `exited:${code}，3 秒后自动重启` });
+        const now = Date.now();
+        if (now - lastRespawnAt > 60_000) {
+          lastRespawnAt = now;
+          setTimeout(() => {
+            if (!stopped && state.enabled && (session !== null || Boolean(state.username && state.password))) {
+              startBridge(state);
+            }
+          }, 3000);
+        } else {
+          patchState({ bridgeStatus: `exited:${code}（60 秒内已重启过，停止自动拉起，等待配置变化）` });
         }
       });
-      child.on("error", (err) => {
+      p.on("error", (err) => {
         patchState({ bridgeStatus: `error:${err.message}` });
       });
       patchState({ bridgeStatus: "running" });
@@ -293,6 +307,9 @@ export function apply(_ctx: any, _config: any = {}) {
             refreshToken: rf.data.refreshToken ?? session!.refreshToken,
           };
           saveSession(session);
+          // 会话已轮换：桥的 config.json 还是旧 token（已被吊销）——立即用新会话重启桥，
+          // 否则下次桥断线重连 provision 会 401 死循环（宿主是会话唯一所有者）。
+          if (child && state.enabled) startBridge(state);
           created = await restJson(base, "/pairing-codes", {
             method: "POST",
             headers: { authorization: `Bearer ${rf.data.accessToken}` },

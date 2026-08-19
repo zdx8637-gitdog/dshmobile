@@ -70,28 +70,16 @@ export class RelayBridge {
     this.deviceToken = reg.data.deviceToken;
   }
 
-  /** 登录/授权拿 access token，然后注册/复用设备拿 device token。 */
+  /**
+   * 登录/授权拿 access token，然后注册/复用设备拿 device token。
+   * 注意：桥**不轮换** refresh token——宿主是会话的唯一所有者，宿主刷新后会
+   * 重写 config.json 并重启桥。桥自行 /auth/refresh 会轮换 token，把宿主的
+   * 会话弄失效（双向轮换竞态 → 双方 401 死循环）。
+   */
   async provision() {
-    let accessToken;
-    try {
-      accessToken = await this.#obtainAccessToken();
-      await this.#registerDevice(accessToken);
-      return { deviceId: this.deviceId };
-    } catch (err) {
-      // token 模式且注册被拒（401/403）：尝试刷新会话一次
-      if (this.accessToken && this.refreshToken && (err.status === 401 || err.status === 403)) {
-        const rf = await this.#restJson("/auth/refresh", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ refreshToken: this.refreshToken }),
-        });
-        this.accessToken = rf.data.accessToken;
-        this.refreshToken = rf.data.refreshToken ?? this.refreshToken;
-        await this.#registerDevice(this.accessToken);
-        return { deviceId: this.deviceId };
-      }
-      throw err;
-    }
+    const accessToken = await this.#obtainAccessToken();
+    await this.#registerDevice(accessToken);
+    return { deviceId: this.deviceId };
   }
 
   connect() {
