@@ -42,11 +42,21 @@
 - 网络层：`CloudApi` 新增 `transfers.announce/putChunk/complete`（OkHttp 流式 body 上传）；
 - 依赖：图片压缩（长边 ≤2048，JPEG q80——附件限额内）→ 需评估引入 Coil/自写压缩；minSdk 26 无 GMS。
 
-**A3. bridge 落盘后的「进入会话」路径**（决定 P1 成败的侦查项，见 §6-1）：
-- 路径 1（普适，无视觉模型也能用）：落盘 + 回执带绝对路径；手机若带 `sessionId`，bridge 向该会话发一条 `sessions.run` 文本消息「已上传 <name> → <path>」——任何模型都能顺着路径用工具读文件；
-- 路径 2（视觉模型加成）：bridge 经 DSH 公开/Web 同款附件 API 把图片登记为 attachment 拿 `attachmentId`，再以 `[{type:"text"...},{type:"image",attachment:{attachmentId,...}}]` 注入 `session.prompt`——视觉模型直接看图（本项目起点「文本模型看图」的落地）。**取决于侦查结果**，作为 A3 可选增强。
+**A3. bridge 落盘后的「进入会话」路径（两级策略，2026-08-19 定稿）**：
 
-**验收**：手机发一张照片 → PC workspace 出现文件 → DSH 会话里能看到提及（路径 1）；全部断网重试一次成功（续传）。
+- **L1（默认）——落盘自取**：落盘 + 回执带绝对路径；手机若带 `sessionId`，
+  bridge 向该会话发一条 `sessions.run` 文本消息「已上传 <name> → <path>」——任何模型
+  （含视觉与纯文本）都能顺着路径用工具读文件。零依赖、无附件限额、今天可用。
+- **L2（增强，可配置开关，默认关）——图片直达视觉模型**：bridge 经 DSH 公开/Web 同款
+  附件 API 把图片登记为 attachment，再以 `[{type:"text"...},{type:"image",attachment:{...}}]`
+  注入 `session.prompt`，视觉模型无需工具调用直接看到。
+  **启用前提（侦查门禁）**：① DSH 附件上传/读取存在公共 API 且可被 bridge 调用；
+  ② 会话当前模型声明 image 输入。二者缺一不启用。
+- **L1 与 L2 关系**：L1 是保底主线；若侦查发现 DSH 文件读取工具对图片返回 image 块
+  （tool-result 带图），则 L1 本身即视觉原生，L2 可永久搁置。
+  反之（工具只返回路径/文本），L2 才有决定性价值。
+
+**验收**：手机发一张照片 → PC workspace 出现文件 → DSH 会话里能看到提及（L1）；全部断网重试一次成功（续传）。
 
 ### Phase B：图片回显（PC → 手机）
 
@@ -108,8 +118,10 @@
 
 ## 6. 预研清单（侦查项——不写代码，谷电前可完成）
 
-1. **DSH 附件公开 API**：Web UI 上传图片走什么端点？`/api` unary 有没有 attachment/upload 方法？
-   bridge 能否以 `attachmentId` 读取字节？（决定 A3 路径 2 与 B1 读法）
+1. **DSH 视觉链路实态（最高优先级，决定 L1/L2 取舍）**：
+   ① 桌面 DSH 用视觉模型开一个带图会话，抓 history 看 `user/message` 中 image 块的
+   wire 形态；② 让 agent 读一张图片文件，抓 `tool/result` 的返回形态——返回 image 块
+   （视觉原生）还是路径/文本（需 L2）；③ DSH 附件上传端点的公共面（Web UI 同款）。
 2. **history 事件里 image 块的 JSON 实态**：用一个带图会话抓 history，确认
    `user/message` 与 `tool/result` 的 content 数组结构（bridge 目前 `textOf` 丢图）；
 3. **工具结果带图的实态**：装截图插件后抓一个 tool/result 事件样本；
