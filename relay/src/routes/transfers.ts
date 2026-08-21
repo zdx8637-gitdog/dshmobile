@@ -21,6 +21,7 @@ const announceSchema = z.object({
   size: z.number().int().positive(),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   targetPath: z.string().min(1).max(1024),
+  direction: z.enum(["upload", "download"]).optional(),
 });
 
 function requireOwnedDevice(req: Request, deviceId: string) {

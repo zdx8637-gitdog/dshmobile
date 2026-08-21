@@ -15,6 +15,8 @@ import { relayManager } from "../ws/relay.js";
 
 export type TransferStatus = "uploading" | "ready" | "delivered" | "failed";
 
+export type TransferDirection = "upload" | "download";
+
 export interface Transfer {
   transferId: string;
   userId: string;
@@ -26,6 +28,7 @@ export interface Transfer {
   targetPath: string;
   received: number;
   status: TransferStatus;
+  direction: TransferDirection;
   createdAt: number;
   deliveredAt: number | null;
   error: string | null;
@@ -54,7 +57,7 @@ export function get(transferId: string): Transfer | undefined {
   return transfers.get(transferId);
 }
 
-/** 幂等 announce：同（用户, 设备, fileId）的活动传输直接复用（断点续传/去重）。 */
+/** 幂等 announce：同（用户, 设备, fileId）的活动传输直接复用（断点续传/去重/反向缓存）。 */
 export function announce(
   userId: string,
   input: {
@@ -64,6 +67,7 @@ export function announce(
     size: number;
     sha256: string;
     targetPath: string;
+    direction?: TransferDirection;
   },
 ): Transfer {
   const active = [...transfers.values()].find(
@@ -96,6 +100,7 @@ export function announce(
     targetPath: input.targetPath,
     received: 0,
     status: "uploading",
+    direction: input.direction ?? "upload",
     createdAt: Date.now(),
     deliveredAt: null,
     error: null,
@@ -156,6 +161,11 @@ export async function complete(transferId: string): Promise<Transfer> {
     throw new AppError(422, "CHECKSUM_MISMATCH", "sha256 mismatch");
   }
   t.status = "ready";
+  // 反向传输（bridge → 手机，如附件回显）：ready 即终态，不向 bridge 投递（会投回上传方自己）
+  if (t.direction === "download") {
+    logger.info({ transferId, fileId: t.fileId, direction: "download" }, "reverse transfer ready (no deliver)");
+    return t;
+  }
   logger.info({ transferId, fileId: t.fileId }, "transfer ready, requesting deliver");
   deliver(t).catch((err) => {
     const msg = String(err?.message ?? err);
@@ -168,8 +178,9 @@ export async function complete(transferId: string): Promise<Transfer> {
   return t;
 }
 
-/** 向 bridge 下发投递指令并等待回执。 */
+/** 向 bridge 下发投递指令并等待回执（仅 upload 方向）。 */
 async function deliver(t: Transfer): Promise<void> {
+  if (t.direction === "download") return; // 反向传输不投递（防御性，complete 已拦截）
   if (!relayManager.isBridgeOnline(t.deviceId)) {
     return; // 桥离线：保持 ready，桥上线后 redeliverForDevice 重投
   }
@@ -195,10 +206,10 @@ async function deliver(t: Transfer): Promise<void> {
   logger.info({ transferId: t.transferId, path: String(resp?.data?.path ?? "") }, "transfer delivered");
 }
 
-/** 桥上线时重投该设备所有 ready 的传输。 */
+/** 桥上线时重投该设备所有 ready 的传输（仅 upload 方向）。 */
 export function redeliverForDevice(deviceId: string): void {
   for (const t of transfers.values()) {
-    if (t.deviceId === deviceId && t.status === "ready") {
+    if (t.deviceId === deviceId && t.status === "ready" && t.direction === "upload") {
       deliver(t).catch((err) => {
         logger.error({ transferId: t.transferId, err: String(err?.message ?? err) }, "redeliver failed");
         if (t.status === "ready") {
@@ -220,13 +231,17 @@ export function openDownload(transferId: string) {
   return createReadStream(spoolPath(transferId));
 }
 
-/** 兜底清理：TTL 过期的任何状态、delivered 超宽限期的 spool 文件。 */
+/** 兜底清理：TTL 过期的任何状态、delivered 超宽限期、反向 ready 超缓存期的 spool 文件。 */
 export async function sweep(now: number = Date.now()): Promise<number> {
   let removed = 0;
   for (const [id, t] of transfers) {
     const expired = now - t.createdAt > config.transferTTLMs;
     const deliveredGrace = t.deliveredAt !== null && now - t.deliveredAt > config.transferDeliveredGraceMs;
-    if (expired || deliveredGrace) {
+    // 反向传输（附件回显缓存）：ready 超过 attachmentCacheTTL 即清理
+    const reverseCacheExpired =
+      t.direction === "download" && t.status === "ready" &&
+      now - t.createdAt > config.attachmentCacheTTLMs;
+    if (expired || deliveredGrace || reverseCacheExpired) {
       transfers.delete(id);
       const p = spoolPath(id);
       try {

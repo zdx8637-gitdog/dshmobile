@@ -3,11 +3,14 @@ package dev.dshmobile.app.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -24,11 +27,16 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import dev.dshmobile.app.net.AskUserQuestionAnswer
 import dev.dshmobile.app.net.AskUserQuestionAnswerItem
 import dev.dshmobile.app.net.HistoryEntry
@@ -45,12 +53,26 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+/** 消息中的图片引用（image 块）：只有 attachmentId 元数据，字节经 attachment.resolve 按需拉取。 */
+data class ImageRef(
+    val attachmentId: String,
+    val width: Int = 0,
+    val height: Int = 0,
+    val mediaType: String? = null,
+    val name: String? = null,
+)
+
 /** 渲染单元：user/assistant 气泡与工具卡。 */
 sealed interface ChatItem {
     /** queueId != null 表示该消息仍在 agent 收件箱中排队（placement: queued=排队中 / steering=引导中）。 */
-    data class User(val text: String, val queueId: String? = null, val queuePlacement: String? = null) : ChatItem
-    data class Assistant(val text: String) : ChatItem
-    data class Tool(val name: String, val detail: String) : ChatItem
+    data class User(
+        val text: String,
+        val queueId: String? = null,
+        val queuePlacement: String? = null,
+        val images: List<ImageRef> = emptyList(),
+    ) : ChatItem
+    data class Assistant(val text: String, val images: List<ImageRef> = emptyList()) : ChatItem
+    data class Tool(val name: String, val detail: String, val images: List<ImageRef> = emptyList()) : ChatItem
     data class Sys(val text: String) : ChatItem
 }
 
@@ -80,6 +102,7 @@ fun ConversationScreen(
     onProjectionFrame: ((JsonObject) -> Unit)? = null,
     onUpload: (suspend (String, ByteArray) -> String)? = null,
     uploadProgress: kotlinx.coroutines.flow.StateFlow<Pair<Long, Long>?>? = null,
+    onResolveImage: (suspend (String) -> ByteArray)? = null,
     error: String? = null,
 ) {
     val scope = rememberCoroutineScope()
@@ -252,26 +275,30 @@ fun ConversationScreen(
                             // DSH user/message: content 在 data.content（无 message 包装）。
                             // 聊天流中只保留「已接纳」的消息：引导中气泡 → 清标记；末尾同文本（历史重拉）→ 跳过；否则追加。
                             val text = textOf(data["content"])
-                            if (text.isNotBlank()) {
+                            val images = imagesOf(data["content"])
+                            if (text.isNotBlank() || images.isNotEmpty()) {
                                 val boundIdx = items.indexOfFirst { it is ChatItem.User && it.queueId != null && it.text == text }
                                 when {
                                     boundIdx >= 0 -> {
                                         items = items.toMutableList().also { list ->
-                                            list[boundIdx] = (list[boundIdx] as ChatItem.User).copy(queueId = null, queuePlacement = null)
+                                            list[boundIdx] = (list[boundIdx] as ChatItem.User).copy(queueId = null, queuePlacement = null, images = images)
                                         }
                                     }
                                     (items.lastOrNull { it is ChatItem.User } as? ChatItem.User)?.text == text -> {
                                         // 已上屏（历史重拉等），跳过
                                     }
                                     else -> {
-                                        items = items + ChatItem.User(text)
+                                        items = items + ChatItem.User(text, images = images)
                                     }
                                 }
                             }
                         }
                         "assistant/message" -> {
                             val text = textOf(data["message"]?.jsonObject?.get("content"))
-                            if (text.isNotBlank()) items = items + ChatItem.Assistant(text)
+                            val images = imagesOf(data["message"]?.jsonObject?.get("content"))
+                            if (text.isNotBlank() || images.isNotEmpty()) {
+                                items = items + ChatItem.Assistant(text, images = images)
+                            }
                         }
                         "tool/call" -> {
                             val name = data["name"]?.jsonPrimitive?.contentOrNull ?: "tool"
@@ -280,7 +307,10 @@ fun ConversationScreen(
                         }
                         "tool/result" -> {
                             val txt = textOf(data["message"]?.jsonObject?.get("content")).take(200)
-                            if (txt.isNotBlank()) items = items + ChatItem.Tool("结果", txt)
+                            val images = imagesOf(data["message"]?.jsonObject?.get("content"))
+                            if (txt.isNotBlank() || images.isNotEmpty()) {
+                                items = items + ChatItem.Tool("结果", txt, images = images)
+                            }
                         }
                         "turn/start" -> { running = true }
                         "turn/end" -> { running = false }
@@ -451,22 +481,31 @@ fun ConversationScreen(
             }
             items(items) { item ->
                 when (item) {
-                    is ChatItem.User -> Bubble(
-                        item.text,
-                        fromUser = true,
-                        pendingLabel = if (item.queuePlacement == "steering") "⚡ 引导中" else null,
-                        onLongClick = { copyToClipboard(context, item.text) },
-                    )
-                    is ChatItem.Assistant -> Bubble(
-                        item.text,
-                        fromUser = false,
-                        onLongClick = { copyToClipboard(context, item.text) },
-                    )
-                    is ChatItem.Tool -> ToolCard(
-                        item.name,
-                        item.detail,
-                        onLongClick = { copyToClipboard(context, listOf(item.name, item.detail).filter { it.isNotBlank() }.joinToString("\n")) },
-                    )
+                    is ChatItem.User -> {
+                        Bubble(
+                            item.text,
+                            fromUser = true,
+                            pendingLabel = if (item.queuePlacement == "steering") "⚡ 引导中" else null,
+                            onLongClick = { copyToClipboard(context, item.text) },
+                        )
+                        MessageImages(item.images, onResolveImage)
+                    }
+                    is ChatItem.Assistant -> {
+                        Bubble(
+                            item.text,
+                            fromUser = false,
+                            onLongClick = { copyToClipboard(context, item.text) },
+                        )
+                        MessageImages(item.images, onResolveImage)
+                    }
+                    is ChatItem.Tool -> {
+                        ToolCard(
+                            item.name,
+                            item.detail,
+                            onLongClick = { copyToClipboard(context, listOf(item.name, item.detail).filter { it.isNotBlank() }.joinToString("\n")) },
+                        )
+                        MessageImages(item.images, onResolveImage)
+                    }
                     is ChatItem.Sys -> Text(item.text, Modifier.padding(vertical = 6.dp), color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodySmall)
                 }
             }
@@ -947,10 +986,22 @@ private fun toChatItem(entry: HistoryEntry): ChatItem? {
     val data = event["data"]?.jsonObject
     return when (type) {
         // DSH user/message: content 在 data.content；assistant 在 data.message.content
-        "user/message" -> textOf(data?.get("content")).takeIf { it.isNotBlank() }?.let { ChatItem.User(it) }
-        "assistant/message" -> textOf(data?.get("message")?.jsonObject?.get("content")).takeIf { it.isNotBlank() }?.let { ChatItem.Assistant(it) }
+        "user/message" -> {
+            val text = textOf(data?.get("content"))
+            val images = imagesOf(data?.get("content"))
+            if (text.isNotBlank() || images.isNotEmpty()) ChatItem.User(text, images = images) else null
+        }
+        "assistant/message" -> {
+            val text = textOf(data?.get("message")?.jsonObject?.get("content"))
+            val images = imagesOf(data?.get("message")?.jsonObject?.get("content"))
+            if (text.isNotBlank() || images.isNotEmpty()) ChatItem.Assistant(text, images = images) else null
+        }
         "tool/call" -> ChatItem.Tool(data?.get("name")?.jsonPrimitive?.contentOrNull ?: "tool", data?.get("arguments")?.jsonPrimitive?.contentOrNull?.take(120) ?: "")
-        "tool/result" -> textOf(data?.get("message")?.jsonObject?.get("content")).take(200).takeIf { it.isNotBlank() }?.let { ChatItem.Tool("结果", it) }
+        "tool/result" -> {
+            val txt = textOf(data?.get("message")?.jsonObject?.get("content")).take(200)
+            val images = imagesOf(data?.get("message")?.jsonObject?.get("content"))
+            if (txt.isNotBlank() || images.isNotEmpty()) ChatItem.Tool("结果", txt, images = images) else null
+        }
         "turn/start" -> ChatItem.Sys("— 轮次开始 —")
         "turn/end" -> ChatItem.Sys("— 轮次结束 —")
         else -> null
@@ -962,3 +1013,119 @@ private fun textOf(content: kotlinx.serialization.json.JsonElement?): String =
         ?.mapNotNull { it.jsonObject["type"]?.jsonPrimitive?.contentOrNull to it.jsonObject["text"]?.jsonPrimitive?.contentOrNull }
         ?.filter { it.first == "text" }
         ?.joinToString("") { it.second ?: "" } ?: ""
+
+/** 从 content 块数组提取 image 块引用（图片字节经 attachment.resolve 按需拉取）。 */
+private fun imagesOf(content: kotlinx.serialization.json.JsonElement?): List<ImageRef> =
+    content?.jsonArray?.orEmpty()?.mapNotNull { block ->
+        val o = block.jsonObject
+        if (o["type"]?.jsonPrimitive?.contentOrNull != "image") return@mapNotNull null
+        val att = o["attachment"]?.jsonObject ?: return@mapNotNull null
+        ImageRef(
+            attachmentId = att["attachmentId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+            width = att["width"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+            height = att["height"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+            mediaType = att["mediaType"]?.jsonPrimitive?.contentOrNull,
+            name = att["name"]?.jsonPrimitive?.contentOrNull,
+        )
+    } ?: emptyList()
+
+/**
+ * 消息图片渲染（Phase B 回显）：按需经 attachment.resolve 拉字节 → 解码 → 缩略图，
+ * 点按全屏。attachmentId → Bitmap 内存缓存（会话内）。
+ */
+@Composable
+private fun MessageImages(
+    images: List<ImageRef>,
+    resolve: (suspend (String) -> ByteArray)?,
+) {
+    if (images.isEmpty() || resolve == null) return
+    val cache = remember { mutableStateMapOf<String, Bitmap?>() }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        for (ref in images) {
+            RemoteImage(ref, resolve, cache)
+        }
+    }
+}
+
+@Composable
+private fun RemoteImage(
+    ref: ImageRef,
+    resolve: suspend (String) -> ByteArray,
+    cache: SnapshotStateMap<String, Bitmap?>,
+) {
+    var failed by remember(ref.attachmentId) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val bmp = cache[ref.attachmentId]
+    LaunchedEffect(ref.attachmentId) {
+        if (cache.containsKey(ref.attachmentId)) return@LaunchedEffect
+        try {
+            val bytes = resolve(ref.attachmentId)
+            cache[ref.attachmentId] = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: Exception) {
+            cache[ref.attachmentId] = null
+            failed = true
+        }
+    }
+    when {
+        bmp != null -> {
+            var zoomed by remember { mutableStateOf(false) }
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = ref.name ?: "图片",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .width(160.dp)
+                    .height(160.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { zoomed = true },
+            )
+            if (zoomed) {
+                Dialog(onDismissRequest = { zoomed = false }) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = ref.name,
+                        modifier = Modifier.fillMaxWidth().fillMaxHeight(0.85f),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+            }
+        }
+        failed -> {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.size(160.dp).clickable {
+                    failed = false
+                    cache.remove(ref.attachmentId)
+                    scope.launch {
+                        try {
+                            val bytes = resolve(ref.attachmentId)
+                            cache[ref.attachmentId] = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            failed = false
+                        } catch (_: Exception) {
+                            failed = true
+                        }
+                    }
+                },
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("图片加载失败，点按重试", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                }
+            }
+        }
+        else -> {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.size(160.dp),
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                }
+            }
+        }
+    }
+}

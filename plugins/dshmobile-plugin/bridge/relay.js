@@ -55,6 +55,22 @@ export class RelayBridge {
     return login.data.accessToken;
   }
 
+  /**
+   * 用户 access token（反向传输/attachment.resolve 用）：
+   * token 模式直用；密码模式登录一次并缓存（桥不轮换，宿主是会话唯一所有者）。
+   */
+  async userAccessToken() {
+    if (this.accessToken) return this.accessToken;
+    if (this._userToken) return this._userToken;
+    const login = await this.#restJson("/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: this.username, password: this.password }),
+    });
+    this._userToken = login.data.accessToken;
+    return this._userToken;
+  }
+
   /** 注册/复用设备（幂等，同 clientDeviceKey 返回同一 deviceId + 新 token）。 */
   async #registerDevice(accessToken) {
     const reg = await this.#restJson("/devices/register", {

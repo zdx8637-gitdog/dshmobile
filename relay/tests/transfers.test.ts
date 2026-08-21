@@ -305,4 +305,56 @@ describe("Data plane: transfers", () => {
     const bytes = Buffer.from(await good.arrayBuffer());
     expect(sha256hex(bytes)).toBe(fileId);
   });
+
+  it("reverse direction (download): ready without deliver, swept after cache TTL", async () => {
+    const { userId } = await createUser(ctx.db, "tf-rev");
+    await createDevice(ctx.db, userId, "dev-rev");
+    const token = signAccessToken(userId);
+    const fileId = sha256hex(CONTENT);
+    const bridge = await connectAuthWs(ctx, "/ws/bridge", signDeviceToken("dev-rev", userId));
+
+    const ann = await announceFor(token, {
+      deviceId: "dev-rev",
+      fileId,
+      name: "img.png",
+      size: CONTENT.length,
+      sha256: fileId,
+      targetPath: "attachments/x",
+      direction: "download",
+    });
+    const { transferId } = (await ann.json()).data;
+    await fetch(`${ctx.baseUrl}/transfers/${transferId}/chunks`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-chunk-offset": "0",
+        authorization: `Bearer ${token}`,
+      },
+      body: new Uint8Array(CONTENT),
+    });
+    const c = await fetch(`${ctx.baseUrl}/transfers/${transferId}/complete`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(c.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 300));
+
+    // ready 即终态，且桥不收到 transfer.deliver
+    const t = transferService.get(transferId);
+    expect(t?.status).toBe("ready");
+    expect(t?.direction).toBe("download");
+    const deliverMsgs = bridge.drainMessages().filter((m: any) => m.type === "transfer.deliver");
+    expect(deliverMsgs.length).toBe(0);
+
+    // 用户 token 可下载
+    const dl = await fetch(`${ctx.baseUrl}/transfers/${transferId}/download`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(dl.status).toBe(200);
+
+    // 缓存 TTL 过后 sweep 清理
+    const removed = await transferService.sweep(Date.now() + config.attachmentCacheTTLMs + 60000);
+    expect(removed).toBeGreaterThanOrEqual(1);
+    bridge.ws.close();
+  });
 });

@@ -72,4 +72,9 @@ export const config = {
     process.env.TRANSFER_DELIVER_TIMEOUT_MS ?? String(10 * 60 * 1000),
     10
   ),
+  // 反向传输（bridge → 手机，如附件回显）的 ready 缓存时长：超过即清理
+  attachmentCacheTTLMs: parseInt(
+    process.env.ATTACHMENT_CACHE_TTL_MS ?? String(10 * 60 * 1000),
+    10
+  ),
 } as const;

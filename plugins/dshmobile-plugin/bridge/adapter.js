@@ -90,6 +90,7 @@ export class Adapter {
 
     if (type === "transfer.deliver") return this.#deliver(payload, requestId);
     if (type === "upload.commit") return this.#commitUpload(payload, requestId);
+    if (type === "attachment.resolve") return this.#resolveAttachment(payload, requestId);
 
     if (READ_ONLY_TYPES.has(type)) return this.#read(type, payload, requestId);
     if (WRITE_TYPES.has(type)) return this.#write(type, payload, requestId);
@@ -209,6 +210,100 @@ export class Adapter {
       ok: true,
       data: { path: target, noticeFailed },
     });
+  }
+
+  /** 以用户身份调用 relay REST（反向传输专用）。 */
+  async #restAsUser(token, method, path, body) {
+    const res = await fetch(`${this.relay.url}${path}`, {
+      method,
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.ok !== true) {
+      throw new Error(`${path} failed: HTTP ${res.status} ${JSON.stringify(j.error ?? j)}`);
+    }
+    return j;
+  }
+
+  /** 以用户身份分块上传（反向传输）。 */
+  async #chunkAsUser(token, transferId, offset, buf) {
+    const res = await fetch(
+      `${this.relay.url}/transfers/${encodeURIComponent(transferId)}/chunks`,
+      {
+        method: "PUT",
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-chunk-offset": String(offset),
+          authorization: `Bearer ${token}`,
+        },
+        body: new Uint8Array(buf),
+      },
+    );
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.ok !== true) {
+      throw new Error(`chunk failed: HTTP ${res.status} ${JSON.stringify(j.error ?? j)}`);
+    }
+    return Number(j.data?.received ?? 0);
+  }
+
+  /**
+   * Data plane 附件回显（Phase B）：手机请求桥代取 DSH 附件字节 →
+   * 反向传输进 relay spool（direction=download，ready 即终态）→ 回 transferId。
+   */
+  async #resolveAttachment(payload, requestId) {
+    const { sessionId, attachmentId } = payload ?? {};
+    const fail = (code, message) =>
+      this.relay.respond(requestId, "attachment.resolve", { ok: false, error: { code, message } });
+    if (typeof sessionId !== "string" || typeof attachmentId !== "string") {
+      return fail("bad-request", "sessionId/attachmentId required");
+    }
+    try {
+      // ① 读 DSH 附件（公开 unary session.attachment → {attachment, data:base64}）
+      const r = await this.dsh.unary("session.attachment", { sessionId, attachmentId }, { timeoutMs: 30000 });
+      if (!r.ok || !r.value?.attachment || typeof r.value?.data !== "string") {
+        return fail("attachment-unavailable", String(r.error?.message ?? "attachment not found"));
+      }
+      const { attachment, data } = r.value;
+      const bytes = Buffer.from(data, "base64");
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      const EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+      const name = attachment.name || `${attachmentId}.${EXT[attachment.mediaType] ?? "bin"}`;
+      // ② 反向传输（幂等：同 fileId 复用已 ready 的 spool）
+      const token = await this.relay.userAccessToken();
+      const ann = await this.#restAsUser(token, "POST", "/transfers", {
+        deviceId: this.relay.deviceId,
+        fileId: sha256,
+        name,
+        size: bytes.length,
+        sha256,
+        targetPath: `attachments/${attachmentId}`,
+        direction: "download",
+      });
+      const transferId = ann.data.transferId;
+      if (ann.data.status !== "ready" && ann.data.received < bytes.length) {
+        let offset = Number(ann.data.received ?? 0);
+        const chunkSize = 4 * 1024 * 1024;
+        while (offset < bytes.length) {
+          const end = Math.min(offset + chunkSize, bytes.length);
+          offset = await this.#chunkAsUser(token, transferId, offset, bytes.subarray(offset, end));
+        }
+        await this.#restAsUser(token, "POST", `/transfers/${transferId}/complete`, {});
+      }
+      return this.relay.respond(requestId, "attachment.resolve", {
+        ok: true,
+        data: {
+          transferId,
+          width: attachment.width,
+          height: attachment.height,
+          mediaType: attachment.mediaType,
+          bytes: bytes.length,
+        },
+      });
+    } catch (err) {
+      console.error("[adapter] attachment.resolve failed:", err?.message);
+      return fail("resolve-failed", String(err?.message ?? err));
+    }
   }
 
   async #read(type, payload, requestId) {

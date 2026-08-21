@@ -362,6 +362,9 @@ class MainActivity : ComponentActivity() {
                             repo.uploadFile(device, r.sessionId, name, "uploads/$name", bytes)
                         },
                         uploadProgress = repo.uploadProgress,
+                        onResolveImage = { attachmentId ->
+                            repo.resolveAttachment(r.sessionId, attachmentId)
+                        },
                     )
                 }
             }

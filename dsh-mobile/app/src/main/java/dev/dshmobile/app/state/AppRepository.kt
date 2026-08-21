@@ -338,6 +338,31 @@ class AppRepository(
         }
     }
 
+    /** 附件回显（Phase B）：桥代取 DSH 附件字节 → 反向传输 → 手机下载。返回图片字节。 */
+    suspend fun resolveAttachment(sessionId: String, attachmentId: String): ByteArray {
+        val client = remote ?: throw IllegalStateException("未连接设备")
+        val resp = client.request(
+            "attachment.resolve",
+            buildJsonObject {
+                put("sessionId", sessionId)
+                put("attachmentId", attachmentId)
+            },
+        )
+        val payload = resp.payload?.jsonObject
+        if (payload?.get("ok")?.jsonPrimitive?.contentOrNull != "true") {
+            throw IllegalStateException(
+                payload?.get("error")?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
+                    ?: "图片获取失败",
+            )
+        }
+        val transferId = payload["data"]?.jsonObject?.get("transferId")?.jsonPrimitive?.contentOrNull
+            ?: throw IllegalStateException("transferId 缺失")
+        val session = _auth.value ?: throw IllegalStateException("未登录")
+        return withContext(Dispatchers.IO) {
+            withFreshToken { CloudApi(cloudBaseUrl).downloadTransfer(it, transferId) }
+        }
+    }
+
     // ---------- 业务请求封装 ----------
 
     suspend fun loadSessions(): Boolean {
