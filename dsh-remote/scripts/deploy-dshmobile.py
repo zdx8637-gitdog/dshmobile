@@ -11,7 +11,7 @@ if not HOST or not PWD:
     sys.exit(1)
 
 WEB = "/opt/session-control-relay/web/dshmobile"
-APK = r"D:\p\release\DSH-Mobile-0.1.3.apk"
+APK = r"D:\p\release\DSH-Mobile-0.1.4.apk"
 HTML = r"D:\p\dsh-remote\web\dshmobile\index.html"
 
 cli = paramiko.SSHClient()
@@ -23,7 +23,7 @@ try:
 except FileNotFoundError:
     sftp.mkdir(WEB)
 sftp.put(HTML, f"{WEB}/index.html")
-sftp.put(APK, f"{WEB}/DSH-Mobile-0.1.3.apk")
+sftp.put(APK, f"{WEB}/DSH-Mobile-0.1.4.apk")
 sftp.close()
 _, out, _ = cli.exec_command(
     "curl -s -o /dev/null -w '%{http_code}' https://127.0.0.1/dshmobile/ -H 'Host: www.deepseek-claudex.cn'",
