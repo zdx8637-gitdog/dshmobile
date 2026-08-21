@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.security.MessageDigest
 
 /** 归一化 relay 地址为 scheme://host[:port]（忽略路径/尾部斜杠/大小写），用于跨服务器比较。 */
 internal fun normalizeRelayOrigin(url: String): String {
@@ -69,6 +71,10 @@ class AppRepository(
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    /** 上传进度：received → total；null = 无上传。 */
+    private val _uploadProgress = MutableStateFlow<Pair<Long, Long>?>(null)
+    val uploadProgress: StateFlow<Pair<Long, Long>?> = _uploadProgress.asStateFlow()
 
     fun setError(message: String?) {
         _error.value = message
@@ -216,6 +222,91 @@ class AppRepository(
         } catch (e: Exception) {
             setError("删除失败: ${e.message}")
             false
+        }
+    }
+
+    // ---------- Data plane：文件上传（手机 → PC，契约见 docs/02-protocol.md §7） ----------
+
+    /**
+     * 上传一个文件到设备并（可选）进会话。返回电脑上的落盘路径，失败抛异常。
+     * 断点续传：offset 不匹配时以同 fileId 幂等重 announce 续传。
+     */
+    suspend fun uploadFile(
+        deviceId: String,
+        sessionId: String?,
+        name: String,
+        targetPath: String,
+        bytes: ByteArray,
+    ): String {
+        val session = _auth.value ?: throw IllegalStateException("未登录")
+        if (bytes.isEmpty()) throw IllegalStateException("空文件")
+        val sha = MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val api = CloudApi(cloudBaseUrl)
+        _uploadProgress.value = 0L to bytes.size.toLong()
+        try {
+            var info = withContext(Dispatchers.IO) {
+                api.announceTransfer(session.accessToken, deviceId, sha, name, bytes.size.toLong(), sha, targetPath)
+            }
+            var offset = info.received.coerceAtMost(bytes.size.toLong())
+            val chunkSize = 512 * 1024
+            while (offset < bytes.size) {
+                val end = minOf(offset + chunkSize, bytes.size.toLong()).toInt()
+                val chunk = bytes.copyOfRange(offset.toInt(), end)
+                try {
+                    val received = withContext(Dispatchers.IO) {
+                        api.putChunk(session.accessToken, info.transferId, offset, chunk)
+                    }
+                    offset = received
+                    _uploadProgress.value = offset to bytes.size.toLong()
+                } catch (e: Exception) {
+                    val msg = e.message ?: ""
+                    if (msg.contains("offset", ignoreCase = true) || msg.contains("NOT_FOUND", ignoreCase = true)) {
+                        // spool 已清理/偏移失效：同 fileId 幂等重 announce 后续传
+                        info = withContext(Dispatchers.IO) {
+                            api.announceTransfer(session.accessToken, deviceId, sha, name, bytes.size.toLong(), sha, targetPath)
+                        }
+                        offset = info.received.coerceAtMost(bytes.size.toLong())
+                    } else {
+                        throw e
+                    }
+                }
+            }
+            withContext(Dispatchers.IO) { api.completeTransfer(session.accessToken, info.transferId) }
+            // complete 后 relay 异步投递到 bridge：upload.commit 可能撞上 not-landed，轮询重试
+            val client = remote ?: throw IllegalStateException("未连接设备")
+            repeat(30) {
+                val resp = client.request(
+                    "upload.commit",
+                    buildJsonObject {
+                        put("transferId", info.transferId)
+                        put("fileId", sha)
+                        put("name", name)
+                        put("size", bytes.size.toLong())
+                        put("sha256", sha)
+                        put("targetPath", targetPath)
+                        if (sessionId != null) put("sessionId", sessionId)
+                    },
+                )
+                val payload = resp.payload?.jsonObject
+                if (payload?.get("ok")?.jsonPrimitive?.contentOrNull == "true") {
+                    val path = payload["data"]?.jsonObject?.get("path")?.jsonPrimitive?.contentOrNull
+                    if (path != null) return path
+                } else {
+                    val code = payload?.get("error")?.jsonObject?.get("code")?.jsonPrimitive?.contentOrNull
+                    if (code != "not-landed" && code != "OFFLINE") {
+                        throw IllegalStateException(
+                            payload?.get("error")?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
+                                ?: "上传确认失败",
+                        )
+                    }
+                }
+                delay(1000)
+            }
+            throw IllegalStateException("上传确认超时：文件已传到电脑，但未能确认落盘")
+        } finally {
+            _uploadProgress.value = null
         }
     }
 

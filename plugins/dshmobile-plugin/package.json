@@ -1,6 +1,6 @@
 {
   "name": "@zdx8637/dshmobile-bridge",
-  "version": "0.1.0-beta.7",
+  "version": "0.1.0-beta.8",
   "description": "开箱即用的手机远程桥接插件：bridge 守护 + 常驻二维码扫码登录/授权（免网络配置，免补丁）",
   "type": "module",
   "license": "MIT",

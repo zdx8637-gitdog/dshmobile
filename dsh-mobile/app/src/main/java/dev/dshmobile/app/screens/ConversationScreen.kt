@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,6 +18,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -75,6 +78,8 @@ fun ConversationScreen(
     onRespondQuestion: suspend (String, AskUserQuestionAnswer, String) -> Boolean,
     onSkipQuestion: suspend (String, String) -> Boolean,
     onProjectionFrame: ((JsonObject) -> Unit)? = null,
+    onUpload: (suspend (String, ByteArray) -> String)? = null,
+    uploadProgress: kotlinx.coroutines.flow.StateFlow<Pair<Long, Long>?>? = null,
     error: String? = null,
 ) {
     val scope = rememberCoroutineScope()
@@ -85,6 +90,37 @@ fun ConversationScreen(
     var running by remember { mutableStateOf(false) }
     var planActive by remember { mutableStateOf<Boolean?>(null) }
     val listState = rememberLazyListState()
+
+    // ---- 上传（Data plane：文件/图片 → 电脑）----
+    var uploadMsg by remember { mutableStateOf<String?>(null) }
+    val upProgress by (uploadProgress ?: kotlinx.coroutines.flow.MutableStateFlow(null)).collectAsState()
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val fn = onUpload ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            try {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("无法读取所选文件")
+                var name = "file.bin"
+                var mime: String? = null
+                try {
+                    context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                        if (c.moveToFirst()) {
+                            val ni = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                            if (ni >= 0) name = c.getString(ni) ?: name
+                            val mi = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                            // SIZE 仅用于信息展示，不使用
+                        }
+                    }
+                    mime = context.contentResolver.getType(uri)
+                } catch (_: Exception) {}
+                val finalBytes = dev.dshmobile.app.util.compressImageIfNeeded(bytes, mime)
+                val path = fn(name, finalBytes)
+                uploadMsg = "已上传 $name → $path"
+            } catch (e: Exception) {
+                uploadMsg = "上传失败: ${e.message}"
+            }
+        }
+    }
 
     // 历史分页状态（参考 sessioncontrol：hasMoreBefore + loadingOlder 防重入 + beforeSeq 游标）
     var hasMoreOlder by remember { mutableStateOf(false) }
@@ -524,6 +560,12 @@ fun ConversationScreen(
             }
         }
         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+                onClick = { pickFile.launch("*/*") },
+                modifier = Modifier.size(44.dp),
+            ) {
+                Icon(Icons.Filled.AttachFile, "上传文件/图片", tint = MaterialTheme.colorScheme.primary)
+            }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -559,6 +601,32 @@ fun ConversationScreen(
             }
         }
     }
+
+        // 上传进度与结果（Data plane）
+        val up = upProgress
+        if (up != null && up.second > 0) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)) {
+                LinearProgressIndicator(
+                    progress = { (up.first.toFloat() / up.second.toFloat()).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "上传中 ${up.first / 1024}KB / ${up.second / 1024}KB",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+        if (uploadMsg != null) {
+            Text(
+                uploadMsg!!,
+                Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                color = if (uploadMsg!!.startsWith("上传失败")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
 
     // 提问卡：ModalBottomSheet 从底部弹出
     val firstQuestion = pendingQuestions.firstOrNull()

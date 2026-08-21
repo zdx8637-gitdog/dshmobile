@@ -31,6 +31,12 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="dshmobile" android:host="grant" />
             </intent-filter>
+            <!-- 系统分享（微信/文件管理器 → DSH Mobile）：上传文件/图片到电脑 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
     </application>
 

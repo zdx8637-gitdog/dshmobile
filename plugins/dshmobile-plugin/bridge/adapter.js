@@ -89,6 +89,7 @@ export class Adapter {
     console.log("[adapter] request:", type, "from", env.actor?.clientId ?? "?", "payload:", JSON.stringify(payload).slice(0, 400));
 
     if (type === "transfer.deliver") return this.#deliver(payload, requestId);
+    if (type === "upload.commit") return this.#commitUpload(payload, requestId);
 
     if (READ_ONLY_TYPES.has(type)) return this.#read(type, payload, requestId);
     if (WRITE_TYPES.has(type)) return this.#write(type, payload, requestId);
@@ -159,6 +160,55 @@ export class Adapter {
       console.error("[adapter] deliver failed:", err?.message);
       return fail("deliver-failed", String(err?.message ?? err));
     }
+  }
+
+  /**
+   * Data plane 上传进会话：复核 relay 已投递落盘的文件，然后按 L1 发会话提及。
+   * L2（视觉模型 image 块注入）依赖 DSH 附件公共 API 侦查结果，见 TODO 锚点。
+   */
+  async #commitUpload(payload, requestId) {
+    const { transferId, name, size, targetPath, sessionId } = payload ?? {};
+    const fail = (code, message) =>
+      this.relay.respond(requestId, "upload.commit", { ok: false, error: { code, message } });
+    if (typeof transferId !== "string" || typeof name !== "string") {
+      return fail("bad-request", "transferId/name required");
+    }
+    let target;
+    try {
+      target = resolveInRoot(this.workspaceRoot, targetPath || name);
+    } catch (err) {
+      return fail("bad-path", String(err?.message ?? err));
+    }
+    // 复核落盘：文件必须已在 workspace 边界内，且大小一致
+    let st;
+    try {
+      st = await stat(target);
+    } catch {
+      return fail("not-landed", `file not landed yet: ${target}`);
+    }
+    if (Number.isInteger(size) && st.size !== size) {
+      return fail("size-mismatch", `size mismatch: disk ${st.size}, want ${size}`);
+    }
+    // L1：带 sessionId 则发会话提及（任何模型可用工具读文件）。
+    // TODO(L2)：session.models 当前模型 == deepseek-v4-flash-vision-exp 时，
+    // 登记 DSH 附件并以 image 块注入 user content（依赖侦查 §6.1，未做前保持 L1）。
+    let noticeFailed = null;
+    if (typeof sessionId === "string" && sessionId) {
+      try {
+        const r = await this.dsh.unary(
+          "session.prompt",
+          { sessionId, mode: "queue", content: [{ type: "text", text: `已上传 ${name} → ${target}` }] },
+          { timeoutMs: 30000 },
+        );
+        if (!r.ok) noticeFailed = String(r.error?.message ?? "session.prompt failed");
+      } catch (err) {
+        noticeFailed = String(err?.message ?? err);
+      }
+    }
+    return this.relay.respond(requestId, "upload.commit", {
+      ok: true,
+      data: { path: target, noticeFailed },
+    });
   }
 
   async #read(type, payload, requestId) {

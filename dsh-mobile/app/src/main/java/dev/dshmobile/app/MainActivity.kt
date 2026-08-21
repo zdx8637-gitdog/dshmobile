@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -52,6 +53,14 @@ class MainActivity : ComponentActivity() {
     private val pendingPairRoute = mutableStateOf<Route.PairLogin?>(null)
     /** deep link 触发的授权请求（方向二）。 */
     private val pendingGrantRoute = mutableStateOf<Route.GrantLogin?>(null)
+    /** 系统分享（ACTION_SEND）来的待上传文件。 */
+    private val pendingShareUri = mutableStateOf<Uri?>(null)
+
+    private fun parseShareIntent(intent: Intent?): Uri? {
+        if (intent?.action != Intent.ACTION_SEND) return null
+        val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return null
+        return uri
+    }
 
     private fun parsePairIntent(intent: Intent?): Route.PairLogin? {
         val data = intent?.data ?: return null
@@ -93,6 +102,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         parsePairIntent(intent)?.let { pendingPairRoute.value = it }
         parseGrantIntent(intent)?.let { pendingGrantRoute.value = it }
+        parseShareIntent(intent)?.let { pendingShareUri.value = it }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -104,6 +114,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch { repo.restoreAuth() }
         parsePairIntent(intent)?.let { pendingPairRoute.value = it }
         parseGrantIntent(intent)?.let { pendingGrantRoute.value = it }
+        parseShareIntent(intent)?.let { pendingShareUri.value = it }
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -198,6 +209,37 @@ class MainActivity : ComponentActivity() {
                         kotlinx.coroutines.delay(1600)
                         grantDone = false
                         route = if (auth != null) Route.Navigator else Route.Auth
+                    }
+                }
+
+                // 系统分享（微信/文件管理器 → DSH Mobile）：上传到当前设备（无会话，仅落盘）
+                val shareUri = pendingShareUri.value
+                LaunchedEffect(shareUri, remoteStatus, auth, devices) {
+                    val uri = shareUri ?: return@LaunchedEffect
+                    val device = repo.selectedDeviceId
+                    if (auth == null || device == null || remoteStatus != RemoteStatus.CONNECTED) return@LaunchedEffect
+                    pendingShareUri.value = null
+                    lifecycleScope.launch {
+                        try {
+                            var name = "file.bin"
+                            var mime: String? = null
+                            try {
+                                contentResolver.query(uri, null, null, null, null)?.use { c ->
+                                    if (c.moveToFirst()) {
+                                        val ni = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                        if (ni >= 0) name = c.getString(ni) ?: name
+                                    }
+                                }
+                                mime = contentResolver.getType(uri)
+                            } catch (_: Exception) {}
+                            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                                ?: throw IllegalStateException("无法读取所选文件")
+                            val final = dev.dshmobile.app.util.compressImageIfNeeded(bytes, mime)
+                            val path = repo.uploadFile(device, null, name, "uploads/$name", final)
+                            Toast.makeText(this@MainActivity, "已上传 $name → $path", Toast.LENGTH_LONG).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(this@MainActivity, "上传失败: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
 
@@ -315,6 +357,11 @@ class MainActivity : ComponentActivity() {
                             val seq = frame["seq"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
                             repo.updateProjection(key, value, seq)
                         },
+                        onUpload = { name, bytes ->
+                            val device = repo.selectedDeviceId ?: throw IllegalStateException("未连接设备")
+                            repo.uploadFile(device, r.sessionId, name, "uploads/$name", bytes)
+                        },
+                        uploadProgress = repo.uploadProgress,
                     )
                 }
             }
