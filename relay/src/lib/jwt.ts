@@ -9,6 +9,7 @@ export function signAccessToken(userId: string): string {
 
 export function verifyAccessToken(token: string): { userId: string } {
   const payload = jwt.verify(token, config.jwtSecret) as jwt.JwtPayload;
+  if (payload.scope !== "client") throw new Error("invalid token scope");
   return { userId: payload.sub! };
 }
 
@@ -22,5 +23,6 @@ export function signDeviceToken(deviceId: string, userId: string): string {
 
 export function verifyDeviceToken(token: string): { deviceId: string; userId: string } {
   const payload = jwt.verify(token, config.jwtSecret) as jwt.JwtPayload;
+  if (payload.scope !== "device") throw new Error("invalid token scope");
   return { deviceId: payload.sub!, userId: payload.userId };
 }

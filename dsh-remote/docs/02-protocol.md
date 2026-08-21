@@ -243,10 +243,41 @@ WebSocket 升级，帧格式：
 | PUT | `/transfers/:transferId/chunks` | 用户 | 分块追加：header `X-Chunk-Offset: <bytes>` + 原始字节 body；offset 必须等于当前已收字节数，否则 `409 chunk-offset-mismatch`；返回 `{received}` |
 | GET | `/transfers/:transferId` | 用户 | 状态：`{fileId, name, size, received, status}`（`uploading`/`ready`/`delivered`/`failed`） |
 | POST | `/transfers/:transferId/complete` | 用户 | 收尾：校验 size 与 sha256 → `ready` 并通知 bridge 投递；失败 `422 checksum-mismatch` |
-| GET | `/transfers/:transferId/download` | 设备 deviceToken | bridge 拉取 spool 内容（仅 `ready` 状态、且 deviceToken 的设备与传输一致） |
+| GET | `/transfers/:transferId/download` | **设备 deviceToken 或 用户 accessToken** | 拉取 spool 内容（仅 `ready` 状态）；设备 token 要求传输的设备一致，用户 token 要求传输的 owner 一致——**双向下载：bridge 投递与手机回显共用** |
 
 归属校验：announce/上传/状态/complete 要求 userId 拥有 deviceId（`findByIdAndUser`）；
-download 要求 deviceToken 解出的 deviceId 与传输一致。限流：数据面复用流程面额度（300/分）。
+download 双面鉴权见上表。限流：数据面复用流程面额度（300/分）。
+
+### 7.3b 上传进会话（upload.commit，client → bridge 请求）
+
+手机完成上传（relay `ready` 并自动投递落盘）后，向 bridge 确认落盘并决定是否进会话：
+
+```json
+{ "kind": "request", "type": "upload.commit", "requestId": "…",
+  "payload": { "transferId": "…", "fileId": "…", "name": "…", "size": 123,
+               "sha256": "…", "targetPath": "docs/test.pdf", "sessionId": "…|null" } }
+```
+
+响应：`{ "ok": true, "data": { "path": "/abs/落盘路径", "messageId": "…|null" } }`。
+bridge 复核文件已落盘（workspace 边界内）后：
+
+- `sessionId` 非空 → L1：向该会话发 `sessions.run` 文本「已上传 <name> → <path>」（任何模型可用工具读文件）；L2（视觉模型时）见 §7.5 视觉注记；
+- `sessionId` 为空 → 仅返回 path。
+
+### 7.3c 附件回显（attachment.resolve，client → bridge 请求）
+
+会话消息/工具结果中的图片块只有 attachmentId 引用、没有字节。手机请求 bridge 代取：
+
+```json
+{ "kind": "request", "type": "attachment.resolve", "requestId": "…",
+  "payload": { "sessionId": "…", "attachmentId": "…" } }
+```
+
+响应：`{ "ok": true, "data": { "transferId": "…", "width": 1280, "height": 640,
+"mediaType": "image/png", "bytes": 443029 } }`。
+bridge 内部：本机读 DSH 附件字节 → sha256 → **以用户身份反向传输**（announce +
+分块 PUT + complete，`targetPath` 为系统保留路径）→ 回 transferId。
+relay 对同 attachmentId 懒缓存（TTL 10 分钟）；手机凭 transferId 走用户侧下载。
 
 ### 7.4 控制面消息
 

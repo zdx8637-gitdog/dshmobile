@@ -5,14 +5,14 @@ import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler.js";
 import { ok } from "../lib/response.js";
 import { authenticate } from "../middleware/authenticate.js";
-import { verifyDeviceToken } from "../lib/jwt.js";
+import { verifyDeviceToken, verifyAccessToken } from "../lib/jwt.js";
 import { config } from "../config.js";
 import { AppError, AuthError, ValidationError } from "../lib/errors.js";
 import * as deviceModel from "../models/device.js";
 import * as transferService from "../services/transfer-service.js";
 
 const router = Router();
-router.use(authenticate);
+router.use("/transfers", authenticate);
 
 const announceSchema = z.object({
   deviceId: z.string().min(1).max(64),
@@ -105,19 +105,28 @@ transferDownloadRouter.get(
     if (!header || !header.startsWith("Bearer ")) {
       throw new AuthError("Missing or invalid authorization header", false);
     }
-    let deviceId: string;
-    try {
-      deviceId = verifyDeviceToken(header.slice(7)).deviceId;
-    } catch {
-      throw new AuthError("Invalid token", true);
-    }
+    const token = header.slice(7);
     const t = transferService.get(req.params.transferId);
-    if (!t || t.deviceId !== deviceId) {
+    // 双面鉴权：设备 token（bridge 投递拉取，要求设备一致）
+    // 或用户 token（手机回显/反向传输拉取，要求 owner 一致）
+    let authorized = false;
+    try {
+      const { deviceId, userId: deviceUserId } = verifyDeviceToken(token);
+      authorized = Boolean(t && t.deviceId === deviceId && t.userId === deviceUserId);
+    } catch {
+      try {
+        const { userId } = verifyAccessToken(token);
+        authorized = Boolean(t && t.userId === userId);
+      } catch {
+        authorized = false;
+      }
+    }
+    if (!authorized) {
       throw new AppError(404, "NOT_FOUND", "transfer not found");
     }
     res.setHeader("content-type", "application/octet-stream");
-    res.setHeader("content-length", String(t.size));
-    res.setHeader("x-dshmobile-file-name", encodeURIComponent(t.name));
+    res.setHeader("content-length", String(t!.size));
+    res.setHeader("x-dshmobile-file-name", encodeURIComponent(t!.name));
     transferService.openDownload(req.params.transferId).pipe(res);
   }),
 );

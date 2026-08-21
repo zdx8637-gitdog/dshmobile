@@ -259,4 +259,50 @@ describe("Data plane: transfers", () => {
     const bytes = Buffer.from(await good.arrayBuffer());
     expect(sha256hex(bytes)).toBe(fileId);
   });
+
+  it("download: owner user token works, other user's token rejected", async () => {
+    const { userId } = await createUser(ctx.db, "tf-udl");
+    await createDevice(ctx.db, userId, "dev-udl");
+    const token = signAccessToken(userId);
+    const fileId = sha256hex(CONTENT);
+    const ann = await announceFor(token, {
+      deviceId: "dev-udl",
+      fileId,
+      name: "u.bin",
+      size: CONTENT.length,
+      sha256: fileId,
+      targetPath: "u.bin",
+    });
+    const { transferId } = (await ann.json()).data;
+    await fetch(`${ctx.baseUrl}/transfers/${transferId}/chunks`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-chunk-offset": "0",
+        authorization: `Bearer ${token}`,
+      },
+      body: new Uint8Array(CONTENT),
+    });
+    await fetch(`${ctx.baseUrl}/transfers/${transferId}/complete`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    // 其他已登录用户用用户 token 下载 → 404（owner 隔离）
+    const { userId: otherUser } = await createUser(ctx.db, "tf-udl-other");
+    const otherTok = signAccessToken(otherUser);
+    const bad = await fetch(`${ctx.baseUrl}/transfers/${transferId}/download`, {
+      headers: { authorization: `Bearer ${otherTok}` },
+    });
+    expect(bad.status).toBe(404);
+
+    // owner 用户 token 下载 → 200 且字节一致
+    const good = await fetch(`${ctx.baseUrl}/transfers/${transferId}/download`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(good.status).toBe(200);
+    const bytes = Buffer.from(await good.arrayBuffer());
+    expect(sha256hex(bytes)).toBe(fileId);
+  });
 });

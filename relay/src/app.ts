@@ -66,8 +66,10 @@ export function createApp(_db: Database.Database) {
   app.use(meRoutes);
   app.use(devicesRoutes);
   app.use(pairingCodesRoutes);
-  app.use(transfersRoutes);
+  // 下载路由器必须先于带 authenticate 的 transfersRoutes：下载请求携带的是
+  // 设备 token（scope=device），会被用户 authenticate 中间件误拦成 401
   app.use(transferDownloadRouter);
+  app.use(transfersRoutes);
 
   app.use(errorHandler);
 

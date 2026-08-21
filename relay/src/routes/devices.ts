@@ -20,7 +20,7 @@ const registerDeviceSchema = z.object({
   clientDeviceKey: z.string().min(1).max(128).optional(),
 });
 
-router.use(authenticate);
+router.use("/devices", authenticate);
 
 router.get(
   "/devices",
