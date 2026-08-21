@@ -50,11 +50,18 @@
 - **L2（增强，可配置开关，默认关）——图片直达视觉模型**：bridge 经 DSH 公开/Web 同款
   附件 API 把图片登记为 attachment，再以 `[{type:"text"...},{type:"image",attachment:{...}}]`
   注入 `session.prompt`，视觉模型无需工具调用直接看到。
-  **启用前提（侦查门禁 + 动态检查，2026-08-19 更新）**：① DSH 附件上传/读取存在公共 API
-  且可被 bridge 调用；② **上传时动态查 `session.models` 当前模型**——DeepSeek 视觉模型
-  需用户手动选择（默认模型为文本），当前模型声明 image 输入才走 L2，否则自动回落 L1。
+  **启用前提（2026-08-19 依据 DeepSeek 官方视觉文档定稿）**：
+  ① DSH 附件上传/读取存在公共 API 且可被 bridge 调用；
+  ② 上传时动态查 `session.models` 当前模型 **必须为 `deepseek-v4-flash-vision-exp`**
+     （视觉模型需用户手动选择；其他模型收图返回 400 "This model does not support image"）；
+  ③ 图片块**只能放在 user 消息**（system/assistant 携带返回 400）——bridge 注入的
+     image 块必须进 `sessions.run` 的 user content，不能进助手消息或系统提示；
+  ④ 限额红线（手机压缩与 bridge 校验依据）：单图 ≤32MiB、单边 ≤8192px、
+     请求体 ≤48MiB；单请求 ≥15 张图时单边 ≤4096px。服务端会将大图缩至约 800×800
+     计 token（每图封顶 384 token），故手机压缩参数定为**长边 2048、JPEG q80**（省流量且
+     token 封顶不受影响）。
 - **手机上传页模型提示**：视觉模型 → 「图片将直接交给模型查看」；文本模型 →
-  「当前模型不支持看图，图片已存为文件 <path>；可切换 DeepSeek 视觉模型后重发」。
+  「当前模型不支持看图，图片已存为文件 <path>；可切换 deepseek-v4-flash-vision-exp 后重发」。
 - **L1 与 L2 关系**：L1 是保底主线；若侦查发现 DSH 文件读取工具对图片返回 image 块
   （tool-result 带图），则 L1 本身即视觉原生，L2 可永久搁置。
   反之（工具只返回路径/文本），L2 才有决定性价值。
