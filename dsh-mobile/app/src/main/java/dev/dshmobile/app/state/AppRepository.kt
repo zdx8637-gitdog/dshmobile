@@ -292,6 +292,11 @@ class AppRepository(
                 val payload = resp.payload?.jsonObject
                 if (payload?.get("ok")?.jsonPrimitive?.contentOrNull == "true") {
                     val path = payload["data"]?.jsonObject?.get("path")?.jsonPrimitive?.contentOrNull
+                    // 会话提及失败（如 DSH 释放了会话）不再静默：展示出来
+                    val notice = payload["data"]?.jsonObject?.get("noticeFailed")?.jsonPrimitive?.contentOrNull
+                    if (!notice.isNullOrBlank()) {
+                        setError("文件已上传，但会话提及失败：$notice")
+                    }
                     if (path != null) return path
                 } else {
                     val code = payload?.get("error")?.jsonObject?.get("code")?.jsonPrimitive?.contentOrNull

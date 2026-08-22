@@ -196,11 +196,27 @@ export class Adapter {
     let noticeFailed = null;
     if (typeof sessionId === "string" && sessionId) {
       try {
-        const r = await this.dsh.unary(
+        let r = await this.dsh.unary(
           "session.prompt",
           { sessionId, mode: "queue", content: [{ type: "text", text: `已上传 ${name} → ${target}` }] },
           { timeoutMs: 30000 },
         );
+        if (!r.ok && r.error?.code === "session-not-found") {
+          // 与 sessions.run 同款重保障：DSH 释放会话后按原 cwd 原位重建再重试一次
+          const cwd = this.sessionCwd.get(sessionId);
+          const re = await this.dsh.unary(
+            "session.create",
+            { sessionId, ...(cwd ? { cwd } : {}) },
+            { timeoutMs: 30000 },
+          );
+          if (re.ok) {
+            r = await this.dsh.unary(
+              "session.prompt",
+              { sessionId, mode: "queue", content: [{ type: "text", text: `已上传 ${name} → ${target}` }] },
+              { timeoutMs: 30000 },
+            );
+          }
+        }
         if (!r.ok) noticeFailed = String(r.error?.message ?? "session.prompt failed");
       } catch (err) {
         noticeFailed = String(err?.message ?? err);
