@@ -139,8 +139,10 @@ fun ConversationScreen(
                 val finalBytes = dev.dshmobile.app.util.compressImageIfNeeded(bytes, mime)
                 val path = fn(name, finalBytes)
                 uploadMsg = "已上传 $name → $path"
+                Toast.makeText(context, "已上传 $name", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 uploadMsg = "上传失败: ${e.message}"
+                Toast.makeText(context, "上传失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -929,6 +931,24 @@ private fun Bubble(
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
 ) {
+    // 超长文本防护：直接渲染全文会导致 Compose 排版卡死（bug：超长回复刷新对话卡死）。
+    // 显示截断 + 点击展开；展开后仍有硬上限（超长仅截断显示，长按复制仍是全文）。
+    val LONG_LIMIT = 2000
+    val HARD_LIMIT = 20000
+    val long = text.length > LONG_LIMIT
+    var expanded by remember { mutableStateOf(false) }
+    val displayText = when {
+        !long -> text
+        !expanded -> text.take(LONG_LIMIT) + "\n…（点击展开全文）"
+        text.length > HARD_LIMIT -> text.take(HARD_LIMIT) + "\n…（内容过长已截断显示，长按可复制全文）"
+        else -> text
+    }
+    val toggleExpand = if (long) {
+        { expanded = !expanded }
+    } else {
+        null
+    }
+    val effectiveClick = onClick ?: toggleExpand
     Row(
         Modifier.fillMaxWidth().padding(vertical = 4.dp),
         horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start,
@@ -938,15 +958,15 @@ private fun Bubble(
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier.widthIn(max = 300.dp).let { m ->
                 when {
-                    onClick != null && onLongClick != null -> m.combinedClickable(onClick = onClick, onLongClick = onLongClick)
-                    onClick != null -> m.clickable(onClick = onClick)
+                    effectiveClick != null && onLongClick != null -> m.combinedClickable(onClick = effectiveClick, onLongClick = onLongClick)
+                    effectiveClick != null -> m.clickable(onClick = effectiveClick)
                     onLongClick != null -> m.combinedClickable(onClick = {}, onLongClick = onLongClick)
                     else -> m
                 }
             },
         ) {
             Column(Modifier.padding(10.dp)) {
-                Text(text)
+                Text(displayText)
                 if (pendingLabel != null) {
                     Spacer(Modifier.height(4.dp))
                     Text(
