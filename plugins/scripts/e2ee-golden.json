@@ -1,0 +1,33 @@
+{
+  "note": "E2EE v1 golden vectors（Node 计算，Android 端逐字节断言）",
+  "inputs": {
+    "phonePriv_b64url": "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo",
+    "phonePub_hex": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+    "bridgePriv_b64url": "XasIfmJKikt54X-Lg4AO5m87sSkmGLb9HC-LJ_-I4Os",
+    "bridgePub_hex": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+    "cNoncePhone_b64url": "AQEBAQEBAQEBAQEBAQEBAQ",
+    "cNonceBridge_b64url": "AgICAgICAgICAgICAgICAg",
+    "keyIdPhone_hex": "300c9c9603b92a4b",
+    "keyIdBridge_hex": "f35e5616160a30bf",
+    "type": "sessions.run",
+    "requestId": "req-1",
+    "targetDeviceId": "dev-1",
+    "dir": 1,
+    "seq": 1,
+    "meta": {
+      "subscriptionId": "s-1",
+      "sequence": 7,
+      "now": "2026-08-23T00:00:00.000Z"
+    },
+    "plaintext": "hello e2ee"
+  },
+  "expected": {
+    "ms_hex": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+    "connCtx_hex": "6473686d6f62696c652d653265652d763101300c9c9603b92a4bf35e5616160a30bf0101010101010101010101010101010102020202020202020202020202020202",
+    "K_ctrl_p2b_hex": "819a91e5c60689f1a2b383d0fba3c8ae6b980b866e3912e6d4ad695a0a3af338",
+    "K_ctrl_b2p_hex": "d83a71972e0693c1cc256e177f790a36b38e2966c12aa9f21126353d400da7c1",
+    "aad_hex": "6473686d6f62696c652d653265652d6161642d7631000c73657373696f6e732e72756e00057265712d3100056465762d31300c9c9603b92a4b01010000000000000001004100036e6f770018323032362d30382d32335430303a30303a30302e3030305a000873657175656e6365000137000e737562736372697074696f6e49640003732d31",
+    "nonce_hex": "000000010000000000000001",
+    "ct_b64url": "X8flW2tEjdTzA8lxkBlB0vo-pjXcQqfnUlQ"
+  }
+}
