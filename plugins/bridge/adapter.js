@@ -662,7 +662,7 @@ export class Adapter {
         // 斜杠命令路由：恰好一个 text 块且以 / 开头 → commands/execute（实测 session.prompt 不会自动执行）
         const isSlash = content.length === 1 && content[0]?.type === "text" && typeof content[0].text === "string" && content[0].text.trim().startsWith("/");
         const run = () => isSlash
-          ? this.dsh.unary("commands/execute", { args: { agentId: sessionId, line: content[0].text.trim() } }, { timeoutMs: 30000 })
+          ? this.dsh.unary("commands/execute", { args: { agentId: sessionId, line: content[0].text.trim(), images: [] } }, { timeoutMs: 30000 })
           : this.dsh.unary("session.prompt", { sessionId, mode: "queue", content }, { timeoutMs: 30000 });
         let r = await run();
         if (!r.ok && r.error?.code === "session-not-found") {
@@ -763,7 +763,7 @@ export class Adapter {
         if (typeof sessionId !== "string" || typeof line !== "string" || !line.startsWith("/")) {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and line (starting with /) are required" } });
         }
-        const r = await this.dsh.unary("commands/execute", { args: { agentId: sessionId, line } }, { timeoutMs: 30000 });
+        const r = await this.dsh.unary("commands/execute", { args: { agentId: sessionId, line, images: [] } }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
