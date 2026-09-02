@@ -1,6 +1,6 @@
 // DSH bridge 入口：provision 设备 → 连 relay → 连 DSH 两条下行流 → 事件泵。
 // 断线自动重连（指数退避）。
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RelayBridge } from "./relay.js";
@@ -57,6 +57,10 @@ async function relayLoop() {
       if (!relay.deviceToken) {
         const { deviceId } = await relay.provision();
         console.log("[relay] provisioned device:", deviceId);
+        // 回写 deviceId 供宿主出「加密配对」二维码使用（码里带设备 ID，手机才能连对设备）
+        try {
+          writeFileSync(join(config.stateDir, "device-id.json"), JSON.stringify({ deviceId }, null, 2));
+        } catch {}
       }
       relay.onEnvelope = (env) => {
         const plain = relay.decryptEnvelope(env);

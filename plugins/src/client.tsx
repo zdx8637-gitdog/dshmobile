@@ -31,6 +31,9 @@ interface CardSnapshot {
     e2eePubKey?: string;
     e2eePairingSecret?: string;
     e2eeCryptoVersion?: number;
+    e2eePairingId?: string;
+    e2eePairingExpiresAt?: string;
+    e2eeDeviceId?: string;
   } | null;
   actions?: {
     refreshPairing: () => Promise<void>;
@@ -83,8 +86,10 @@ function DshmobileCard(props: any) {
   const value = snap?.value ?? {};
   const [form, setForm] = React.useState<Record<string, string> | null>(null);
   const [left, setLeft] = React.useState(-1);
+  const [e2eeLeft, setE2eeLeft] = React.useState(-1);
   const [localError, setLocalError] = React.useState("");
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const e2eeCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
 
   // 表单与宿主值同步（仅初始化一次，避免覆盖用户输入）
   React.useEffect(() => {
@@ -98,7 +103,7 @@ function DshmobileCard(props: any) {
     }
   }, [value, form]);
 
-  // 二维码渲染：常驻——pair 模式=手机登录（方向一）；grant 模式=手机授权本机（方向二）
+  // 二维码 1：登录（pair）/ 授权本机（grant）——不再携带 E2EE 参数
   React.useEffect(() => {
     if (canvasRef.current) {
       const relay = ((form?.relayUrl || value.relayUrl || "").trim()).replace(/\/$/, "");
@@ -106,15 +111,28 @@ function DshmobileCard(props: any) {
       const mode = value.mode === "grant" ? "grant" : "pair";
       let url = "";
       if (code) {
-        const e2ee = `&pk=${encodeURIComponent(value.e2eePubKey ?? "")}&ps=${encodeURIComponent(value.e2eePairingSecret ?? "")}&cv=${value.e2eeCryptoVersion ?? 1}`;
         url =
           mode === "grant"
-            ? `${relay}/dshmobile/?mode=grant&code=${encodeURIComponent(code)}&pid=${encodeURIComponent(value.grantPairingId ?? "")}${e2ee}`
-            : `${relay}/dshmobile/?mode=pair&code=${encodeURIComponent(code)}${e2ee}`;
+            ? `${relay}/dshmobile/?mode=grant&code=${encodeURIComponent(code)}&pid=${encodeURIComponent(value.grantPairingId ?? "")}`
+            : `${relay}/dshmobile/?mode=pair&code=${encodeURIComponent(code)}`;
       }
       drawQr(canvasRef.current, url);
     }
   }, [value.pairingCode, value.pairingExpiresAt, value.mode, value.grantPairingId, value.relayUrl, form]);
+
+  // 二维码 2：加密配对（mode=e2ee）——独立码，携带 deviceId + pk + ps + pid
+  React.useEffect(() => {
+    if (e2eeCanvasRef.current) {
+      const relay = ((form?.relayUrl || value.relayUrl || "").trim()).replace(/\/$/, "");
+      const deviceId = value.e2eeDeviceId || "";
+      const pairingId = value.e2eePairingId || "";
+      let url = "";
+      if (deviceId && pairingId) {
+        url = `${relay}/dshmobile/?mode=e2ee&deviceId=${encodeURIComponent(deviceId)}&pk=${encodeURIComponent(value.e2eePubKey ?? "")}&ps=${encodeURIComponent(value.e2eePairingSecret ?? "")}&pid=${encodeURIComponent(pairingId)}&cv=${value.e2eeCryptoVersion ?? 1}`;
+      }
+      drawQr(e2eeCanvasRef.current, url);
+    }
+  }, [value.e2eeDeviceId, value.e2eePairingId, value.e2eePairingSecret, value.e2eePubKey, value.e2eeCryptoVersion, value.relayUrl, form]);
 
   // 配对码倒计时
   React.useEffect(() => {
@@ -130,6 +148,21 @@ function DshmobileCard(props: any) {
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
   }, [value.pairingExpiresAt]);
+
+  // 加密配对码倒计时
+  React.useEffect(() => {
+    if (!value.e2eePairingExpiresAt) {
+      setE2eeLeft(-1);
+      return;
+    }
+    const tick = () => {
+      const ms = new Date(value.e2eePairingExpiresAt as string).getTime() - Date.now();
+      setE2eeLeft(Math.max(0, Math.round(ms / 1000)));
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [value.e2eePairingExpiresAt]);
 
   // 编辑时以「已保存值 + 草稿」兜底：form 可能因初始化时序只含部分字段
   const edit = (k: string, v: string) =>
@@ -249,6 +282,7 @@ function DshmobileCard(props: any) {
 
       <div style={{ borderTop: "1px solid #23252b", margin: "4px 0" }} />
 
+      <div style={{ fontSize: 13, fontWeight: 600, color: "#e6e7ea" }}>① 登录 / 授权（手机控制本机）</div>
       <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
         <canvas ref={canvasRef} width={132} height={132} style={{ border: "1px solid #2a2c33", borderRadius: 8 }} />
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -266,9 +300,23 @@ function DshmobileCard(props: any) {
           ) : null}
         </div>
       </div>
-      <p style={{ margin: 0, fontSize: 12, color: "#8b8e98" }}>
-        手机安装 DSH Mobile App 后，扫描二维码或输入配对码即可登录同一账号（无需密码）。
-      </p>
+
+      <div style={{ borderTop: "1px solid #23252b", margin: "6px 0" }} />
+
+      <div style={{ fontSize: 13, fontWeight: 600, color: "#e6e7ea" }}>② 加密配对（端到端加密）</div>
+      <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+        <canvas ref={e2eeCanvasRef} width={132} height={132} style={{ border: "1px solid #2a2c33", borderRadius: 8 }} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 12, color: "#8b8e98" }}>
+            {value?.e2eeDeviceId
+              ? e2eeLeft > 0 ? `剩余 ${e2eeLeft} 秒` : "已过期，重新生成"
+              : "等待桥注册…"}
+          </div>
+          <div style={{ fontSize: 12, color: "#8b8e98" }}>
+            手机登录后，扫此码把本机与手机做端到端加密绑定，设备列表会出现钥匙图标。
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

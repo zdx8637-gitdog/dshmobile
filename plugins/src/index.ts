@@ -11,6 +11,7 @@
 // 收益：一条命令安装即用、跨平台、DSH 升级不受影响、无需任何本地补丁。
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
@@ -31,8 +32,8 @@ const PANEL_FILE = path.join(STATE_DIR, "panel.json");
 const DEVICE_KEY_FILE = path.join(STATE_DIR, "device-key.json");
 const PAIRING_FILE = path.join(STATE_DIR, "pairing.json");
 const HTTP_PORT = parseInt(process.env.DSHMOBILE_HTTP_PORT ?? "17653", 10);
-// 配对密钥 TTL：单次使用、仅出现在 PC 面板的二维码里，10 分钟足够人工完成「扫码→登录→选设备→连接」。
-const PAIRING_SECRET_TTL_MS = 600_000;
+// 加密配对码（第二个码）TTL：独立于登录码，15 分钟足够完成「扫码→连设备→握手」。
+const E2EE_PAIRING_TTL_MS = 900_000;
 
 /** 迁移 ≤0.1.0-beta.5 时代的包内 state 目录（升级后旧目录可能已随包消失；存在则搬走）。 */
 function migrateLegacyState() {
@@ -68,6 +69,10 @@ interface PanelState {
   e2eePubKey: string;
   e2eePairingSecret: string;
   e2eeCryptoVersion: number;
+  // 加密配对（第二个码）：独立 pairingId + 过期时间 + 设备 ID
+  e2eePairingId: string;
+  e2eePairingExpiresAt: string;
+  e2eeDeviceId: string;
 }
 
 function defaultState(): PanelState {
@@ -87,6 +92,9 @@ function defaultState(): PanelState {
     e2eePubKey: "",
     e2eePairingSecret: "",
     e2eeCryptoVersion: 1,
+    e2eePairingId: "",
+    e2eePairingExpiresAt: "",
+    e2eeDeviceId: "",
   };
 }
 
@@ -304,16 +312,60 @@ export function apply(_ctx: any, _config: any = {}) {
     return kp.pubKey;
   }
 
-  /** 出码时附带 E2EE 配对参数：pubkey + 一次性 pairing secret（写入 pairing.json 供 bridge 校验）。 */
-  function attachE2eeToPairing(code: string) {
-    const pubKey = ensureIdentityKey();
-    const secret = randomPairingSecret();
+  /** 读取桥回写的 deviceId（bridge provision 后写入 stateDir/device-id.json）。 */
+  function readDeviceId(): string {
     try {
+      const f = path.join(STATE_DIR, "device-id.json");
+      if (!existsSync(f)) return "";
+      const d = JSON.parse(readFileSync(f, "utf8"));
+      return typeof d?.deviceId === "string" ? d.deviceId : "";
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * 加密配对（第二个码，mode=e2ee）：独立于登录码。
+   * 组成 = 桥公钥 pk + 一次性配对 secret + pairingId + deviceId；
+   * secret 写入 pairing.json（键=pairingId）供 bridge 的 key.exchange 校验。
+   */
+  function ensureE2eeCode() {
+    const deviceId = readDeviceId();
+    if (!deviceId) {
+      // 桥还没注册出 deviceId：E2EE 码暂不可用（面板显示"等待桥注册"）
+      if (state.e2eeDeviceId) patchState({ e2eeDeviceId: "", e2eePairingId: "", e2eePairingExpiresAt: "" });
+      return;
+    }
+    const hasValid =
+      state.e2eeDeviceId === deviceId &&
+      state.e2eePairingId &&
+      state.e2eePairingSecret &&
+      state.e2eePairingExpiresAt &&
+      new Date(state.e2eePairingExpiresAt).getTime() > Date.now() + 30_000;
+    if (hasValid) return;
+
+    const pubKey = ensureIdentityKey();
+    const pairingId = randomUUID();
+    const secret = randomPairingSecret();
+    const expiresAt = Date.now() + E2EE_PAIRING_TTL_MS;
+    try {
+      // 清理过期条目后写入新 secret（键=pairingId，不再是登录码）
       const existing = existsSync(PAIRING_FILE) ? JSON.parse(readFileSync(PAIRING_FILE, "utf8")) : {};
-      existing[code] = { secret, expiresAt: Date.now() + PAIRING_SECRET_TTL_MS };
+      const now = Date.now();
+      for (const k of Object.keys(existing)) {
+        if (Number(existing[k]?.expiresAt ?? 0) < now) delete existing[k];
+      }
+      existing[pairingId] = { secret, expiresAt };
       writeFileSync(PAIRING_FILE, JSON.stringify(existing, null, 2));
     } catch {}
-    patchState({ e2eePubKey: pubKey, e2eePairingSecret: secret, e2eeCryptoVersion: 1 });
+    patchState({
+      e2eePubKey: pubKey,
+      e2eePairingSecret: secret,
+      e2eeCryptoVersion: 1,
+      e2eePairingId: pairingId,
+      e2eePairingExpiresAt: new Date(expiresAt).toISOString(),
+      e2eeDeviceId: deviceId,
+    });
   }
 
   /** 方向一：账号/会话出码（mode=pair）。 */
@@ -365,7 +417,6 @@ export function apply(_ctx: any, _config: any = {}) {
         grantPairingId: "",
         pairError: "",
       });
-      attachE2eeToPairing(created.data.code);
     } catch (err: any) {
       // 二维码永远在：账号密码错时不卡死，回退为授权二维码（手机扫码授权本机登录）
       const msg = String(err?.message ?? err);
@@ -446,7 +497,6 @@ export function apply(_ctx: any, _config: any = {}) {
         grantPairingId: created.data.id,
         pairError: "",
       });
-      attachE2eeToPairing(created.data.code);
       startPolling(base, created.data.id);
     } catch (err: any) {
       const msg = String(err?.message ?? err);
@@ -596,6 +646,7 @@ export function apply(_ctx: any, _config: any = {}) {
       };
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       if (req.method === "GET" && url.pathname === "/state") {
+        ensureE2eeCode();
         send(200, { ok: true, data: state });
         return;
       }
