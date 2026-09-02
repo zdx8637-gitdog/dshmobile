@@ -13,7 +13,7 @@
 ```
 ┌──────────────┐   WSS    ┌───────────────────┐   WSS    ┌───────────────────────────┐
 │ Android App  │ ───────▶ │  Cloud Relay       │ ◀─────── │ PC Bridge（DSH 插件）       │
-│ （签名 APK）  │          │ （托管服务，闭源）   │          │ （开源，连本地 DSH）         │
+│ （签名 APK）  │          │ （托管服务）         │          │ （开源）                    │
 └──────────────┘          └───────────────────┘          └────────────┬──────────────┘
                                                                        │ 127.0.0.1:3080
                                                              ┌─────────▼──────────┐
@@ -24,21 +24,18 @@
 业务内容（prompt / 回复 / 会话 / 文件）经 **E2EE 端到端加密**：relay 只能看到路由元数据，
 **读不到、也改不了**你的会话内容。
 
-## 开源边界（当前策略）
+## 开源与安全
 
-把「信任边界」开放、把「产品护城河」保留：
-
-| 组件 | 状态 | 位置 |
+| 组件 | 状态 | 说明 |
 | :-- | :-- | :-- |
-| **PC Bridge / 插件** | ✅ 开源（MIT） | `plugins/`，npm 包 `@zdx8637/dshmobile-bridge` |
-| **协议契约** | ✅ 开源 | `docs/02-protocol.md`（wire format 单一事实来源） |
-| **E2EE 设计** | ✅ 开源、可审计 | `docs/plan-e2ee.md`（威胁模型 + 密码学参数 + 握手 + pinning） |
-| **Android App** | 🔒 闭源 | 以签名 APK 分发（扫码下载） |
-| **Cloud Relay** | 🔒 闭源（托管服务） | 认证 / 路由 / 审计 / 运维 |
+| **PC Bridge / 插件** | Open Source（MIT） | `plugins/`，npm 包 `@zdx8637/dshmobile-bridge` |
+| **协议契约** | Open | `docs/02-protocol.md`（wire format 单一事实来源） |
+| **E2EE 设计** | Open and auditable | `docs/plan-e2ee.md`（威胁模型 + 密码学参数 + 握手） |
+| **Android App** | 签名 APK 分发 | 扫码下载 |
+| **Cloud Relay** | 托管服务 | 认证 / 路由 / 审计 |
 
-**为什么这样划分**：E2EE 是「为什么可以信我」的答案——协议与密码学全部公开可审计；relay
-即使被攻破也读不到你的内容。而 relay 服务与 App 体验是产品差异化所在，现阶段不全量开源，
-避免被一键 clone 换皮。
+协议与加密实现完全公开、可独立审计；业务内容经 E2EE 端到端加密，relay 只负责路由与元数据
+转发，无法读取你的会话内容。
 
 ## 安装
 
@@ -67,8 +64,7 @@ npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@lates
 
 - 现阶段 relay 为作者自营托管服务；内容隐私由 E2EE 保证，relay 只做路由与元数据转发。
 - 后续将发布 **reference self-hosted relay**（参考实现，≠ 线上生产版），让用户可自建：
-  `Android → 自建 relay → Bridge → DSH`。官方 relay 的 abuse control / monitoring / 扩缩容 /
-  账号系统 / 部署运维等运营设施不开源。
+  `Android → 自建 relay → Bridge → DSH`。账号系统、监控、扩缩容等运营能力由托管方维护。
 
 ## 隐私与密钥
 
