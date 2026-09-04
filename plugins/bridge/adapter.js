@@ -842,12 +842,9 @@ export class Adapter {
       }
     }
 
-    if (typeof sid === "string" && !this.subscribed.has(sid)) {
-      // 只对命中率做日志采样：未订阅帧每 50 条打一条
-      this._unsubCount = (this._unsubCount ?? 0) + 1;
-      if (this._unsubCount % 50 === 1) console.log("[adapter] mux frame filtered (unsubscribed), type:", p.type, "count:", this._unsubCount);
-      return;
-    }
+    // 移除 subscribed 过滤：订阅态在 bridge 进程重启后会丢失，导致会话事件被过滤，
+    // 手机端出现「发送后不显示」+「绿点残留」。改为转发该设备全部会话事件；
+    // 手机端已按 sessionId 过滤（只渲染当前会话），多余事件自然丢弃。
     this.relay.forwardEvent({
       sessionId: typeof sid === "string" ? sid : undefined,
       frame: p,
