@@ -130,6 +130,7 @@ export class Adapter {
     if (type === "attachment.resolve") return this.#resolveAttachment(payload, requestId);
     if (type === "key.exchange") return this.#keyExchange(payload, requestId);
     if (type === "e2ee.hello") return this.#e2eeHello(payload, requestId);
+    if (type === "e2ee.clear") return this.#e2eeClear(payload, requestId);
 
     if (READ_ONLY_TYPES.has(type)) return this.#read(type, payload, requestId);
     if (WRITE_TYPES.has(type)) return this.#write(type, payload, requestId);
@@ -138,6 +139,14 @@ export class Adapter {
       ok: false,
       error: { code: "UNSUPPORTED", message: `message type '${type}' is not implemented by this bridge` },
     });
+  }
+
+  /** 取消 E2EE 配对：清 pin，回到明文 legacy（钥匙图标消失）。 */
+  #e2eeClear(payload, requestId) {
+    if (!this.e2ee) return this.relay.respond(requestId, "e2ee.clear", { ok: false, error: { code: "disabled", message: "e2ee not available" } });
+    this.e2ee.clearPin();
+    e2eeDebug("e2ee.clear -> pin cleared, back to legacy plaintext");
+    return this.relay.respond(requestId, "e2ee.clear", { ok: true, data: { cleared: true } });
   }
 
   /** E2EE 配对握手：按 pairingId 查 secret，校验 phone auth，pin 其身份公钥。 */

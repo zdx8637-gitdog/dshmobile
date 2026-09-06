@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 
 /** E2EE 下仍需明文（relay 亲自处理/握手）的消息类型。 */
-const PLAINTEXT_TYPES = new Set(["heartbeat.ping", "heartbeat.pong", "e2ee.hello", "key.exchange", "device.register"]);
+const PLAINTEXT_TYPES = new Set(["heartbeat.ping", "heartbeat.pong", "e2ee.hello", "key.exchange", "device.register", "e2ee.clear"]);
 
 /** 从信封提取 AAD 所需的稳定字段（两端一致：target 缺失回退 actor.deviceId；requestId 缺失回退 envelopeId）。 */
 function envelopeAadContext(env) {
@@ -173,6 +173,23 @@ export class RelayBridge {
   decryptEnvelope(env) {
     if (!this.e2ee?.isConnectionEstablished) return env;
     if (PLAINTEXT_TYPES.has(env.type)) return env;
+    if (!env.crypto || !env.payload?.ct) {
+      // 已配对却收到明文（手机重装后新身份未配对）→ 回 E2EE_REQUIRED，让手机提示重新配对/确认回退。
+      if (env.kind === "request" && typeof env.requestId === "string") {
+        const plain = JSON.stringify({
+          schemaVersion: 1,
+          envelopeId: randomUUID(),
+          kind: "response",
+          type: env.type,
+          sentAt: new Date().toISOString(),
+          actor: { role: "bridge", deviceId: this.deviceId },
+          requestId: env.requestId,
+          payload: { ok: false, error: { code: "E2EE_REQUIRED", message: "该设备已启用端到端加密，请重新扫码配对 E2EE，或确认回退到非加密模式" } },
+        });
+        if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(plain);
+      }
+      return null;
+    }
     const { type, requestId, targetDeviceId } = envelopeAadContext(env);
     const payload = this.e2ee.decryptIncoming({ type, requestId, targetDeviceId, crypto: env.crypto, meta: env.meta ?? {}, payload: env.payload });
     return { ...env, payload };
