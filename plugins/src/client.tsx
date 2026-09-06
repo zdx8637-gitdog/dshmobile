@@ -34,6 +34,7 @@ interface CardSnapshot {
     e2eePairingId?: string;
     e2eePairingExpiresAt?: string;
     e2eeDeviceId?: string;
+    bridgeVersion?: string;
   } | null;
   actions?: {
     refreshPairing: () => Promise<void>;
@@ -219,6 +220,16 @@ function DshmobileCard(props: any) {
         >
           桥状态：{value?.bridgeStatus ?? "unknown"}
         </span>
+        {value?.bridgeVersion ? (
+          <span
+            style={{
+              fontSize: 11, color: "#c9cbd2", background: "#1c1e24",
+              borderRadius: 999, padding: "2px 10px",
+            }}
+          >
+            v{value.bridgeVersion}
+          </span>
+        ) : null}
         {value?.username ? (
           <>
             <span

@@ -35,6 +35,17 @@ const HTTP_PORT = parseInt(process.env.DSHMOBILE_HTTP_PORT ?? "17653", 10);
 // 加密配对码（第二个码）TTL：独立于登录码，15 分钟足够完成「扫码→连设备→握手」。
 const E2EE_PAIRING_TTL_MS = 900_000;
 
+/** 读取包版本号（package.json），供面板显示「当前 bridge 版本」。 */
+function readPackageVersion(): string {
+  try {
+    const p = JSON.parse(readFileSync(path.join(HERE, "..", "package.json"), "utf8"));
+    return typeof p?.version === "string" ? p.version : "";
+  } catch {
+    return "";
+  }
+}
+const BRIDGE_VERSION = readPackageVersion();
+
 /** 迁移 ≤0.1.0-beta.5 时代的包内 state 目录（升级后旧目录可能已随包消失；存在则搬走）。 */
 function migrateLegacyState() {
   const legacy = process.env.DSHMOBILE_STATE_DIR ? null : path.join(HERE, "..", "state");
@@ -73,6 +84,7 @@ interface PanelState {
   e2eePairingId: string;
   e2eePairingExpiresAt: string;
   e2eeDeviceId: string;
+  bridgeVersion: string;
 }
 
 function defaultState(): PanelState {
@@ -95,6 +107,7 @@ function defaultState(): PanelState {
     e2eePairingId: "",
     e2eePairingExpiresAt: "",
     e2eeDeviceId: "",
+    bridgeVersion: BRIDGE_VERSION,
   };
 }
 
