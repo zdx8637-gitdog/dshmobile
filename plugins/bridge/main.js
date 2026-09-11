@@ -14,37 +14,36 @@ const config = JSON.parse(readFileSync(configPath, "utf8"));
 
 const e2ee = new E2eeSession({ stateDir: config.stateDir });
 const relay = new RelayBridge({ ...config.relay, stateDir: config.stateDir, e2ee });
-const dsh = new DshClient(config.dsh.url);
+const dsh = new DshClient(config.dsh.url, { stateDir: config.stateDir, token: config.dsh?.token ?? "" });
 // Data plane 落盘根目录：默认 <stateDir>/deliveries（可在 config.dsh.workspaceRoot 覆盖）
 const workspaceRoot = config.dsh?.workspaceRoot || join(config.stateDir || ".", "deliveries");
 const adapter = new Adapter({ dsh, relay, workspaceRoot, e2ee });
 
-let dshStreams = [];
+let mux = null;
 let stopping = false;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 连 DSH mux + host 两条只读下行流，断裂后自动重建。 */
+/** 连 DSH /api/remote.mux（鉴权 + 全部逻辑流复用），断裂后自动重建。 */
 async function dshStreamLoop() {
   let attempt = 0;
   while (!stopping) {
-    dshStreams = [];
-    dshStreams.push(dsh.openStream("/api/events.mux", (frame) => adapter.handleMuxFrame(frame), () => {}));
-    dshStreams.push(dsh.openStream("/api/events.host", (frame) => adapter.handleHostFrame(frame), () => {}));
-
-    // 等其中一条关闭再重连（简化：轮询 readyState）
-    while (!stopping) {
-      const closed = dshStreams.some((ws) => ws.readyState === WebSocket.CLOSED);
-      if (closed) break;
-      await sleep(1000);
+    try {
+      // openMux 返回后由 adapter 挂载 $events / session/control / workspace/follow / 各会话 follow；
+      // 物理连接关闭（含鉴权失败）时回调唤醒本循环退避重连。
+      await new Promise((resolve) => {
+        mux = dsh.openMux(() => resolve());
+        adapter.attachMux(mux);
+      });
+    } catch (err) {
+      console.warn("[dsh] mux setup failed:", err?.message ?? err);
     }
     if (stopping) break;
     attempt += 1;
     const delay = Math.min(10000, 500 * 2 ** Math.min(attempt, 4));
-    console.warn(`[dsh] stream lost, reconnect in ${delay}ms (attempt ${attempt})`);
-    dshStreams.forEach((ws) => { try { ws.close(); } catch {} });
+    console.warn(`[dsh] mux lost, reconnect in ${delay}ms (attempt ${attempt})`);
     await sleep(delay);
   }
 }
@@ -95,7 +94,7 @@ async function relayLoop() {
 
 process.on("SIGINT", () => {
   stopping = true;
-  dshStreams.forEach((ws) => { try { ws.close(); } catch {} });
+  try { mux?.close(); } catch {}
   try { relay.ws?.close(); } catch {}
   setTimeout(() => process.exit(0), 500);
 });

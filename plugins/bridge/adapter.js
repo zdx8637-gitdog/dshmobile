@@ -58,20 +58,20 @@ function ancestryCrumbs(target) {
  */
 function compactHistoryEvents(events) {
   const kept = [];
-  for (const entry of events) {
-    const t = entry?.event?.type;
+  for (const event of events) {
+    const t = event?.type;
     if (t === "assistant/chunk" || t === "step/start" || t === "step/end") continue;
     if (t === "tool/result") {
       // 截断到 500 字符：远程只做预览展示，完整内容在桌面端
-      const copy = { seq: entry.seq, event: { type: t, data: { ...entry.event.data } } };
-      const content = copy.event.data?.message?.content;
+      const copy = { ...event };
+      const content = copy.data?.message?.content;
       if (Array.isArray(content)) {
-        copy.event.data.message = { ...copy.event.data.message, content: content.map((b) => b.type === "text" && typeof b.text === "string" && b.text.length > 500 ? { ...b, text: b.text.slice(0, 500) + "\n…[截断]" } : b) };
+        copy.data = { ...copy.data, message: { ...copy.data.message, content: content.map((b) => b.type === "text" && typeof b.text === "string" && b.text.length > 500 ? { ...b, text: b.text.slice(0, 500) + "\n…[截断]" } : b) } };
       }
       kept.push(copy);
       continue;
     }
-    kept.push(entry);
+    kept.push(event);
   }
   return kept;
 }
@@ -109,7 +109,9 @@ export class Adapter {
     this.pendingRequests = new Map();
     // sessionId -> cwd（从 sessions.list 缓存，供 session-not-found 时按原 cwd 重建/恢复）
     this.sessionCwd = new Map();
-    // 归档集合缓存（workspace.list + host/archived-sessions-changed 更新）
+    // sessionId -> SessionSummary（subagent 会话需按 origin/parentSessionId 构造地址）
+    this.sessionMeta = new Map();
+    // 归档集合缓存（workspace/follow 基线 + 增量更新）
     this.archivedSessionIds = [];
     // sessionId -> 最近一次 session/queue 帧（客户端订阅时重放，保证 QueueDock 状态不丢）
     this.queueFrames = new Map();
@@ -117,6 +119,305 @@ export class Adapter {
     this.completedSessions = new Set();
     // 当前回合出过 assistant 消息的会话（用于区分 turn/end 是「完成」还是「等待审批/提问」）
     this.turnProducedResponse = new Set();
+
+    // ---- 新版 DSH（v0.1.5+）流层状态 ----
+    this.mux = null;                 // /api/remote.mux 物理连接
+    this.eventsClientId = "";        // $events 流 ready 帧下发的 clientId（$events/result 应答用）
+    this.sessionFollows = new Map(); // sessionId -> { handle, cursor, projections, snapshot }
+    this.workspaceBaseline = null;   // workspace/follow 基线 { items, archivedSessionIds }
+    this.workspaceWaiter = null;     // 等待首个 workspace 基线的 promise
+    // eventId（$events waterfall rpcId）-> { sessionId, frame, request }，供 cancel 应答与重放
+    this.waterfallStash = new Map();
+  }
+
+  /**
+   * 挂载 /api/remote.mux：重开全部常驻流（$events、session/control、workspace/follow）
+   * 与所有已订阅会话的 session/follow。物理连接重建后由 main.js 再次调用。
+   */
+  attachMux(mux) {
+    this.mux = mux;
+    this.eventsClientId = "";
+    this.workspaceBaseline = null;
+    this.workspaceWaiter = null;
+    const log = (what) => (err) => console.warn(`[dsh] stream ${what}:`, err?.message ?? err);
+    mux.openStream("$events", {}, {
+      onItem: (v) => this.handleRemoteEvent(v),
+      onError: log("$events error"),
+    }).catch(log("$events open"));
+    mux.openStream("session/control", {}, {
+      onItem: (v) => this.handleControlFrame(v),
+      onError: log("session/control error"),
+    }).catch(log("session/control open"));
+    mux.openStream("workspace/follow", {}, {
+      onItem: (v) => this.handleWorkspaceFrame(v),
+      onError: log("workspace/follow error"),
+    }).catch(log("workspace/follow open"));
+    for (const sessionId of [...this.sessionFollows.keys()]) {
+      this.#openSessionFollow(sessionId).catch(log(`session/follow(${sessionId}) reopen`));
+    }
+  }
+
+  /** workspace 基线就绪（首帧 snapshot）；超时返回 null，不阻塞请求。 */
+  ensureWorkspaceBaseline() {
+    if (this.workspaceBaseline) return Promise.resolve(this.workspaceBaseline);
+    if (!this.workspaceWaiter) {
+      this.workspaceWaiter = new Promise((resolve) => {
+        const t = setTimeout(() => {
+          if (!this.workspaceBaseline) {
+            this.workspaceWaiter = null;
+            resolve(null);
+          }
+        }, 15000);
+        this.workspaceWaiterDone = (v) => {
+          clearTimeout(t);
+          this.workspaceWaiter = null;
+          resolve(v);
+        };
+      });
+    }
+    return this.workspaceWaiter;
+  }
+
+  /** 确保某会话的 session/follow 流存在，并等待首个 snapshot（拿 cursor/projections）。 */
+  async ensureSessionFollow(sessionId) {
+    const existing = this.sessionFollows.get(sessionId);
+    if (existing && existing.handle && existing.snapshot) return existing;
+    const entry = existing ?? { handle: null, cursor: -1, projections: null, snapshot: null };
+    if (!this.sessionFollows.has(sessionId)) this.sessionFollows.set(sessionId, entry);
+    if (!entry.handle) await this.#openSessionFollow(sessionId);
+    if (!entry.snapshot) {
+      // 等 snapshot 首帧（最多 15s，超时按空会话处理）
+      entry.snapshotPromise ??= new Promise((resolve) => {
+        const t = setTimeout(() => resolve(null), 15000);
+        entry.snapshotDone = (v) => { clearTimeout(t); resolve(v); };
+      });
+      await entry.snapshotPromise;
+    }
+    return entry;
+  }
+
+  /** 按 SessionSummary 构造 follow/page 地址：subagent 会话需带父会话与模式。 */
+  #addressFor(sessionId) {
+    const meta = this.sessionMeta.get(sessionId);
+    if (meta?.origin === "subagent" && typeof meta.parentSessionId === "string") {
+      const mode = meta.projections?.values?.subagent?.mode;
+      if (mode === "one-shot" || mode === "continuable") {
+        return { kind: "subagent", parentSessionId: meta.parentSessionId, childSessionId: sessionId, mode };
+      }
+    }
+    return { kind: "session", sessionId };
+  }
+
+  async #openSessionFollow(sessionId) {
+    const entry = this.sessionFollows.get(sessionId);
+    if (!entry || !this.mux) return;
+    if (entry.handle) { try { entry.handle.cancel(); } catch { /* 换新 */ } }
+    const handle = await this.mux.openStream("session/follow", {
+      request: { address: this.#addressFor(sessionId) },
+    }, {
+      onItem: (v) => this.handleSessionFollowFrame(sessionId, v),
+      onError: (err) => {
+        const cur = this.sessionFollows.get(sessionId);
+        if (cur?.handle === handle) {
+          console.warn(`[dsh] session/follow(${sessionId}) error:`, err?.message ?? err);
+          cur.snapshotDone?.(null); // 唤醒等待 snapshot 的 history 调用（按空会话继续）
+          this.sessionFollows.delete(sessionId);
+        }
+      },
+      onEnd: () => {
+        const cur = this.sessionFollows.get(sessionId);
+        if (cur?.handle === handle) {
+          cur.snapshotDone?.(null);
+          this.sessionFollows.delete(sessionId);
+        }
+      },
+    });
+    entry.handle = handle;
+  }
+
+  /** session/follow 帧：snapshot 记游标/投影；event 帧按旧协议转发为 session/event。 */
+  handleSessionFollowFrame(sessionId, value) {
+    if (!value || typeof value.type !== "string") return;
+    if (value.type === "snapshot") {
+      const entry = this.sessionFollows.get(sessionId);
+      if (entry) {
+        entry.cursor = value.cursor ?? -1;
+        entry.projections = value.projections ?? null;
+        entry.snapshot = value;
+        entry.snapshotDone?.(value);
+      }
+      return;
+    }
+    if (value.type === "event") this.#forwardSessionEvent(sessionId, value.event);
+    // assistant-stream 帧不转发（手机不渲染流式碎片）
+  }
+
+  /** 旧协议 session/event 帧转发：压缩碎片 + 绿点状态跟踪。 */
+  #forwardSessionEvent(sid, event) {
+    if (!event || typeof event.type !== "string") return;
+    const et = event.type;
+    if (typeof sid === "string") {
+      if (et === "turn/start") this.turnProducedResponse.delete(sid);
+      else if (et === "assistant/message") this.turnProducedResponse.add(sid);
+      else if (et === "turn/end") {
+        if (this.turnProducedResponse.has(sid)) {
+          this.completedSessions.add(sid);
+          this.turnProducedResponse.delete(sid);
+        }
+      }
+    }
+    if (et === "assistant/chunk" || et === "step/start" || et === "step/end") {
+      this._chunkDropped = (this._chunkDropped ?? 0) + 1;
+      if (this._chunkDropped % 500 === 1) console.log("[adapter] live chunks dropped (unrendered):", this._chunkDropped);
+      return;
+    }
+    this.relay.forwardEvent({
+      sessionId: typeof sid === "string" ? sid : undefined,
+      frame: { type: "session/event", sessionId: sid, event },
+    });
+  }
+
+  /** $events 流：ready 记 clientId；waterfall=审批/提问；emit=会话元数据广播；cancel=他端已应答。 */
+  handleRemoteEvent(value) {
+    if (!value || typeof value.type !== "string") return;
+    if (value.type === "ready") {
+      this.eventsClientId = value.clientId ?? "";
+      console.log("[dsh] $events ready, clientId:", this.eventsClientId);
+      return;
+    }
+    if (value.type === "waterfall") return this.#handleWaterfall(value);
+    if (value.type === "emit") return this.#handleEmit(value);
+    if (value.type === "cancel") return this.#handleEventCancel(value);
+  }
+
+  #handleWaterfall(f) {
+    const sid = typeof f.agentId === "string" ? f.agentId : undefined;
+    const stash = { sessionId: sid, request: f.request ?? {} };
+    if (f.event === "approval/request") {
+      const p = f.request ?? {};
+      const frame = {
+        type: "approval/requested",
+        id: p.id,
+        toolName: p.toolName,
+        ...(typeof p.callId === "string" ? { callId: p.callId } : {}),
+        ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
+      };
+      this.waterfallStash.set(f.eventId, stash);
+      if (typeof sid === "string") this.#stashPending(sid, f.eventId, frame);
+      this.relay.forwardEvent({ sessionId: sid, frame, rpcId: f.eventId });
+    } else if (f.event === "user-questions/request") {
+      const p = f.request ?? {};
+      const frame = { type: "question/requested", questions: Array.isArray(p.questions) ? p.questions : [] };
+      this.waterfallStash.set(f.eventId, stash);
+      if (typeof sid === "string") this.#stashPending(sid, f.eventId, frame);
+      this.relay.forwardEvent({ sessionId: sid, frame, rpcId: f.eventId });
+    }
+    // 其余 waterfall 事件（暂无）不处理
+  }
+
+  #handleEmit(f) {
+    const [a, b] = Array.isArray(f.args) ? f.args : [];
+    switch (f.event) {
+      case "api-session/added": {
+        if (a?.sessionId) {
+          this.sessionMeta.set(a.sessionId, a);
+          if (typeof a.cwd === "string") this.sessionCwd.set(a.sessionId, a.cwd);
+        }
+        this.relay.forwardEvent({ frame: { type: "host/session-added", ...(a ?? {}) } });
+        return;
+      }
+      case "api-session/removed": {
+        this.sessionFollows.delete(a);
+        this.relay.forwardEvent({ frame: { type: "host/session-removed", sessionId: a } });
+        return;
+      }
+      case "api-session/status":
+        this.relay.forwardEvent({ frame: { type: "host/session-status", sessionId: a, running: b === true } });
+        return;
+      case "api-session/error":
+        this.relay.forwardEvent({ frame: { type: "host/session-error", sessionId: a, message: String(b ?? "") } });
+        return;
+      case "api-session/activity":
+        this.relay.forwardEvent({ frame: { type: "host/session-activity", sessionId: a, updatedAt: b } });
+        return;
+      default:
+        return; // 其余 emit 事件不转发
+    }
+  }
+
+  #handleEventCancel(f) {
+    const eventId = f.eventId;
+    if (typeof eventId !== "string") return;
+    const stash = this.waterfallStash.get(eventId);
+    this.waterfallStash.delete(eventId);
+    if (!stash) return;
+    const { sessionId, request } = stash;
+    const isApproval = Boolean(request?.toolName);
+    const frame = isApproval
+      ? { type: "approval/resolved", id: request?.id }
+      : { type: "question/resolved", rpcId: eventId };
+    if (typeof sessionId === "string") this.clearPendingRequest(eventId, sessionId);
+    this.relay.forwardEvent({ sessionId, frame, rpcId: eventId });
+  }
+
+  /** session/control 流：队列快照/增量 → session/queue 帧（重放缓存）。 */
+  handleControlFrame(value) {
+    if (!value || typeof value.type !== "string") return;
+    if (value.type === "baseline") {
+      for (const [sid, items] of Object.entries(value.value?.queues ?? {})) this.#forwardQueue(sid, items);
+      return;
+    }
+    if (value.type === "queue" && typeof value.sessionId === "string") this.#forwardQueue(value.sessionId, value.items);
+  }
+
+  #forwardQueue(sid, items) {
+    const frame = { type: "session/queue", sessionId: sid, items: Array.isArray(items) ? items : [] };
+    this.queueFrames.set(sid, frame);
+    this.relay.forwardEvent({ sessionId: sid, frame });
+  }
+
+  /** workspace/follow 流：基线/增量维护工作区列表与归档集合。 */
+  handleWorkspaceFrame(value) {
+    if (!value || typeof value.type !== "string") return;
+    const base = this.workspaceBaseline ?? { items: [], archivedSessionIds: [] };
+    if (value.type === "baseline") {
+      this.workspaceBaseline = {
+        items: Array.isArray(value.value?.items) ? value.value.items : [],
+        archivedSessionIds: Array.isArray(value.value?.archivedSessionIds) ? value.value.archivedSessionIds : [],
+      };
+      this.archivedSessionIds = [...this.workspaceBaseline.archivedSessionIds];
+      this.workspaceWaiterDone?.(this.workspaceBaseline);
+      return;
+    }
+    if (value.type === "upsert" && value.workspace?.workspaceId) {
+      const idx = base.items.findIndex((w) => w.workspaceId === value.workspace.workspaceId);
+      if (idx >= 0) base.items[idx] = value.workspace; else base.items.push(value.workspace);
+      this.workspaceBaseline = base;
+    } else if (value.type === "remove") {
+      base.items = base.items.filter((w) => w.workspaceId !== value.workspaceId);
+      this.workspaceBaseline = base;
+    } else if (value.type === "order" && Array.isArray(value.workspaceIds)) {
+      base.items.sort((a, b) => {
+        const ai = value.workspaceIds.indexOf(a.workspaceId);
+        const bi = value.workspaceIds.indexOf(b.workspaceId);
+        return (ai < 0 ? 1e9 : ai) - (bi < 0 ? 1e9 : bi);
+      });
+      this.workspaceBaseline = base;
+    } else if (value.type === "archived" && Array.isArray(value.archivedSessionIds)) {
+      base.archivedSessionIds = value.archivedSessionIds;
+      this.workspaceBaseline = base;
+      this.archivedSessionIds = [...value.archivedSessionIds];
+      this.relay.forwardEvent({ frame: { type: "host/archived-sessions-changed", archivedSessionIds: value.archivedSessionIds } });
+    }
+  }
+
+  /** 暂存无人订阅时的提问/审批帧（客户端 events.subscribe 时重放）。 */
+  #stashPending(sessionId, rpcId, frame) {
+    const entry = { rpcId, payload: frame };
+    const stash = this.pendingRequests.get(sessionId) ?? [];
+    const idx = stash.findIndex((e) => e.rpcId === rpcId && e.payload.type === frame.type);
+    if (idx >= 0) stash[idx] = entry; else stash.push(entry);
+    this.pendingRequests.set(sessionId, stash);
   }
 
   /** relay 请求入口。envelope: canonical request。 */
@@ -247,27 +548,22 @@ export class Adapter {
    * Data plane 上传进会话：复核 relay 已投递落盘的文件，然后按 L1 发会话提及。
    * L2（视觉模型 image 块注入）依赖 DSH 附件公共 API 侦查结果，见 TODO 锚点。
    */
-  /** 单次 session.prompt（queue 模式），带会话释放后的原位重建重试。 */
+  /** 单次 session/prompt（queue 模式），带会话释放后的原位重建重试。 */
   async #promptOnce(sessionId, content) {
-    let r = await this.dsh.unary(
-      "session.prompt",
-      { sessionId, mode: "queue", content },
-      { timeoutMs: 30000 },
-    );
-    if (!r.ok && r.error?.code === "session-not-found") {
+    const req = () => ({
+      request: { requestId: randomUUID(), sessionId, mode: "queue", content },
+    });
+    let r = await this.dsh.unary("session/prompt", req(), { timeoutMs: 30000 });
+    if (!r.ok && r.error?.code === "session/not-found") {
       // 与 sessions.run 同款重保障：DSH 释放会话后按原 cwd 原位重建再重试一次
       const cwd = this.sessionCwd.get(sessionId);
       const re = await this.dsh.unary(
-        "session.create",
-        { sessionId, ...(cwd ? { cwd } : {}) },
+        "session/create",
+        { request: { sessionId, ...(cwd ? { cwd } : {}) } },
         { timeoutMs: 30000 },
       );
       if (re.ok) {
-        r = await this.dsh.unary(
-          "session.prompt",
-          { sessionId, mode: "queue", content },
-          { timeoutMs: 30000 },
-        );
+        r = await this.dsh.unary("session/prompt", req(), { timeoutMs: 30000 });
       }
     }
     return r;
@@ -418,7 +714,7 @@ export class Adapter {
       return fail("bad-request", "sessionId/attachmentId required");
     }
     try {
-      const r = await this.dsh.unary("session.attachment", { sessionId, attachmentId }, { timeoutMs: 30000 });
+      const r = await this.dsh.unary("session/attachment", { request: { sessionId, attachmentId } }, { timeoutMs: 30000 });
       if (!r.ok || !r.value?.attachment || typeof r.value?.data !== "string") {
         return fail("attachment-unavailable", String(r.error?.message ?? "attachment not found"));
       }
@@ -440,21 +736,36 @@ export class Adapter {
   async #read(type, payload, requestId) {
     switch (type) {
       case "sessions.list": {
-        // 并行取归档集合：手机端用它把归档会话从主列表里收起
-        const [r, w] = await Promise.all([
-          this.dsh.unary("session.list", {}),
-          this.dsh.unary("workspace.list", {}).catch(() => ({ ok: false })),
-        ]);
+        // 归档集合来自 workspace/follow 基线（新版无 workspace/list unary）
+        const ws = await this.ensureWorkspaceBaseline();
+        if (ws?.archivedSessionIds) this.archivedSessionIds = ws.archivedSessionIds;
+        const r = await this.dsh.unary("session/list", { _request: {} }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-        if (w.ok && Array.isArray(w.value?.archivedSessionIds)) this.archivedSessionIds = w.value.archivedSessionIds;
-        // 缓存 cwd：session 被 DSH 释放后可用 session.create {sessionId, cwd} 原位恢复
-        for (const s of r.value.items ?? []) {
-          if (typeof s.sessionId === "string" && typeof s.cwd === "string") this.sessionCwd.set(s.sessionId, s.cwd);
+        // 标题在 projections.values.title；提到顶层兼容手机端旧渲染
+        const items = (r.value.items ?? []).map((s) => ({
+          ...s,
+          ...(typeof s.projections?.values?.title === "string" ? { title: s.projections.values.title } : {}),
+        }));
+        // 缓存 cwd/summary：session 被 DSH 释放后可用 session/create {sessionId, cwd} 原位恢复；
+        // summary 供 subagent 会话构造 follow/page 地址
+        for (const s of items) {
+          if (typeof s.sessionId === "string") {
+            this.sessionMeta.set(s.sessionId, s);
+            if (typeof s.cwd === "string") this.sessionCwd.set(s.sessionId, s.cwd);
+          }
+        }
+        // 修剪已不在列表中的会话 follow（会话被释放/移除后不再订阅其事件）
+        const live = new Set(items.map((s) => s.sessionId).filter(Boolean));
+        for (const [sid, entry] of this.sessionFollows) {
+          if (!live.has(sid)) {
+            try { entry.handle?.cancel(); } catch { /* 忽略 */ }
+            this.sessionFollows.delete(sid);
+          }
         }
         return this.relay.respond(requestId, type, {
           ok: true,
           data: {
-            sessions: r.value.items,
+            sessions: items,
             archivedSessionIds: [...this.archivedSessionIds],
             // App 内提醒：绿点（完成未查看）/ 黄点（等待审批或提问）
             completedSessionIds: [...this.completedSessions],
@@ -467,25 +778,38 @@ export class Adapter {
         if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
         // 默认只取最近 20 条消息；上限 100 防止大会话打爆中继
         const capped = Math.min(Math.max(1, Number.isInteger(maxMessages) ? maxMessages : 10), 100);
+        // session/page 需要真实 throughSeq（-1 恒为空页）：先用 follow 拿 cursor
+        let cursor = -1;
+        let projections = null;
+        try {
+          const entry = await this.ensureSessionFollow(sessionId);
+          cursor = Number.isInteger(entry.cursor) ? entry.cursor : -1;
+          projections = entry.projections ?? null;
+        } catch (err) {
+          console.warn("[adapter] session/follow for history failed:", err?.message ?? err);
+        }
         const t0 = Date.now();
-        const r = await this.dsh.unary("session.history", {
-          sessionId,
-          ...(Number.isInteger(beforeSeq) ? { beforeSeq } : {}),
-          maxMessages: capped,
+        const r = await this.dsh.unary("session/page", {
+          request: {
+            address: this.#addressFor(sessionId),
+            throughSeq: cursor,
+            ...(Number.isInteger(beforeSeq) ? { beforeSeq } : {}),
+            maxMessages: capped,
+          },
         }, { timeoutMs: 60000 });
-        console.log("[adapter] history unary done in", Date.now() - t0, "ms, ok=", r.ok, "events=", r.value?.events?.length);
+        console.log("[adapter] history unary done in", Date.now() - t0, "ms, ok=", r.ok, "records=", r.value?.records?.length);
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-        // wire 投影：压缩体积（chunk 碎片是大会话 4MB+ 的主要来源）
-        const compacted = compactHistoryEvents(r.value.events ?? []);
+        // 新版 records = [{type:"event", event: SessionWireEvent}]，投影到旧 events 数组
+        const events = (r.value.records ?? [])
+          .filter((rec) => rec?.type === "event" && rec.event)
+          .map((rec) => rec.event);
+        const compacted = compactHistoryEvents(events);
         // DSH 条目的 seq 在 event 信封内；补到顶层作为客户端分页游标（beforeSeq）
-        const wire = compacted.map((entry) => {
-          const event = entry?.event ?? entry;
-          return { ...entry, event, seq: event?.seq ?? entry?.seq };
-        });
-        const dropped = (r.value.events?.length ?? 0) - wire.length;
+        const wire = compacted.map((event) => ({ event, seq: event?.seq }));
+        const dropped = events.length - wire.length;
         // projections 块（sessionStats/tokenUsage/contextPressure 等）原样透传，供客户端渲染统计条
-        const data = { events: wire, hasMore: r.value.hasMore };
-        if (r.value.projections) data.projections = r.value.projections;
+        const data = { events: wire, hasMore: r.value.hasMore === true };
+        if (projections) data.projections = projections;
         const size = JSON.stringify(data).length;
         console.log("[adapter] history compacted:", wire.length, "events (dropped", dropped, "chunks),", size, "bytes");
         const ts = Date.now();
@@ -497,6 +821,10 @@ export class Adapter {
         const { sessionId } = payload;
         if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
         if (!this.subscribed.has(sessionId)) this.subscribed.set(sessionId, new Set());
+        // 订阅即打开该会话的 session/follow 流（snapshot 记游标，后续事件转发手机）
+        this.ensureSessionFollow(sessionId).catch((err) => {
+          console.warn("[adapter] session/follow on subscribe failed:", err?.message ?? err);
+        });
         this.relay.respond(requestId, type, { ok: true, data: { subscriptionId: sessionId } });
         // 重放未应答的提问/审批（帧到达时无人订阅 → 暂存；现在有人订阅了 → 补发）
         const stash = this.pendingRequests.get(sessionId);
@@ -521,22 +849,22 @@ export class Adapter {
       case "session.models": {
         const { sessionId } = payload;
         if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
-        const r = await this.dsh.unary("session.models", { sessionId }, { timeoutMs: 30000 });
+        const r = await this.dsh.unary("session/modelCatalog", {}, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "commands.list": {
         const { sessionId } = payload;
         if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
-        const r = await this.dsh.unary("commands/list", { args: { agentId: sessionId } }, { timeoutMs: 30000 });
+        const r = await this.dsh.unary("commands/list", { agentId: sessionId }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: { commands: r.value } });
       }
       case "workspace.list": {
         // 工作区列表：新建会话时选目录用（手机端目录选择，无需推送目录）
-        const r = await this.dsh.unary("workspace.list", {}, { timeoutMs: 30000 });
-        if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-        return this.relay.respond(requestId, type, { ok: true, data: r.value });
+        const ws = await this.ensureWorkspaceBaseline();
+        if (!ws) return this.relay.respond(requestId, type, { ok: false, error: { code: "unavailable", message: "workspace baseline not ready yet" } });
+        return this.relay.respond(requestId, type, { ok: true, data: ws });
       }
       case "host.listDirectory": {
         // 直接读本机文件系统（DSH 部署常挂 native 目录选择器，远程 browse API 不可用）。
@@ -619,24 +947,24 @@ export class Adapter {
           if (isDriveRoot) {
             createPayload = { cwd: requestedCwd };
           } else {
-            const w = await this.dsh.unary("workspace.create", { path: requestedCwd }, { timeoutMs: 30000 });
+            const w = await this.dsh.unary("workspace/create", { request: { path: requestedCwd } }, { timeoutMs: 30000 });
             if (w.ok) {
               createPayload = { workspaceId: w.value.workspace.workspaceId };
               if (w.value.created) createdWorkspaceForCwd = w.value.workspace.workspaceId;
               console.log("[adapter] sessions.create: cwd mapped to workspace", w.value.workspace.workspaceId, "(created:", w.value.created + ")", "for", requestedCwd);
             } else {
-              console.warn("[adapter] sessions.create: workspace.create failed, falling back to cwd:", w.error?.message);
+              console.warn("[adapter] sessions.create: workspace/create failed, falling back to cwd:", w.error?.message);
               createPayload = { cwd: requestedCwd };
             }
           }
         } else {
           createPayload = {};
         }
-        const r = await this.dsh.unary("session.create", createPayload);
+        const r = await this.dsh.unary("session/create", { request: createPayload });
         if (!r.ok) {
           if (createdWorkspaceForCwd) {
-            const d = await this.dsh.unary("workspace.delete", { workspaceId: createdWorkspaceForCwd }, { timeoutMs: 30000 }).catch(() => ({ ok: false }));
-            console.log("[adapter] sessions.create: rolled back workspace", createdWorkspaceForCwd, "after session.create failure:", d.ok ? "ok" : (d.error?.message ?? "unreachable"));
+            const d = await this.dsh.unary("workspace/delete", { request: { workspaceId: createdWorkspaceForCwd } }, { timeoutMs: 30000 }).catch(() => ({ ok: false }));
+            console.log("[adapter] sessions.create: rolled back workspace", createdWorkspaceForCwd, "after session/create failure:", d.ok ? "ok" : (d.error?.message ?? "unreachable"));
           }
           return this.relay.respond(requestId, type, { ok: false, error: r.error });
         }
@@ -671,14 +999,14 @@ export class Adapter {
         // 斜杠命令路由：恰好一个 text 块且以 / 开头 → commands/execute（实测 session.prompt 不会自动执行）
         const isSlash = content.length === 1 && content[0]?.type === "text" && typeof content[0].text === "string" && content[0].text.trim().startsWith("/");
         const run = () => isSlash
-          ? this.dsh.unary("commands/execute", { args: { agentId: sessionId, line: content[0].text.trim(), images: [] } }, { timeoutMs: 30000 })
-          : this.dsh.unary("session.prompt", { sessionId, mode: "queue", content }, { timeoutMs: 30000 });
+          ? this.dsh.unary("commands/execute", { agentId: sessionId, line: content[0].text.trim(), submittedAttachments: [] }, { timeoutMs: 30000 })
+          : this.dsh.unary("session/prompt", { request: { requestId: randomUUID(), sessionId, mode: "queue", content } }, { timeoutMs: 30000 });
         let r = await run();
-        if (!r.ok && r.error?.code === "session-not-found") {
+        if (!r.ok && r.error?.code === "session/not-found") {
           // DSH 释放了该会话（空白会话被清理或 host 重启）：用原 id + 原 cwd 原位重建/恢复后重试一次
           console.log("[adapter] session-not-found on run; re-ensuring session", sessionId);
           const cwd = this.sessionCwd.get(sessionId);
-          const re = await this.dsh.unary("session.create", { sessionId, ...(cwd ? { cwd } : {}) }, { timeoutMs: 30000 });
+          const re = await this.dsh.unary("session/create", { request: { sessionId, ...(cwd ? { cwd } : {}) } }, { timeoutMs: 30000 });
           if (!re.ok) {
             return this.relay.respond(requestId, type, { ok: false, error: r.error });
           }
@@ -692,7 +1020,7 @@ export class Adapter {
         if (typeof sessionId !== "string" || typeof title !== "string" || title.trim() === "") {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and non-blank title are required" } });
         }
-        const r = await this.dsh.unary("session.rename", { sessionId, title: title.trim() }, { timeoutMs: 30000 });
+        const r = await this.dsh.unary("session/rename", { request: { sessionId, title: title.trim() } }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
@@ -702,7 +1030,7 @@ export class Adapter {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
         }
         // 默认分叉点 = 最后完成的轮次（DSH atSeq 省略语义）
-        const r = await this.dsh.unary("session.fork", { sessionId }, { timeoutMs: 60000 });
+        const r = await this.dsh.unary("session/fork", { request: { sessionId } }, { timeoutMs: 60000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
@@ -711,7 +1039,7 @@ export class Adapter {
         if (typeof sessionId !== "string") {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
         }
-        const r = await this.dsh.unary("workspace.archiveSession", { sessionId }, { timeoutMs: 30000 });
+        const r = await this.dsh.unary("workspace/archiveSession", { request: { sessionId } }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         if (Array.isArray(r.value?.archivedSessionIds)) this.archivedSessionIds = r.value.archivedSessionIds;
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
@@ -728,13 +1056,13 @@ export class Adapter {
         const wireAction = action.kind === "edit"
           ? { kind: "edit", content: (Array.isArray(action.content) ? action.content : []).map((b) => ({ type: "text", text: String(b?.text ?? "") })) }
           : { kind: action.kind };
-        const r = await this.dsh.unary("session.updateQueue", { sessionId, itemId, action: wireAction }, { timeoutMs: 30000 });
+        const r = await this.dsh.unary("session/updateQueue", { request: { sessionId, itemId, action: wireAction } }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "sessions.interrupt": {
-        const { sessionId, reason } = payload ?? {};
-        const r = await this.dsh.unary("session.cancel", { sessionId, reason: typeof reason === "string" ? reason : "remote interrupt" }, { timeoutMs: 30000 });
+        const { sessionId } = payload ?? {};
+        const r = await this.dsh.unary("session/cancel", { request: { sessionId } }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
@@ -744,12 +1072,13 @@ export class Adapter {
         if (!Array.isArray(content) || content.length === 0) {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "content is required" } });
         }
-        let r = await this.dsh.unary("session.prompt", { sessionId, mode: "steer", content }, { timeoutMs: 30000 });
-        if (!r.ok && r.error?.code === "session-not-found") {
+        const req = () => ({ request: { requestId: randomUUID(), sessionId, mode: "steer", content } });
+        let r = await this.dsh.unary("session/prompt", req(), { timeoutMs: 30000 });
+        if (!r.ok && r.error?.code === "session/not-found") {
           const cwd = this.sessionCwd.get(sessionId);
-          const re = await this.dsh.unary("session.create", { sessionId, ...(cwd ? { cwd } : {}) }, { timeoutMs: 30000 });
+          const re = await this.dsh.unary("session/create", { request: { sessionId, ...(cwd ? { cwd } : {}) } }, { timeoutMs: 30000 });
           if (!re.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-          r = await this.dsh.unary("session.prompt", { sessionId, mode: "steer", content }, { timeoutMs: 30000 });
+          r = await this.dsh.unary("session/prompt", req(), { timeoutMs: 30000 });
         }
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
@@ -759,9 +1088,11 @@ export class Adapter {
         if (typeof sessionId !== "string" || typeof provider !== "string" || typeof model !== "string") {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId/provider/model are required" } });
         }
-        const r = await this.dsh.unary("session.selectModel", {
-          sessionId, provider, model,
-          ...(typeof reasoningEffort === "string" ? { reasoningEffort } : {}),
+        const r = await this.dsh.unary("session/selectModel", {
+          request: {
+            sessionId, provider, model,
+            ...(typeof reasoningEffort === "string" ? { reasoningEffort } : {}),
+          },
         }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
@@ -772,25 +1103,31 @@ export class Adapter {
         if (typeof sessionId !== "string" || typeof line !== "string" || !line.startsWith("/")) {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and line (starting with /) are required" } });
         }
-        const r = await this.dsh.unary("commands/execute", { args: { agentId: sessionId, line, images: [] } }, { timeoutMs: 30000 });
+        const r = await this.dsh.unary("commands/execute", { agentId: sessionId, line, submittedAttachments: [] }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "approvals.respond": {
-        const { sessionId, approvalId, outcome, rpcId } = payload ?? {};
-        if (!rpcId) return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "rpcId (server-request id) is required" } });
-        const r = await this.dsh.respond(rpcId, { sessionId, approvalId, outcome: outcome === "rejected" ? "rejected" : "allowed-once" });
+        const { approvalId, outcome, rpcId, sessionId } = payload ?? {};
+        if (!rpcId) return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "rpcId (waterfall eventId) is required" } });
+        // 新版审批：$events/result 上报瀑布监听器返回值（'allowed-once' | 'rejected'）
+        const value = outcome === "rejected" ? "rejected" : "allowed-once";
+        const r = await this.#answerEvent(rpcId, value);
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         if (typeof sessionId === "string") this.clearPendingRequest(rpcId, sessionId);
         return this.relay.respond(requestId, type, { ok: true, data: { accepted: true } });
       }
       case "questions.respond": {
         const { sessionId, answer, rpcId, cancel } = payload ?? {};
-        if (!rpcId) return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "rpcId (server-request id) is required" } });
-        // cancel=true：跳过整个提问批次（DSH 语义 = ok:false + code cancelled）
-        const r = cancel
-          ? await this.dsh.respond(rpcId, undefined, { cancel: true })
-          : await this.dsh.respond(rpcId, { sessionId, answer });
+        if (!rpcId) return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "rpcId (waterfall eventId) is required" } });
+        // cancel=true：跳过整个提问批次（全部问题回空选中，等价旧语义 ok:false + cancelled）
+        let value = answer;
+        if (cancel) {
+          const stash = this.waterfallStash.get(rpcId);
+          const questions = Array.isArray(stash?.request?.questions) ? stash.request.questions : [];
+          value = { answers: questions.map((q) => ({ id: q?.id, selected: [] })) };
+        }
+        const r = await this.#answerEvent(rpcId, value);
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         if (typeof sessionId === "string") this.clearPendingRequest(rpcId, sessionId);
         return this.relay.respond(requestId, type, { ok: true, data: { accepted: true } });
@@ -800,65 +1137,16 @@ export class Adapter {
     }
   }
 
-  /** DSH mux 帧 → relay 事件。只转发已订阅会话，避免未打开的桌面会话内容外泄。
-   *  提问/审批帧在无人订阅时暂存，客户端订阅后重放（见 events.subscribe）。
-   *  与 history 投影一致：剥离 assistant/chunk、step/* 流式碎片——手机不渲染它们，
-   *  大会话的 chunk 洪峰（数万帧/分钟）会把手机端 20s ping/pong 挤超时导致断连循环。 */
-  handleMuxFrame(frame) {
-    const p = frame?.payload;
-    if (!p || typeof p.type !== "string") return;
-    if (p.type === "stream/error") { console.warn("[dsh] mux stream error:", p.error?.message); return; }
-    const sid = p.sessionId;
-
-    // 待应答请求的暂存/清除
-    if (typeof sid === "string") {
-      if (p.type === "question/requested" || p.type === "approval/requested") {
-        const entry = { rpcId: frame.rpcId, payload: p };
-        const stash = this.pendingRequests.get(sid) ?? [];
-        const idx = stash.findIndex((e) => e.rpcId === frame.rpcId && e.payload.type === p.type);
-        if (idx >= 0) stash[idx] = entry; else stash.push(entry);
-        this.pendingRequests.set(sid, stash);
-      } else if (p.type === "question/resolved" || p.type === "approval/resolved") {
-        // 解析帧不带原 rpcId：按会话清空该类暂存
-        const kind = p.type === "question/resolved" ? "question/requested" : "approval/requested";
-        const stash = this.pendingRequests.get(sid) ?? [];
-        const kept = stash.filter((e) => e.payload.type !== kind);
-        if (kept.length) this.pendingRequests.set(sid, kept); else this.pendingRequests.delete(sid);
-      } else if (p.type === "session/queue") {
-        // 收件箱快照：客户端订阅/重连后重放，保证排队信息条（QueueDock）状态不丢
-        this.queueFrames.set(sid, p);
-      }
+  /** $events 瀑布应答：经 $events/result unary 回报监听器返回值。 */
+  async #answerEvent(eventId, value) {
+    if (!this.eventsClientId) {
+      return { ok: false, error: { code: "events-unavailable", message: "$events stream not ready (no clientId)" } };
     }
-
-    // 流式碎片不转发（客户端不渲染；防止洪峰打爆弱网）
-    if (p.type === "session/event") {
-      const et = p.event?.type;
-      // App 内提醒：跟踪回合是否产出最终回复，区分「完成(绿)」与「等待审批/提问(黄)」
-      if (typeof sid === "string") {
-        if (et === "turn/start") this.turnProducedResponse.delete(sid);
-        else if (et === "assistant/message") this.turnProducedResponse.add(sid);
-        else if (et === "turn/end") {
-          if (this.turnProducedResponse.has(sid)) {
-            this.completedSessions.add(sid);
-            this.turnProducedResponse.delete(sid);
-          }
-        }
-      }
-      if (et === "assistant/chunk" || et === "step/start" || et === "step/end") {
-        this._chunkDropped = (this._chunkDropped ?? 0) + 1;
-        if (this._chunkDropped % 500 === 1) console.log("[adapter] live chunks dropped (unrendered):", this._chunkDropped);
-        return;
-      }
-    }
-
-    // 移除 subscribed 过滤：订阅态在 bridge 进程重启后会丢失，导致会话事件被过滤，
-    // 手机端出现「发送后不显示」+「绿点残留」。改为转发该设备全部会话事件；
-    // 手机端已按 sessionId 过滤（只渲染当前会话），多余事件自然丢弃。
-    this.relay.forwardEvent({
-      sessionId: typeof sid === "string" ? sid : undefined,
-      frame: p,
-      rpcId: frame.rpcId,
-    });
+    return this.dsh.unary("$events/result", {
+      clientId: this.eventsClientId,
+      eventId,
+      outcome: { kind: "result", value },
+    }, { timeoutMs: 30000 });
   }
 
   /** 应答成功后清除对应的暂存请求（question/requested 或 approval/requested）。 */
@@ -867,17 +1155,6 @@ export class Adapter {
     if (!stash) return;
     const kept = stash.filter((e) => e.rpcId !== rpcId);
     if (kept.length) this.pendingRequests.set(sessionId, kept); else this.pendingRequests.delete(sessionId);
-  }
-
-  /** DSH host 帧：session-added/removed/status 对全部客户端广播（元数据，不泄露内容）。 */
-  handleHostFrame(frame) {
-    const p = frame?.payload;
-    if (!p || typeof p.type !== "string") return;
-    if (p.type === "host/archived-sessions-changed" && Array.isArray(p.archivedSessionIds)) {
-      this.archivedSessionIds = p.archivedSessionIds;
-    }
-    if (["host/session-added", "host/session-removed", "host/session-status", "host/archived-sessions-changed"].includes(p.type)) {
-      this.relay.forwardEvent({ frame: p, rpcId: frame.rpcId });
-    }
+    this.waterfallStash.delete(rpcId);
   }
 }

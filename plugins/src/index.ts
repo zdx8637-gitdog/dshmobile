@@ -194,7 +194,7 @@ function saveSession(s: Session) {
   writeFileSync(SESSION_FILE, JSON.stringify(s));
 }
 
-export function apply(_ctx: any, _config: any = {}) {
+export function apply(ctx: any, _config: any = {}) {
   let state: PanelState = { ...defaultState(), ...loadPanelState() };
 
   let child: ReturnType<typeof spawn> | null = null;
@@ -204,6 +204,39 @@ export function apply(_ctx: any, _config: any = {}) {
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let lastConfig: PanelState | null = null;
   let lastRespawnAt = 0;
+  // 新版 DSH（v0.1.5+）鉴权：connection 服务提供的进程 launch token（每次 DSH 启动换新）。
+  // 桥子进程用它做一次性 Cookie 换发。老版 DSH 无 connection 服务 → token 保持空，
+  // 桥按无鉴权模式直连（向后兼容）。
+  let dshLaunchToken = "";
+  let webServerPort = 3080;
+
+  function dshBaseUrl(): string {
+    return process.env.DSHMOBILE_DSH_URL || `http://127.0.0.1:${webServerPort}`;
+  }
+
+  // connection 服务与 web-app 同根上下文；注入回调在服务就绪后触发。
+  // token 到达时若桥已在跑（无 token 模式）则立即带 token 重启，避免等待下一次配置变化。
+  try {
+    ctx.inject?.(["connection"], (connectionCtx: any) => {
+      try {
+        const port = connectionCtx?.webServer?.port;
+        if (Number.isInteger(port) && port > 0) webServerPort = port;
+        const authed = connectionCtx.connection.authenticatedUrl(dshBaseUrl());
+        const token = new URL(authed).searchParams.get("token") ?? "";
+        if (token && token !== dshLaunchToken) {
+          dshLaunchToken = token;
+          console.log("[dshmobile] dsh launch token acquired (bridge will authenticate /api)");
+          if (state.enabled && (session !== null || Boolean(state.username && state.password)) && child) {
+            startBridge(state);
+          }
+        }
+      } catch (err: any) {
+        console.error("[dshmobile] connection token failed:", err?.message ?? err);
+      }
+    });
+  } catch (err: any) {
+    console.warn("[dshmobile] ctx.inject unavailable (old dsh?):", err?.message ?? err);
+  }
 
   // 手机授权登录的会话重启后不回填账号（panel.json 只存手填值）→ 面板需显示已登录账号与退出按钮
   if (!state.username && session?.username) {
@@ -247,7 +280,11 @@ export function apply(_ctx: any, _config: any = {}) {
           platform: "windows",
           clientDeviceKey: stableMachineKey(),
         },
-        dsh: { url: "http://127.0.0.1:3080", workspaceRoot: path.join(STATE_DIR, "deliveries") },
+        dsh: {
+          url: dshBaseUrl(),
+          token: dshLaunchToken,
+          workspaceRoot: path.join(STATE_DIR, "deliveries"),
+        },
         stateDir: STATE_DIR,
       };
       writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));

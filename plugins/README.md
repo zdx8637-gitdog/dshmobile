@@ -34,6 +34,25 @@ deferred work）。本插件**不依赖该通道**：面板与宿主通过 `127.
 - Windows/macOS/Linux 通用；
 - DSH 升级不受影响（历史版本 0.1.0-beta.3 及更早需要 `scripts/expose-settings-namespace.ps1` 补丁，已废弃）。
 
+## DSH 新版（v0.1.5+）适配
+
+v0.1.5 起 DSH 给本地 Web 服务加了浏览器会话鉴权（`dsh web` 打印的 URL 里带
+进程级 launch token → 浏览器换会话 Cookie，`/api` 全部请求校验），并把 RPC
+协议升级为 Typert 端点（`session/list`、`{args}` 载荷、`/api/remote.mux`
+流复用、`$events` 审批/提问瀑布）。插件 0.1.0-beta.17 起自动适配：
+
+- host 半边经 `ctx.connection.authenticatedUrl()` 取 launch token 交给桥子进程；
+- 桥一次性换 Cookie（HMAC 签名、30 天有效），缓存于状态目录、401 自动重铸，
+  所有 `/api` 请求与 WS 升级携带 Cookie；
+- 会话/工作区/命令端点映射到新协议，事件流走 `/api/remote.mux` 的
+  `session/follow` + `workspace/follow` + `session/control`，审批/提问走
+  `$events` + `$events/result`；
+- 无 `connection` 服务的旧版 DSH 自动回退无鉴权直连（向后兼容）。
+
+自检脚本：`node scripts/smoke-dsh-v2.mjs`（仿 DSH 服务器全链路）与
+`node scripts/probe-real-dsh.mjs`（对运行中真实 DSH 只读验证，需本机浏览器
+已登录过一次 Web 面板以生成签名密钥）。
+
 ## relay 说明
 
 插件默认连接 `https://www.deepseek-claudex.cn`（作者自营 relay：账号注册、
