@@ -209,34 +209,78 @@ export function apply(ctx: any, _config: any = {}) {
   // 桥按无鉴权模式直连（向后兼容）。
   let dshLaunchToken = "";
   let webServerPort = 3080;
+  let tokenPollTimer: ReturnType<typeof setInterval> | null = null;
 
   function dshBaseUrl(): string {
     return process.env.DSHMOBILE_DSH_URL || `http://127.0.0.1:${webServerPort}`;
   }
 
-  // connection 服务与 web-app 同根上下文；注入回调在服务就绪后触发。
-  // token 到达时若桥已在跑（无 token 模式）则立即带 token 重启，避免等待下一次配置变化。
-  try {
-    ctx.inject?.(["connection"], (connectionCtx: any) => {
-      try {
-        const port = connectionCtx?.webServer?.port;
-        if (Number.isInteger(port) && port > 0) webServerPort = port;
-        const authed = connectionCtx.connection.authenticatedUrl(dshBaseUrl());
-        const token = new URL(authed).searchParams.get("token") ?? "";
-        if (token && token !== dshLaunchToken) {
-          dshLaunchToken = token;
-          console.log("[dshmobile] dsh launch token acquired (bridge will authenticate /api)");
-          if (state.enabled && (session !== null || Boolean(state.username && state.password)) && child) {
-            startBridge(state);
-          }
-        }
-      } catch (err: any) {
-        console.error("[dshmobile] connection token failed:", err?.message ?? err);
-      }
-    });
-  } catch (err: any) {
-    console.warn("[dshmobile] ctx.inject unavailable (old dsh?):", err?.message ?? err);
+  /** 宿主关键事件落盘（stdio 不可见时也能诊断）。 */
+  function hostLog(msg: string) {
+    try {
+      mkdirSync(STATE_DIR, { recursive: true });
+      appendFileSync(path.join(STATE_DIR, "host.log"), `${new Date().toISOString()} ${msg}\n`);
+    } catch {
+      /* 日志失败不影响主流程 */
+    }
   }
+
+  /** 从 connection 服务提取 launch token；成功返回 true。多渠道共用，保证不重不漏。 */
+  function applyToken(connectionCtx: any, source: string): boolean {
+    try {
+      const port = connectionCtx?.webServer?.port;
+      if (Number.isInteger(port) && port > 0) webServerPort = port;
+      const conn = connectionCtx?.connection ?? connectionCtx?.get?.("connection");
+      if (!conn || typeof conn.authenticatedUrl !== "function") {
+        hostLog(`token[${source}]: connection service not visible`);
+        return false;
+      }
+      const authed = conn.authenticatedUrl(dshBaseUrl());
+      const token = new URL(authed).searchParams.get("token") ?? "";
+      if (token && token !== dshLaunchToken) {
+        dshLaunchToken = token;
+        hostLog(`token[${source}]: acquired (bridge will authenticate /api)`);
+        if (state.enabled && (session !== null || Boolean(state.username && state.password)) && child) {
+          startBridge(state);
+        }
+      }
+      return Boolean(token);
+    } catch (err: any) {
+      hostLog(`token[${source}]: failed: ${err?.message ?? err}`);
+      return false;
+    }
+  }
+
+  // 途径 1：同步直取（connection 服务可能已就绪）
+  try {
+    const conn = ctx?.get?.("connection") ?? ctx?.root?.get?.("connection");
+    const ws = ctx?.get?.("webServer") ?? ctx?.root?.get?.("webServer");
+    if (conn) applyToken({ connection: conn, webServer: ws }, "sync");
+  } catch (err: any) {
+    hostLog(`token[sync]: ${err?.message ?? err}`);
+  }
+
+  // 途径 2：事件驱动注入（官方形态；服务就绪后回调）
+  try {
+    ctx.inject?.(["connection"], (connectionCtx: any) => applyToken(connectionCtx, "inject"));
+  } catch (err: any) {
+    hostLog(`token[inject]: unavailable: ${err?.message ?? err}`);
+  }
+
+  // 途径 3：轮询兜底（inject 不触发/作用域隔离时也能拿到；拿到即停）
+  tokenPollTimer = setInterval(() => {
+    if (dshLaunchToken) {
+      if (tokenPollTimer) { clearInterval(tokenPollTimer); tokenPollTimer = null; }
+      return;
+    }
+    try {
+      const conn = ctx?.get?.("connection") ?? ctx?.root?.get?.("connection");
+      const ws = ctx?.get?.("webServer") ?? ctx?.root?.get?.("webServer");
+      if (conn) applyToken({ connection: conn, webServer: ws }, "poll");
+    } catch {
+      /* 下一轮再试 */
+    }
+  }, 1000);
 
   // 手机授权登录的会话重启后不回填账号（panel.json 只存手填值）→ 面板需显示已登录账号与退出按钮
   if (!state.username && session?.username) {
@@ -288,10 +332,17 @@ export function apply(ctx: any, _config: any = {}) {
         stateDir: STATE_DIR,
       };
       writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+      // 桥日志落盘到 <stateDir>/bridge.log（stdio 不再丢弃，重启后可直接诊断）
+      let logFd = -1;
+      try {
+        mkdirSync(STATE_DIR, { recursive: true });
+        logFd = openSync(path.join(STATE_DIR, "bridge.log"), "a");
+      } catch { /* 打不开日志则不落盘 */ }
       const p = spawn(process.execPath, [BRIDGE_MAIN], {
         env: { ...process.env, DSHMOBILE_BRIDGE_CONFIG: CONFIG_FILE },
-        stdio: "ignore",
+        stdio: ["ignore", logFd >= 0 ? logFd : "ignore", logFd >= 0 ? logFd : "ignore"],
       });
+      if (logFd >= 0) { try { closeSync(logFd); } catch { /* 子进程已持有句柄 */ } }
       child = p;
       p.on("exit", (code) => {
         // child !== p → 已被新桥替换或主动停止，忽略该退出事件
@@ -726,12 +777,14 @@ export function apply(ctx: any, _config: any = {}) {
   }
 
   const server = startServer();
+  hostLog(`plugin applied: dshUrl=${dshBaseUrl()} token=${dshLaunchToken ? "yes" : "no"}`);
   scheduleConfig(); // 首次装载：按持久化配置启动桥 + 出码
 
   return () => {
     stopped = true;
     stopPolling();
     stopBridge();
+    if (tokenPollTimer) { clearInterval(tokenPollTimer); tokenPollTimer = null; }
     try { server.close(); } catch {}
   };
 }

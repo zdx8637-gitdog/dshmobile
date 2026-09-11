@@ -1,3 +1,5 @@
 ﻿node_modules/
 lib/
 state/
+.relay-probe-identity.json
+scripts/.relay-probe-identity.json
