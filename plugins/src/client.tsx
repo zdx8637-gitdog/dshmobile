@@ -4,7 +4,7 @@
 // 数据面：不再走 settings 命名空间（rc.6 不暴露第三方命名空间），改为
 // 轮询宿主 127.0.0.1:17653 的 GET /state + POST /action —— 免补丁、跨平台、跨 DSH 版本。
 import * as React from "react";
-import { createSnapshotStore } from "@deepseek-ai/dsh-client-runtime/client";
+import { createSnapshotStore } from "@deepseek-ai/dsh-client-store";
 // qrcode-generator 会被构建进本 bundle（非 external）；CJS 库用默认导入 + 兜底
 import qrcodeDefault from "qrcode-generator";
 const qrcode: any = (qrcodeDefault as any)?.default ?? qrcodeDefault;
@@ -380,19 +380,17 @@ export function apply(ctx: any) {
   })();
 
   // 左侧栏底部的可折叠入口：箭头点开 → 弹出面板（复用卡片内容）→ 再点收起
-  ctx.slots.inject("sidebar.footer.action", function* () {
-    yield ctx.slots.register(
-      {
-        name: "sidebar.footer.action",
-        id: "dshmobile",
-        order: 10,
-        inject: () => ({
-          hooks: { dshmobileCard: store },
-        }),
-      },
-      DshmobileSidebarAction,
-    );
-  });
+  ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register(
+    {
+      name: "sidebar.footer.action",
+      id: "dshmobile",
+      order: 10,
+      inject: () => ({
+        hooks: { dshmobileCard: store },
+      }),
+    },
+    DshmobileSidebarAction,
+  ));
 
   return () => {
     alive = false;
