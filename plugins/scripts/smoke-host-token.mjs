@@ -1,6 +1,6 @@
 // smoke-host-token.mjs：模拟 DSH 启动链（fake ctx + connection 服务注入），
 // 验证 host 半边：inject 注册、authenticatedUrl 取 token、env 端口回退、重复注入不崩溃。
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -55,6 +55,8 @@ capturedCb({
 check("端口记忆：无 env 时沿用上次端口", authCalls[2] === "http://127.0.0.1:17998", JSON.stringify(authCalls[2]));
 
 dispose();
+const hostLogText = readFileSync(join(stateDir, "host.log"), "utf8");
+check("host.log 已落盘（apply 完成 + token 获取记录）", hostLogText.includes("plugin applied") && hostLogText.includes("token[inject]: acquired"), hostLogText.split("\n").slice(0, 4).join(" | "));
 rmSync(stateDir, { recursive: true, force: true });
 console.log(failures === 0 ? "ALL PASS" : `${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);
