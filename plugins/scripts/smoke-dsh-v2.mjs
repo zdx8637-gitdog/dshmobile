@@ -197,7 +197,7 @@ server.on("upgrade", (req, socket) => {
         if (msg.type === "open") {
           if (msg.endpoint === "$events") {
             socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "ready", clientId: "cli-1", host: { home: "D:\\p" } } })));
-            socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "waterfall", event: "approval/request", eventId: "evt-1", agentId: "sess-1", request: { id: "apr-1", toolName: "WriteFile", reason: "测试审批" } } })));
+            socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "waterfall", event: "approval/request", eventId: "evt-1", agentId: "sess-1", request: { toolName: "WriteFile", reason: "测试审批" } } })));
             socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "waterfall", event: "user-questions/request", eventId: "evt-2", agentId: "sess-1", request: { questions: [{ id: "q1", question: "怎么做?", options: [{ label: "A" }, { label: "B" }] }] } } })));
             socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "emit", event: "api-session/added", args: [{ sessionId: "sess-9", cwd: "D:\\p", updatedAt: 1, running: false, blank: false }] } })));
           } else if (msg.endpoint === "session/control") {
@@ -281,7 +281,7 @@ try {
   console.log("[6] $events：审批/提问瀑布 → 转发 + $events/result 应答");
   await sleep(200);
   const approvalEvt = relayEvents.find((e) => e.rpcId === "evt-1");
-  check("approval/requested 转发", approvalEvt?.frame?.type === "approval/requested" && approvalEvt.frame.id === "apr-1", JSON.stringify(approvalEvt));
+  check("approval/requested 转发（eventId 充当 id/approvalId）", approvalEvt?.frame?.type === "approval/requested" && approvalEvt.frame.id === "evt-1" && approvalEvt.frame.approvalId === "evt-1" && approvalEvt.frame.toolName === "WriteFile", JSON.stringify(approvalEvt));
   const questionEvt = relayEvents.find((e) => e.rpcId === "evt-2");
   check("question/requested 转发", questionEvt?.frame?.type === "question/requested" && questionEvt.frame.questions?.[0]?.id === "q1", JSON.stringify(questionEvt));
   check("host/session-added 广播", relayEvents.some((e) => e.frame?.type === "host/session-added" && e.frame.sessionId === "sess-9"));

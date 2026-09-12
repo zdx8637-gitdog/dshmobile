@@ -295,9 +295,12 @@ export class Adapter {
     const stash = { sessionId: sid, request: f.request ?? {} };
     if (f.event === "approval/request") {
       const p = f.request ?? {};
+      // 新版 ApprovalRequestEvent 无独立 id（id 只存在于 session 的 approval/asked 事件）：
+      // 用瀑布 eventId 充当展示/关联 id，并兼容手机旧字段 approvalId。
       const frame = {
         type: "approval/requested",
-        id: p.id,
+        id: f.eventId,
+        approvalId: f.eventId,
         toolName: p.toolName,
         ...(typeof p.callId === "string" ? { callId: p.callId } : {}),
         ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
