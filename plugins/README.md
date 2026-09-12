@@ -1,50 +1,83 @@
-﻿# @zdx8637/dshmobile-bridge
+# @zdx8637/dshmobile-bridge
 
-**寮€绠卞嵆鐢ㄧ殑鎵嬫満杩滅▼妗ユ帴**锛氫竴鏉″懡浠ゅ畨瑁咃紝鏃犻渶浠讳綍缃戠粶閰嶇疆銆佹棤闇€鏈湴琛ヤ竵锛?閲嶅惎 dsh 鍚庡乏渚ф爮鍗冲嚭鐜板父椹讳簩缁寸爜闈㈡澘锛堣法骞冲彴锛孌SH 鍗囩骇鍏嶇柅锛夈€?
-- **甯搁┗浜岀淮鐮?*锛圵eb 宸︿晶鏍忓簳閮ㄧ澶村脊绐楋級锛氫笌鐧诲綍鎬佹棤鍏筹紝姘歌繙鍙壂鈥斺€?  路 鐢佃剳宸茬櫥褰?鈫?鎵嬫満锛堝摢鎬曟湭鐧诲綍锛夋壂鐮佺洿鎺ョ櫥褰曞悓璐﹀彿锛?  路 鐢佃剳鏈櫥褰?鈫?鎵嬫満锛堝凡鐧诲綍锛夋壂鐮佹巿鏉冿紝鐢佃剳鑷姩鐧诲綍锛?- **bridge 瀛愯繘绋嬪畧鎶?*锛氳处鍙峰瘑鐮佹ā寮忔垨鎵嬫満鎺堟潈 token 妯″紡锛堟棤瀵嗙爜鐩磋繛锛?01 鑷姩鍒锋柊锛夛紱
-- 鎵嬫満绔竴鐮佷笁鐢細寰俊鎵?涓嬭浇 App銆佺浉鏈烘壂=璺?App 閰嶅銆丄pp 鍐呮壂=鐩存帴鐧诲綍/鎺堟潈銆?
-<p align="center"><img src="https://raw.githubusercontent.com/zdx8637-gitdog/dshmobile/main/docs/images/plugin-panel.jpg" width="480" alt="DSH 鎻掍欢闈㈡澘锛堝乏渚ф爮甯搁┗浜岀淮鐮侊級"/></p>
+**开箱即用的手机远程桥接**：一条命令安装，无需任何网络配置、无需本地补丁，
+重启 dsh 后左侧栏即出现常驻二维码面板（跨平台，DSH 升级免疫）。
 
-## 瀹夎
+- **常驻二维码**（Web 左侧栏底部箭头弹窗）：与登录态无关，永远可扫——
+  · 电脑已登录 → 手机（哪怕未登录）扫码直接登录同账号；
+  · 电脑未登录 → 手机（已登录）扫码授权，电脑自动登录；
+- **bridge 子进程守护**：账号密码模式或手机授权 token 模式（无密码直连，401 自动刷新）；
+- 手机端一码三用：微信扫=下载 App、相机扫=跳 App 配对、App 内扫=直接登录/授权。
+
+<p align="center"><img src="https://raw.githubusercontent.com/zdx8637-gitdog/dshmobile/main/docs/images/plugin-panel.jpg" width="480" alt="DSH 插件面板（左侧栏常驻二维码）"/></p>
+
+## 安装
 
 ```sh
 npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest
-# 閲嶅惎 dsh 鍚庯紝Web 宸︿晶鏍忓簳閮ㄥ嚭鐜?鈻?绠ご锛岀偣寮€鍗抽厤缃潰鏉?```
-
-鍓嶇疆锛氭湰鏈洪渶瑕?`pnpm`锛坄dsh plugin` 瀛愬懡浠や緷璧栧畠锛沗corepack enable` 鎴?`npm i -g pnpm`锛夈€?
-鎵嬫満 App锛氭壂鎻忛潰鏉夸簩缁寸爜 鈫?钀藉湴椤典笅杞?APK锛堟垨浠?[鍙戝竷椤礭(https://github.com/zdx8637-gitdog/dshmobile/releases)鑾峰彇锛夈€?
-## 鍏嶈ˉ涓侊細闈㈡澘璧版湰鍦伴€氶亾
-
-DSH 0.1.0-rc.6 榛樿涓嶅悜娴忚鍣ㄦ毚闇茬涓夋柟 settings 鍛藉悕绌洪棿锛堜笂娓告爣娉ㄤ负
-deferred work锛夈€傛湰鎻掍欢**涓嶄緷璧栬閫氶亾**锛氶潰鏉夸笌瀹夸富閫氳繃 `127.0.0.1:17653`
-鐨勬湰鍦?HTTP 閫氫俊锛堣疆璇㈢姸鎬?+ 涓嬪彂鍔ㄤ綔锛孋ORS 浠呮斁琛屾湰鏈烘潵婧愶級锛屽洜姝?
-- 涓€鏉″懡浠ゅ畨瑁呭嵆鐢紝**鏃犻渶浠讳綍鏈湴琛ヤ竵**锛?- Windows/macOS/Linux 閫氱敤锛?- DSH 鍗囩骇涓嶅彈褰卞搷锛堝巻鍙茬増鏈?0.1.0-beta.3 鍙婃洿鏃╅渶瑕?`scripts/expose-settings-namespace.ps1` 琛ヤ竵锛屽凡搴熷純锛夈€?
-## DSH 鏂扮増锛坴0.1.5+锛夐€傞厤涓庡弻鍗忚鍏煎
-
-v0.1.5 璧?DSH 缁欐湰鍦?Web 鏈嶅姟鍔犱簡娴忚鍣ㄤ細璇濋壌鏉冿紙`dsh web` 鎵撳嵃鐨?URL 閲屽甫
-杩涚▼绾?launch token 鈫?娴忚鍣ㄦ崲浼氳瘽 Cookie锛宍/api` 鍏ㄩ儴璇锋眰鏍￠獙锛夛紝骞舵妸 RPC
-鍗忚鍗囩骇涓?Typert 绔偣锛坄session/list`銆乣{args}` 杞借嵎銆乣/api/remote.mux`
-娴佸鐢ㄣ€乣$events` 瀹℃壒/鎻愰棶鐎戝竷锛夈€傛彃浠?0.1.0-beta.17 璧疯嚜鍔ㄩ€傞厤锛?
-- host 鍗婅竟缁?`ctx.connection.authenticatedUrl()` 鍙?launch token 浜ょ粰妗ュ瓙杩涚▼锛?- 妗ヤ竴娆℃€ф崲 Cookie锛圚MAC 绛惧悕銆?0 澶╂湁鏁堬級锛岀紦瀛樹簬鐘舵€佺洰褰曘€?01 鑷姩閲嶉摳锛?  鎵€鏈?`/api` 璇锋眰涓?WS 鍗囩骇鎼哄甫 Cookie锛?- 浼氳瘽/宸ヤ綔鍖?鍛戒护绔偣鏄犲皠鍒版柊鍗忚锛屼簨浠舵祦璧?`/api/remote.mux` 鐨?  `session/follow` + `workspace/follow` + `session/control`锛屽鎵?鎻愰棶璧?  `$events` + `$events/result`銆?
-**鍙屽崗璁嚜閫傚簲锛?.1.0-beta.18 璧凤級**锛氭ˉ鍚姩鏃惰嚜鍔ㄦ帰娴?DSH 浠ｉ檯鈥斺€旀柊鐗堣蛋涓婅堪
-v2 鍗忚锛涙棫鐗?DSH 鑷姩鍥為€€ legacy 鍗忚锛堢偣鍙风鐐广€佽８ payload銆乣events.mux`/
-`events.host` 鍙屾祦銆乣/api/respond` 搴旂瓟銆佹棤閴存潈鐩磋繛锛屼笌 beta.16 琛屼负涓€鑷达級銆?鍥犳**鍗囩骇椤哄簭鏃犲叧**锛氬厛鍗囨彃浠躲€佸悗鍗?DSH锛屾垨鍙嶄箣锛屽潎鍏ㄧ▼鍙敤锛涙棫鐗?DSH 鐢ㄦ埛
-涓嶅崌绾т篃鐓у父宸ヤ綔銆?
-鑷鑴氭湰锛歚node scripts/smoke-dsh-v2.mjs`锛堜豢鏂扮増 DSH 鍏ㄩ摼璺級銆?`node scripts/smoke-dsh-legacy.mjs`锛堜豢鏃х増 DSH 鍏ㄩ摼璺級銆?`node scripts/probe-real-dsh.mjs`锛堝杩愯涓湡瀹?DSH 鍙楠岃瘉锛岄渶鏈満娴忚鍣?宸茬櫥褰曡繃涓€娆?Web 闈㈡澘浠ョ敓鎴愮鍚嶅瘑閽ワ級銆?
-## relay 璇存槑
-
-鎻掍欢榛樿杩炴帴 `https://www.deepseek-claudex.cn`锛堜綔鑰呰嚜钀?relay锛氳处鍙锋敞鍐屻€?璁惧绠＄悊銆佹秷鎭矾鐢卞潎璧拌鏈嶅姟鍣級銆備篃鍙嚜寤猴細瑙佷富浠撳簱
-[dshmobile](https://github.com/zdx8637-gitdog/dshmobile) 鐨?`relay/` 鐩綍涓?`dsh-remote/docs/04-operations.md`锛岀劧鍚庡湪闈㈡澘閲屾妸 relay 鍦板潃鏀规垚浣犺嚜宸辩殑銆?
-## 寮€鍙?
-```sh
-npm install
-node scripts/build.mjs                  # 浜у嚭 lib/index.js + lib/client.js
-node scripts/smoke-host.mjs <u> <p>     # 璐﹀彿瀵嗙爜妯″紡鍐掔儫
-node scripts/smoke-grant.mjs <u> <p>    # 鎵嬫満鎺堟潈妯″紡鍐掔儫
+# 重启 dsh 后，Web 左侧栏底部出现 ▶ 箭头，点开即配置面板
 ```
 
-瀹屾暣涓夌锛堟墜鏈?App / relay / 鍗忚锛夎涓讳粨搴?[zdx8637-gitdog/dshmobile](https://github.com/zdx8637-gitdog/dshmobile)銆?
+前置：本机需要 `pnpm`（`dsh plugin` 子命令依赖它；`corepack enable` 或
+`npm i -g pnpm`）。
+
+手机 App：扫描面板二维码 → 落地页下载 APK（或从
+[发布页](https://github.com/zdx8637-gitdog/dshmobile/releases)获取）。
+
+## 免补丁：面板走本地通道
+
+DSH 0.1.0-rc.6 默认不向浏览器暴露第三方 settings 命名空间（上游标注为
+deferred work）。本插件**不依赖该通道**：面板与宿主通过 `127.0.0.1:17653`
+的本地 HTTP 通信（轮询状态 + 下发动作，CORS 仅放行本机来源），因此
+
+- 一条命令安装即用，**无需任何本地补丁**；
+- Windows/macOS/Linux 通用；
+- DSH 升级不受影响（历史版本 0.1.0-beta.3 及更早需要 `scripts/expose-settings-namespace.ps1` 补丁，已废弃）。
+
+## DSH 新版（v0.1.5+）适配与双协议兼容
+
+v0.1.5 起 DSH 给本地 Web 服务加了浏览器会话鉴权（`dsh web` 打印的 URL 里带
+进程级 launch token → 浏览器换会话 Cookie，`/api` 全部请求校验），并把 RPC
+协议升级为 Typert 端点（`session/list`、`{args}` 载荷、`/api/remote.mux`
+流复用、`$events` 审批/提问瀑布）。插件 0.1.0-beta.17 起自动适配：
+
+- host 半边经 `ctx.connection.authenticatedUrl()` 取 launch token 交给桥子进程；
+- 桥一次性换 Cookie（HMAC 签名、30 天有效），缓存于状态目录、401 自动重铸，
+  所有 `/api` 请求与 WS 升级携带 Cookie；
+- 会话/工作区/命令端点映射到新协议，事件流走 `/api/remote.mux` 的
+  `session/follow` + `workspace/follow` + `session/control`，审批/提问走
+  `$events` + `$events/result`。
+
+**双协议自适应（0.1.0-beta.18 起）**：桥启动时自动探测 DSH 代际——新版走上述
+v2 协议；旧版 DSH 自动回退 legacy 协议（点号端点、裸 payload、`events.mux`/
+`events.host` 双流、`/api/respond` 应答、无鉴权直连，与 beta.16 行为一致）。
+因此**升级顺序无关**：先升插件、后升 DSH，或反之，均全程可用；旧版 DSH 用户
+不升级也照常工作。
+
+自检脚本：`node scripts/smoke-dsh-v2.mjs`（仿新版 DSH 全链路）、
+`node scripts/smoke-dsh-legacy.mjs`（仿旧版 DSH 全链路）、
+`node scripts/probe-real-dsh.mjs`（对运行中真实 DSH 只读验证，需本机浏览器
+已登录过一次 Web 面板以生成签名密钥）。
+
+## relay 说明
+
+插件默认连接 `https://www.deepseek-claudex.cn`（作者自营 relay：账号注册、
+设备管理、消息路由均走该服务器）。也可自建：见主仓库
+[dshmobile](https://github.com/zdx8637-gitdog/dshmobile) 的 `relay/` 目录与
+`dsh-remote/docs/04-operations.md`，然后在面板里把 relay 地址改成你自己的。
+
+## 开发
+
+```sh
+npm install
+node scripts/build.mjs                  # 产出 lib/index.js + lib/client.js
+node scripts/smoke-host.mjs <u> <p>     # 账号密码模式冒烟
+node scripts/smoke-grant.mjs <u> <p>    # 手机授权模式冒烟
+```
+
+完整三端（手机 App / relay / 协议）见主仓库
+[zdx8637-gitdog/dshmobile](https://github.com/zdx8637-gitdog/dshmobile)。
+
 ## License
 
 MIT
-
