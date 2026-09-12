@@ -260,7 +260,9 @@ export class Adapter {
     entry.handle = handle;
   }
 
-  /** session/follow 帧：snapshot 记游标/投影；event 帧按旧协议转发为 session/event。 */
+  /** session/follow 帧：snapshot 记游标/投影；event 帧按旧协议转发为 session/event。
+   *  关键：每条 live event 都要推进 entry.cursor——历史请求以它作 throughSeq 分页，
+   *  不推进会导致手机刷新历史时只能看到订阅时刻之前的旧对话。 */
   handleSessionFollowFrame(sessionId, value) {
     if (!value || typeof value.type !== "string") return;
     if (value.type === "snapshot") {
@@ -273,7 +275,13 @@ export class Adapter {
       }
       return;
     }
-    if (value.type === "event") this.#forwardSessionEvent(sessionId, value.event);
+    if (value.type === "event") {
+      const entry = this.sessionFollows.get(sessionId);
+      if (entry && Number.isInteger(value.event?.seq) && value.event.seq > (entry.cursor ?? -1)) {
+        entry.cursor = value.event.seq;
+      }
+      this.#forwardSessionEvent(sessionId, value.event);
+    }
     // assistant-stream 帧不转发（手机不渲染流式碎片）
   }
 

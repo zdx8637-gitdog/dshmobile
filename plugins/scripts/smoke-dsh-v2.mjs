@@ -273,7 +273,7 @@ try {
   await adapter.handleRequest({ requestId: "r2", type: "sessions.history", payload: { sessionId: "sess-1" } });
   const r2 = relayResponses.find((r) => r.requestId === "r2");
   check("history ok", r2?.payload?.ok === true, JSON.stringify(r2?.payload));
-  check("page throughSeq=5(cursor)", seen.pageArgs?.request?.throughSeq === 5, JSON.stringify(seen.pageArgs));
+  check("page throughSeq=最新游标(8)", seen.pageArgs?.request?.throughSeq === 8, JSON.stringify(seen.pageArgs));
   check("chunk 被剥离", (r2?.payload?.data?.events ?? []).every((e) => e.event.type !== "assistant/chunk"));
   check("tool/result 截断 ≤510", (r2?.payload?.data?.events ?? []).find((e) => e.event.type === "tool/result")?.event.data.message.content[0].text.length <= 510);
   check("projections 透传", r2?.payload?.data?.projections?.values?.title === "测试会话");
@@ -295,12 +295,15 @@ try {
   const qr = seen.eventResultArgs.find((a) => a.eventId === "evt-2");
   check("questions cancel → 全空答案", JSON.stringify(qr?.outcome?.value) === JSON.stringify({ answers: [{ id: "q1", selected: [] }] }), JSON.stringify(qr));
 
-  console.log("[7] session/follow 事件 → session/event 转发 + 绿点");
+  console.log("[7] session/follow 事件 → session/event 转发 + 绿点 + 游标推进");
   await sleep(300);
   check("session/event 转发", relayEvents.some((e) => e.frame?.type === "session/event" && e.frame.sessionId === "sess-1" && e.frame.event?.type === "assistant/message"));
   await adapter.handleRequest({ requestId: "r5", type: "sessions.list", payload: {} });
   const r5 = relayResponses.find((r) => r.requestId === "r5");
   check("绿点 completedSessionIds 含 sess-1", r5?.payload?.data?.completedSessionIds?.includes("sess-1"), JSON.stringify(r5?.payload?.data?.completedSessionIds));
+  // 回归：live 事件后历史请求必须用最新游标（seq=8），否则手机刷新只能看到旧对话
+  await adapter.handleRequest({ requestId: "r5b", type: "sessions.history", payload: { sessionId: "sess-1" } });
+  check("live 事件推进游标 → history throughSeq=8", seen.pageArgs?.request?.throughSeq === 8, JSON.stringify(seen.pageArgs));
 
   console.log("[8] session/control 队列 + workspace.list + 其余端点映射");
   check("session/queue 转发", relayEvents.some((e) => e.frame?.type === "session/queue" && e.frame.sessionId === "sess-1"));
