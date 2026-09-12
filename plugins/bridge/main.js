@@ -26,7 +26,44 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 连 DSH /api/remote.mux（鉴权 + 全部逻辑流复用），断裂后自动重建。 */
+/** 等协议探测完成（老 DSH→legacy / 新 DSH→v2）；DSH 未就绪时退避重试。 */
+async function waitProtocol() {
+  while (!stopping) {
+    try {
+      await dsh.ensureProtocol();
+      console.log("[bridge] protocol:", dsh.protocol, "DSH", config.dsh.url, "-> relay", config.relay.url);
+      return;
+    } catch (err) {
+      console.warn("[bridge] protocol probe failed:", err?.message ?? err, "- retry in 3s");
+      await sleep(3000);
+    }
+  }
+}
+
+/** legacy：连 DSH mux + host 两条只读下行流，断裂后自动重建。 */
+async function legacyStreamLoop() {
+  let attempt = 0;
+  while (!stopping) {
+    const streams = [
+      dsh.openStream("/api/events.mux", (frame) => adapter.handleMuxFrame(frame), () => {}),
+      dsh.openStream("/api/events.host", (frame) => adapter.handleHostFrame(frame), () => {}),
+    ];
+    // 等其中一条关闭再重连（简化：轮询 readyState）
+    while (!stopping) {
+      const closed = streams.some((ws) => ws.readyState === WebSocket.CLOSED);
+      if (closed) break;
+      await sleep(1000);
+    }
+    if (stopping) break;
+    attempt += 1;
+    const delay = Math.min(10000, 500 * 2 ** Math.min(attempt, 4));
+    console.warn(`[dsh] legacy stream lost, reconnect in ${delay}ms (attempt ${attempt})`);
+    streams.forEach((ws) => { try { ws.close(); } catch {} });
+    await sleep(delay);
+  }
+}
+
+/** v2：连 DSH /api/remote.mux（鉴权 + 全部逻辑流复用），断裂后自动重建。 */
 async function dshStreamLoop() {
   let attempt = 0;
   while (!stopping) {
@@ -100,4 +137,5 @@ process.on("SIGINT", () => {
 });
 
 console.log("[bridge] starting: DSH", config.dsh.url, "-> relay", config.relay.url);
-await Promise.all([relayLoop(), dshStreamLoop()]);
+await waitProtocol();
+await Promise.all([relayLoop(), dsh.protocol === "legacy" ? legacyStreamLoop() : dshStreamLoop()]);

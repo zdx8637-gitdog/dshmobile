@@ -34,7 +34,7 @@ deferred work）。本插件**不依赖该通道**：面板与宿主通过 `127.
 - Windows/macOS/Linux 通用；
 - DSH 升级不受影响（历史版本 0.1.0-beta.3 及更早需要 `scripts/expose-settings-namespace.ps1` 补丁，已废弃）。
 
-## DSH 新版（v0.1.5+）适配
+## DSH 新版（v0.1.5+）适配与双协议兼容
 
 v0.1.5 起 DSH 给本地 Web 服务加了浏览器会话鉴权（`dsh web` 打印的 URL 里带
 进程级 launch token → 浏览器换会话 Cookie，`/api` 全部请求校验），并把 RPC
@@ -46,10 +46,16 @@ v0.1.5 起 DSH 给本地 Web 服务加了浏览器会话鉴权（`dsh web` 打�
   所有 `/api` 请求与 WS 升级携带 Cookie；
 - 会话/工作区/命令端点映射到新协议，事件流走 `/api/remote.mux` 的
   `session/follow` + `workspace/follow` + `session/control`，审批/提问走
-  `$events` + `$events/result`；
-- 无 `connection` 服务的旧版 DSH 自动回退无鉴权直连（向后兼容）。
+  `$events` + `$events/result`。
 
-自检脚本：`node scripts/smoke-dsh-v2.mjs`（仿 DSH 服务器全链路）与
+**双协议自适应（0.1.0-beta.18 起）**：桥启动时自动探测 DSH 代际——新版走上述
+v2 协议；旧版 DSH 自动回退 legacy 协议（点号端点、裸 payload、`events.mux`/
+`events.host` 双流、`/api/respond` 应答、无鉴权直连，与 beta.16 行为一致）。
+因此**升级顺序无关**：先升插件、后升 DSH，或反之，均全程可用；旧版 DSH 用户
+不升级也照常工作。
+
+自检脚本：`node scripts/smoke-dsh-v2.mjs`（仿新版 DSH 全链路）、
+`node scripts/smoke-dsh-legacy.mjs`（仿旧版 DSH 全链路）、
 `node scripts/probe-real-dsh.mjs`（对运行中真实 DSH 只读验证，需本机浏览器
 已登录过一次 Web 面板以生成签名密钥）。
 

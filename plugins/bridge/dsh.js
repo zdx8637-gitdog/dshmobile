@@ -1,9 +1,9 @@
-// DSH 本地 API 客户端（新版 v0.1.5+ 协议）：
-//   鉴权：进程 launch token → 一次性换会话 Cookie（HMAC 签名、绑定 Host、30 天有效），
-//         之后所有 /api 请求与 WS 升级都带该 Cookie；401 时自动重铸一次。
-//   unary：POST /api/<endpoint>，信封 {type:"client-request", rpcId, method, payload:{args}}。
-//   流：单一 WebSocket /api/remote.mux，逻辑流帧 open/item/end/error/cancel 复用。
-// 兼容老版 DSH（无鉴权）：没有 token 时不带 Cookie 直连（老服务端不校验）。
+// DSH 本地 API 客户端（双协议）：
+//   v2（DSH v0.1.5+）：launch token → 会话 Cookie（HMAC、30 天）→ POST /api/<ns/method> {args} 载荷；
+//           流走单一 WS /api/remote.mux（open/item/end/error/cancel 复用）。
+//   legacy（老版 DSH）：无鉴权直连，POST /api/<method>（点号端点、裸 payload）；
+//           流走 /api/events.mux + /api/events.host，审批/提问走 /api/respond。
+//   协议在首次调用时自动探测（v2 探针 401=新版鉴权；双探针都要求 ok:true 防误判）。
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -15,6 +15,69 @@ export class DshClient {
     this.stateDir = stateDir ?? null;
     this.cookie = this.#loadCookie(); // { name, value, expiresAt }
     this.mux = null;
+    this.protocol = null; // "v2" | "legacy"（ensureProtocol() 探测后确定）
+  }
+
+  /** 探测并确定协议代际；DSH 未就绪/双探针失败时抛错（调用方退避重试）。 */
+  async ensureProtocol() {
+    if (this.protocol) return this.protocol;
+    let status = await this.#v2Probe();
+    if (status === "auth-required") {
+      // 新版 DSH 才有鉴权；有 token 就换 Cookie 再确认，没有也按 v2 处理
+      try {
+        const cookie = await this.cookieHeader();
+        if (cookie) status = await this.#v2Probe();
+      } catch {
+        /* token 缺失：保持 auth-required */
+      }
+    }
+    if (status === "v2" || status === "auth-required") {
+      this.protocol = "v2";
+      return "v2";
+    }
+    if (await this.#legacyProbe()) {
+      this.protocol = "legacy";
+      return "legacy";
+    }
+    throw new Error("dsh protocol probe failed (dsh web not reachable?)");
+  }
+
+  /** v2 探针：POST /api/session/list。401→"auth-required"；ok:true 且 items 为数组→"v2"；否则 null。 */
+  async #v2Probe() {
+    try {
+      const rpcId = randomUUID();
+      const headers = { "content-type": "application/json" };
+      if (this.cookie) headers.cookie = `${this.cookie.name}=${this.cookie.value}`;
+      const res = await fetch(`${this.baseUrl}/api/session/list`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ type: "client-request", rpcId, method: "session/list", payload: { args: { _request: {} } } }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.status === 401) return "auth-required";
+      const body = await res.json().catch(() => null);
+      if (body?.type === "server-response" && body.rpcId === rpcId && body.result?.ok === true && Array.isArray(body.result.value?.items)) return "v2";
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** legacy 探针：POST /api/session.list（点号端点）。要求 ok:true（新 DSH 会对该端点回 ok:false 错误信封）。 */
+  async #legacyProbe() {
+    try {
+      const rpcId = randomUUID();
+      const res = await fetch(`${this.baseUrl}/api/session.list`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "client-request", rpcId, method: "session.list", payload: {} }),
+        signal: AbortSignal.timeout(5000),
+      });
+      const body = await res.json().catch(() => null);
+      return body?.type === "server-response" && body.rpcId === rpcId && body.result?.ok === true;
+    } catch {
+      return false;
+    }
   }
 
   setToken(token) {
@@ -111,8 +174,15 @@ export class DshClient {
     return res;
   }
 
-  /** unary：POST /api/<endpoint>；args 为 typert wire 参数对象（如 {_request:{}} / {request:{...}} / {agentId}）。 */
-  async unary(endpoint, args = {}, { timeoutMs = 30000 } = {}) {
+  /** unary：首次调用自动探测协议；v2 走 {args} 载荷，legacy 走裸 payload。 */
+  async unary(endpoint, args = {}, opts = {}) {
+    await this.ensureProtocol();
+    if (this.protocol === "legacy") return this.#legacyUnary(endpoint, args, opts);
+    return this.#v2Unary(endpoint, args, opts);
+  }
+
+  /** v2 unary：POST /api/<endpoint>；args 为 typert wire 参数对象（如 {_request:{}} / {request:{...}} / {agentId}）。 */
+  async #v2Unary(endpoint, args = {}, { timeoutMs = 30000 } = {}) {
     const rpcId = randomUUID();
     const res = await this.#fetch(`/api/${endpoint}`, {
       method: "POST",
@@ -127,8 +197,60 @@ export class DshClient {
     return body.result;
   }
 
+  /** legacy unary：POST /api/<method>（点号端点），payload 原样发送。 */
+  async #legacyUnary(method, payload = {}, { timeoutMs = 30000 } = {}) {
+    const rpcId = randomUUID();
+    const res = await fetch(`${this.baseUrl}/api/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "client-request", rpcId, method, payload }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (body?.type !== "server-response" || body.rpcId !== rpcId) {
+      return { ok: false, error: { code: "protocol-error", message: `unexpected response for ${method}: HTTP ${res.status}` } };
+    }
+    return body.result;
+  }
+
+  /** legacy 应答审批/提问：POST /api/respond。cancel=true 时发 ok:false + cancelled（旧 DSH 跳过语义）。 */
+  async respond(rpcId, value, { timeoutMs = 30000, cancel = false } = {}) {
+    const result = cancel
+      ? { ok: false, error: { code: "cancelled", message: "user cancelled", details: {} } }
+      : { ok: true, value };
+    const res = await fetch(`${this.baseUrl}/api/respond`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "client-response", rpcId, result }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return { ok: false, error: { code: "transport", message: `respond HTTP ${res.status}` } };
+    const body = await res.json().catch(() => ({}));
+    if (body?.accepted === false) {
+      return { ok: false, error: { code: "respond-rejected", message: `DSH rejected respond: ${body.reason ?? "unknown"}` } };
+    }
+    return { ok: true };
+  }
+
+  /** legacy 下行 WS 流；onFrame 收到 {rpcId, method, payload}；onState 收到 open/close/error。 */
+  openStream(path, onFrame, onState) {
+    const ws = new WebSocket(`${this.baseUrl.replace(/^http/, "ws")}${path}`);
+    ws.onopen = () => onState?.("open");
+    ws.onclose = () => onState?.("close");
+    ws.onerror = () => onState?.("error");
+    ws.onmessage = (ev) => {
+      try {
+        const f = JSON.parse(ev.data);
+        if (f?.type === "server-request") onFrame?.(f);
+      } catch {
+        /* 跳过坏帧 */
+      }
+    };
+    return ws;
+  }
+
   /**
-   * 打开（或换新）一条到 /api/remote.mux 的物理连接。
+   * 打开（或换新）一条到 /api/remote.mux 的物理连接（v2）。
    * @param onClose 连接关闭（或打不开）时回调，主循环据此退避重连。
    */
   openMux(onClose) {
