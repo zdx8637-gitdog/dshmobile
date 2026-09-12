@@ -1,0 +1,4 @@
+# npm 发布排除（.gitignore 之外的显式兜底）
+scripts/.legacy-ref/
+scripts/.relay-probe-identity.json
+.relay-probe-identity.json

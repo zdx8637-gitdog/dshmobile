@@ -23,9 +23,9 @@ if (!e2ee.e2eePubKey || !e2ee.e2eePairingSecret || !e2ee.e2eePairingId) {
 }
 
 const phone = (() => {
-  // 复用探针身份（scripts/.relay-probe-identity.json）：重复运行不换身份，
+  // 复用探针身份（状态目录，避免污染包目录）：重复运行不换身份，
   // 若桥仍 pin 本探针则直接 e2ee.hello；否则走完整配对。
-  const idFile = new URL("./.relay-probe-identity.json", import.meta.url);
+  const idFile = "C:/Users/zdx86/.dsh-mobile/probe-identity.json";
   try {
     const saved = JSON.parse(readFileSync(idFile, "utf8"));
     if (saved?.pubKey && saved?.privKey && saved?.keyId) return saved;

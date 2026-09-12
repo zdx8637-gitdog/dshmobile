@@ -19,7 +19,7 @@ const e2ee = panel?.data ?? {};
 if (!e2ee.e2eePubKey || !e2ee.e2eePairingSecret || !e2ee.e2eePairingId) { console.log("FAIL: 面板无有效 E2EE 码"); process.exit(1); }
 
 const phone = (() => {
-  const idFile = new URL("./.relay-probe-identity.json", import.meta.url);
+  const idFile = "C:/Users/zdx86/.dsh-mobile/probe-identity.json";
   try {
     const saved = JSON.parse(readFileSync(idFile, "utf8"));
     if (saved?.pubKey && saved?.privKey && saved?.keyId) return saved;
