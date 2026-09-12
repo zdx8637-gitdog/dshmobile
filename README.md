@@ -22,7 +22,8 @@
 ```
 
 业务内容（prompt / 回复 / 会话 / 文件）经 **E2EE 端到端加密**：relay 只能看到路由元数据，
-**读不到、也改不了**你的会话内容。
+**读不到、也改不了**你的会话内容。连接层带自愈：DSH 重启、网络抖动后自动重握手恢复，
+无需手动操作。
 
 ## 开源与安全
 
@@ -46,11 +47,23 @@ npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@lates
 ```
 
 > 前置 `pnpm`。重启 DSH 后，Web 左侧栏底部出现 ▶ 面板：① 登录 / 授权码，② 加密配对码。
+> 当前插件版本 **0.1.0-beta.19**。
 
 ### 手机端（Android App）
 
-扫描电脑面板二维码 → 落地页下载签名 APK。装好后在 App 内扫码：先扫①登录，再扫②加密配对，
-配对成功后设备列表出现钥匙图标（即 E2EE 已生效）。
+扫描电脑面板二维码 → 落地页下载签名 APK（当前版本 **v0.2.12**）。装好后在 App 内扫码：
+先扫①登录，再扫②加密配对，配对成功后设备列表出现钥匙图标（即 E2EE 已生效）。
+
+## DSH 版本兼容（双协议自适应）
+
+插件 0.1.0-beta.18 起**自动探测 DSH 代际**，升级顺序无关：
+
+| DSH 版本 | 插件行为 |
+| :-- | :-- |
+| **v0.1.5 及更新** | 新协议全适配：`/api` 会话鉴权（launch token → 会话 Cookie）、Typert 端点（`session/*` 等）、`/api/remote.mux` 流复用、`$events` 审批/提问瀑布 |
+| **v0.1.0-rc.6 及更早** | 自动回退 legacy 协议（点号端点、`events.mux`/`events.host`、`respond` 应答），无鉴权直连，行为与 beta.16 一致 |
+
+因此**先升插件、后升 DSH，或反着升，或老版本不升**，均全程可用。
 
 ## 目录
 
@@ -59,6 +72,7 @@ npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@lates
 | `plugins/` | PC Bridge 插件（host + bridge 守护 + Web 面板），开源 |
 | `docs/02-protocol.md` | relay 信封、消息类型、设备语义（线格式契约） |
 | `docs/plan-e2ee.md` | E2EE v1 设计（威胁模型、密码学、握手、pinning） |
+| `docs/e2ee-identity-issues.md` | E2EE 身份/配对问题调研（撕裂读再生、重启自愈等） |
 
 ## 信任与自托管（路线图）
 
