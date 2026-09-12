@@ -297,8 +297,10 @@ export class Adapter {
       const p = f.request ?? {};
       // 新版 ApprovalRequestEvent 无独立 id（id 只存在于 session 的 approval/asked 事件）：
       // 用瀑布 eventId 充当展示/关联 id，并兼容手机旧字段 approvalId。
+      // 帧内必须带 sessionId：App 按 frame.sessionId 过滤事件，缺了卡片不会弹出。
       const frame = {
         type: "approval/requested",
+        sessionId: sid,
         id: f.eventId,
         approvalId: f.eventId,
         toolName: p.toolName,
@@ -310,7 +312,7 @@ export class Adapter {
       this.relay.forwardEvent({ sessionId: sid, frame, rpcId: f.eventId });
     } else if (f.event === "user-questions/request") {
       const p = f.request ?? {};
-      const frame = { type: "question/requested", questions: Array.isArray(p.questions) ? p.questions : [] };
+      const frame = { type: "question/requested", sessionId: sid, questions: Array.isArray(p.questions) ? p.questions : [] };
       this.waterfallStash.set(f.eventId, stash);
       if (typeof sid === "string") this.#stashPending(sid, f.eventId, frame);
       this.relay.forwardEvent({ sessionId: sid, frame, rpcId: f.eventId });
@@ -356,9 +358,10 @@ export class Adapter {
     if (!stash) return;
     const { sessionId, request } = stash;
     const isApproval = Boolean(request?.toolName);
+    // 帧内带 sessionId（App 按 frame.sessionId 过滤，缺了卡片不消失）
     const frame = isApproval
-      ? { type: "approval/resolved", id: request?.id }
-      : { type: "question/resolved", rpcId: eventId };
+      ? { type: "approval/resolved", sessionId, id: request?.id }
+      : { type: "question/resolved", sessionId, rpcId: eventId };
     if (typeof sessionId === "string") this.clearPendingRequest(eventId, sessionId);
     this.relay.forwardEvent({ sessionId, frame, rpcId: eventId });
   }

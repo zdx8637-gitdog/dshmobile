@@ -281,9 +281,9 @@ try {
   console.log("[6] $events：审批/提问瀑布 → 转发 + $events/result 应答");
   await sleep(200);
   const approvalEvt = relayEvents.find((e) => e.rpcId === "evt-1");
-  check("approval/requested 转发（eventId 充当 id/approvalId）", approvalEvt?.frame?.type === "approval/requested" && approvalEvt.frame.id === "evt-1" && approvalEvt.frame.approvalId === "evt-1" && approvalEvt.frame.toolName === "WriteFile", JSON.stringify(approvalEvt));
+  check("approval/requested 转发（eventId 充当 id/approvalId + 帧内 sessionId）", approvalEvt?.frame?.type === "approval/requested" && approvalEvt.frame.id === "evt-1" && approvalEvt.frame.approvalId === "evt-1" && approvalEvt.frame.toolName === "WriteFile" && approvalEvt.frame.sessionId === "sess-1", JSON.stringify(approvalEvt));
   const questionEvt = relayEvents.find((e) => e.rpcId === "evt-2");
-  check("question/requested 转发", questionEvt?.frame?.type === "question/requested" && questionEvt.frame.questions?.[0]?.id === "q1", JSON.stringify(questionEvt));
+  check("question/requested 转发（帧内 sessionId）", questionEvt?.frame?.type === "question/requested" && questionEvt.frame.questions?.[0]?.id === "q1" && questionEvt.frame.sessionId === "sess-1", JSON.stringify(questionEvt));
   check("host/session-added 广播", relayEvents.some((e) => e.frame?.type === "host/session-added" && e.frame.sessionId === "sess-9"));
 
   await adapter.handleRequest({ requestId: "r3", type: "approvals.respond", payload: { rpcId: "evt-1", outcome: "allowed-once", sessionId: "sess-1" } });
