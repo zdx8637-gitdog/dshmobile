@@ -172,7 +172,8 @@ export class RelayBridge {
   /** E2EE 透传：未建立或明文类型 → 原样；否则解密 payload。 */
   decryptEnvelope(env) {
     if (PLAINTEXT_TYPES.has(env.type)) return env;
-    const established = this.e2ee?.isConnectionEstablished === true;
+    if (!this.e2ee) return env; // 未启用 E2EE：全部按明文透传（不误报 RESTARTED）
+    const established = this.e2ee.isConnectionEstablished === true;
     if (!established) {
       // 桥刚重启：本端每连接密钥已随进程丢失。收到加密信封 → 回 E2EE_RESTARTED，
       // 让手机丢弃旧连接密钥并重新 e2ee.hello（明文请求仍按未配对/legacy 原样放行）。
@@ -202,7 +203,8 @@ export class RelayBridge {
     }
   }
 
-  /** 对一条请求回显式错误响应（E2EE_RESTARTED / E2EE_REQUIRED）。 */
+  /** 对一条请求回显式错误响应（E2EE_RESTARTED / E2EE_REQUIRED）。
+   *  control 标记：桥在密钥失效时只能用明文发控制错误，客户端据此与"降级攻击"区分。 */
   #rejectEnvelope(env, code, message) {
     const plain = JSON.stringify({
       schemaVersion: 1,
@@ -212,7 +214,7 @@ export class RelayBridge {
       sentAt: new Date().toISOString(),
       actor: { role: "bridge", deviceId: this.deviceId },
       requestId: env.requestId,
-      payload: { ok: false, error: { code, message } },
+      payload: { ok: false, error: { code, message }, control: true },
     });
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(plain);
   }
