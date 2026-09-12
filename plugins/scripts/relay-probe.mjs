@@ -140,7 +140,6 @@ ws.onmessage = (ev) => {
     return;
   }
   if (m.kind === "response" && m.requestId === "probe-sessions-list") {
-    clearTimeout(deadline);
     let p = m.payload;
     if (m.crypto && keys) {
       try { p = decrypt(m); } catch (err) { console.log("响应解密失败:", err.message); process.exit(1); }
@@ -152,9 +151,36 @@ ws.onmessage = (ev) => {
         console.log(`  - ${s.sessionId}${s.title ? `「${s.title}」` : ""}${s.cwd ? ` (${s.cwd})` : ""}`);
       }
       console.log(`  归档=${(p.data?.archivedSessionIds ?? []).length} 完成未查看=${(p.data?.completedSessionIds ?? []).length} 待应答=${(p.data?.pendingSessionIds ?? []).length}`);
+      // 可选：给定 sessionId 时继续拉该会话历史（只读，验证 history 形状）
+      const histSessionId = process.argv[3] || "";
+      if (histSessionId) {
+        stage = "sessions-history";
+        sendEncrypted("sessions.history", "probe-sessions-history", { sessionId: histSessionId, maxMessages: 10 });
+        return;
+      }
     } else {
       console.log(`\n❌ sessions.list 失败: [${p?.error?.code}] ${p?.error?.message}`);
       console.log("（若为 HTTP 401/protocol-error：桥没有 launch token，重启 DSH 后应消失）");
+    }
+    clearTimeout(deadline);
+    ws.close();
+    return;
+  }
+  if (m.kind === "response" && m.requestId === "probe-sessions-history") {
+    clearTimeout(deadline);
+    let p = m.payload;
+    if (m.crypto && keys) {
+      try { p = decrypt(m); } catch (err) { console.log("响应解密失败:", err.message); process.exit(1); }
+    }
+    if (p?.ok === true) {
+      const events = p.data?.events ?? [];
+      console.log(`\n✅ sessions.history 成功：${events.length} 条事件 hasMore=${p.data?.hasMore}`);
+      for (const e of events.slice(0, 8)) {
+        console.log(`  - seq=${e.seq} ${e.event?.type}${e.event?.data ? ` data.keys=${Object.keys(e.event.data).join(",")}` : ""}`);
+      }
+      if (p.data?.projections) console.log(`  projections.keys=${Object.keys(p.data.projections.values ?? {}).join(",")}`);
+    } else {
+      console.log(`\n❌ sessions.history 失败: [${p?.error?.code}] ${p?.error?.message}`);
     }
     ws.close();
     return;
