@@ -171,28 +171,50 @@ export class RelayBridge {
 
   /** E2EE 透传：未建立或明文类型 → 原样；否则解密 payload。 */
   decryptEnvelope(env) {
-    if (!this.e2ee?.isConnectionEstablished) return env;
     if (PLAINTEXT_TYPES.has(env.type)) return env;
+    const established = this.e2ee?.isConnectionEstablished === true;
+    if (!established) {
+      // 桥刚重启：本端每连接密钥已随进程丢失。收到加密信封 → 回 E2EE_RESTARTED，
+      // 让手机丢弃旧连接密钥并重新 e2ee.hello（明文请求仍按未配对/legacy 原样放行）。
+      if (env.kind === "request" && typeof env.requestId === "string" && (env.crypto || env.payload?.ct)) {
+        this.#rejectEnvelope(env, "E2EE_RESTARTED", "bridge restarted; E2EE connection keys were reset, please re-handshake");
+        return null;
+      }
+      return env;
+    }
     if (!env.crypto || !env.payload?.ct) {
       // 已配对却收到明文（手机重装后新身份未配对）→ 回 E2EE_REQUIRED，让手机提示重新配对/确认回退。
       if (env.kind === "request" && typeof env.requestId === "string") {
-        const plain = JSON.stringify({
-          schemaVersion: 1,
-          envelopeId: randomUUID(),
-          kind: "response",
-          type: env.type,
-          sentAt: new Date().toISOString(),
-          actor: { role: "bridge", deviceId: this.deviceId },
-          requestId: env.requestId,
-          payload: { ok: false, error: { code: "E2EE_REQUIRED", message: "该设备已启用端到端加密，请重新扫码配对 E2EE，或确认回退到非加密模式" } },
-        });
-        if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(plain);
+        this.#rejectEnvelope(env, "E2EE_REQUIRED", "该设备已启用端到端加密，请重新扫码配对 E2EE，或确认回退到非加密模式");
       }
       return null;
     }
-    const { type, requestId, targetDeviceId } = envelopeAadContext(env);
-    const payload = this.e2ee.decryptIncoming({ type, requestId, targetDeviceId, crypto: env.crypto, meta: env.meta ?? {}, payload: env.payload });
-    return { ...env, payload };
+    try {
+      const { type, requestId, targetDeviceId } = envelopeAadContext(env);
+      const payload = this.e2ee.decryptIncoming({ type, requestId, targetDeviceId, crypto: env.crypto, meta: env.meta ?? {}, payload: env.payload });
+      return { ...env, payload };
+    } catch (err) {
+      // 密钥不匹配/序号错乱：对端持有的连接密钥已失效 → 同样回 E2EE_RESTARTED 触发重握手
+      if (env.kind === "request" && typeof env.requestId === "string") {
+        this.#rejectEnvelope(env, "E2EE_RESTARTED", `E2EE connection keys are unusable (${err?.message ?? err}); please re-handshake`);
+      }
+      return null;
+    }
+  }
+
+  /** 对一条请求回显式错误响应（E2EE_RESTARTED / E2EE_REQUIRED）。 */
+  #rejectEnvelope(env, code, message) {
+    const plain = JSON.stringify({
+      schemaVersion: 1,
+      envelopeId: randomUUID(),
+      kind: "response",
+      type: env.type,
+      sentAt: new Date().toISOString(),
+      actor: { role: "bridge", deviceId: this.deviceId },
+      requestId: env.requestId,
+      payload: { ok: false, error: { code, message } },
+    });
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(plain);
   }
 
   /** 对 relay 请求发 canonical response。 */
