@@ -2,7 +2,9 @@
 import { randomUUID } from "node:crypto";
 
 /** E2EE 下仍需明文（relay 亲自处理/握手）的消息类型。 */
-const PLAINTEXT_TYPES = new Set(["heartbeat.ping", "heartbeat.pong", "e2ee.hello", "key.exchange", "device.register", "e2ee.clear"]);
+// transfer.deliver：relay→桥 控制面指令（relay 非 E2EE 端点，只能明文投递；桥的响应也必须明文回去）。
+// 加解密双向豁免；adapter 侧另校验 actor.role==="relay"（手机从不发此类型）。
+const PLAINTEXT_TYPES = new Set(["heartbeat.ping", "heartbeat.pong", "e2ee.hello", "key.exchange", "device.register", "e2ee.clear", "transfer.deliver"]);
 
 /** 从信封提取 AAD 所需的稳定字段（两端一致：target 缺失回退 actor.deviceId；requestId 缺失回退 envelopeId）。 */
 function envelopeAadContext(env) {

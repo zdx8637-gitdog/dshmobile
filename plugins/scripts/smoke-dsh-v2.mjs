@@ -315,7 +315,11 @@ try {
   await adapter.handleRequest({ requestId: "r8", type: "sessions.create", payload: { cwd: "D:\\p" } });
   check("sessions.create ok(workspace/create+session/create)", relayResponses.find((r) => r.requestId === "r8")?.payload?.ok === true);
   await adapter.handleRequest({ requestId: "r9", type: "session.models", payload: { sessionId: "sess-1" } });
-  check("session.models → modelCatalog", relayResponses.find((r) => r.requestId === "r9")?.payload?.ok === true);
+  const r9 = relayResponses.find((r) => r.requestId === "r9");
+  check("session.models → modelCatalog ok", r9?.payload?.ok === true);
+  check("session.models 投影为 App 形状 {current,routable,groups,failures}", r9?.payload?.data?.current?.provider === "deepseek" && r9?.payload?.data?.routable === true && Array.isArray(r9?.payload?.data?.groups) && Array.isArray(r9?.payload?.data?.failures), JSON.stringify(r9?.payload?.data));
+  await adapter.handleRequest({ requestId: "r9b", type: "transfer.deliver", actor: { role: "client", clientId: "c1" }, payload: { transferId: "t1", name: "x.jpg" } });
+  check("transfer.deliver 非 relay actor 拒绝", relayResponses.find((r) => r.requestId === "r9b")?.payload?.error?.code === "forbidden", JSON.stringify(relayResponses.find((r) => r.requestId === "r9b")?.payload));
   await adapter.handleRequest({ requestId: "r10", type: "sessions.updateQueue", payload: { sessionId: "sess-1", itemId: "q1", action: { kind: "edit", content: [{ type: "text", text: "x" }] } } });
   check("sessions.updateQueue ok", relayResponses.find((r) => r.requestId === "r10")?.payload?.ok === true);
   await adapter.handleRequest({ requestId: "r11", type: "sessions.interrupt", payload: { sessionId: "sess-1" } });

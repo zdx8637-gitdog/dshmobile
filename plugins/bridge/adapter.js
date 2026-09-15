@@ -465,7 +465,13 @@ export class Adapter {
     if (typeof requestId !== "string") return;
     console.log("[adapter] request:", type, "from", env.actor?.clientId ?? "?", "payload:", JSON.stringify(payload).slice(0, 400));
 
-    if (type === "transfer.deliver") return this.#deliver(payload, requestId);
+    if (type === "transfer.deliver") {
+      // 投递指令只接受 relay 发起（relay→桥 控制面）；手机从不发此类型，拒绝伪装明文。
+      if (env.actor?.role !== "relay") {
+        return this.relay.respond(requestId, type, { ok: false, error: { code: "forbidden", message: "transfer.deliver is relay-only" } });
+      }
+      return this.#deliver(payload, requestId);
+    }
     if (type === "upload.commit") return this.#commitUpload(payload, requestId);
     if (type === "attachment.resolve") return this.#resolveAttachment(payload, requestId);
     if (type === "key.exchange") return this.#keyExchange(payload, requestId);
@@ -894,7 +900,17 @@ export class Adapter {
         if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
         const r = await this.dsh.unary("session/modelCatalog", {}, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-        return this.relay.respond(requestId, type, { ok: true, data: r.value });
+        // v2 ModelCatalog {default, routableProviders, groups, failures} → App 期望的 {current, routable, groups, failures}
+        const c = r.value ?? {};
+        return this.relay.respond(requestId, type, {
+          ok: true,
+          data: {
+            current: c.default,
+            routable: Array.isArray(c.routableProviders) && c.routableProviders.includes(c.default?.provider),
+            groups: Array.isArray(c.groups) ? c.groups : [],
+            failures: Array.isArray(c.failures) ? c.failures : [],
+          },
+        });
       }
       case "commands.list": {
         if (this.isLegacy()) return this.#legacyCommandsList(type, payload, requestId);

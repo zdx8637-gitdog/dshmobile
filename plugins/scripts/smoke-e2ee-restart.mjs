@@ -77,5 +77,14 @@ console.log("[5] 明文类型（hello/心跳）任何状态原样放行");
   check("hello 原样返回", r?.type === "e2ee.hello" && sent.length === 0, JSON.stringify({ r, sent }));
 }
 
+console.log("[6] transfer.deliver：relay 明文投递指令任何状态放行（双向不加密，relay 可读）");
+{
+  const { b, sent } = makeBridge({ isConnectionEstablished: true, decryptIncoming: null, encryptOutgoing: null });
+  const r = b.decryptEnvelope(req({ type: "transfer.deliver", actor: { role: "relay" }, payload: { transferId: "t1" } }));
+  check("解密侧原样放行且不回错误", r?.type === "transfer.deliver" && sent.length === 0, JSON.stringify({ r, sent }));
+  const out = b.encryptEnvelope({ schemaVersion: 1, envelopeId: "e2", kind: "response", type: "transfer.deliver", requestId: "req-1", actor: { role: "bridge", deviceId: "dev-1" }, payload: { ok: true, data: { path: "uploads/x.jpg" } } });
+  check("加密侧不加密（响应为明文）", out.payload?.ok === true && !out.crypto, JSON.stringify(out));
+}
+
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);
