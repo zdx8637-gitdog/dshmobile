@@ -110,9 +110,11 @@ const server = createServer((req, res) => {
             return {
               records: [
                 { type: "event", event: { type: "user/message", seq: 2, time: Date.now(), data: {} } },
-                { type: "event", event: { type: "assistant/message", seq: 3, time: Date.now(), data: {} } },
+                // assistant/message 带 reasoning 块（真实 DSH 会下发；桥应剥离）
+                { type: "event", event: { type: "assistant/message", seq: 3, time: Date.now(), data: { message: { role: "assistant", content: [{ type: "reasoning", text: "r".repeat(300) }, { type: "text", text: "答案正文" }] } } } },
                 { type: "event", event: { type: "assistant/chunk", seq: 4, time: Date.now(), data: {} } },
-                { type: "event", event: { type: "tool/result", seq: 5, time: Date.now(), data: { message: { content: [{ type: "text", text: "y".repeat(600) }] } } } },
+                // tool/result 用真实嵌套结构：content=[{type:'tool-result', toolCallId, content:[{type:'text'}]}]
+                { type: "event", event: { type: "tool/result", seq: 5, time: Date.now(), data: { message: { source: { kind: "tool", callId: "call-1" }, content: [{ type: "tool-result", toolCallId: "call-1", content: [{ type: "text", text: "y".repeat(600) }] }] } } } },
               ],
               hasMore: false,
             };
@@ -275,7 +277,21 @@ try {
   check("history ok", r2?.payload?.ok === true, JSON.stringify(r2?.payload));
   check("page throughSeq=最新游标(8)", seen.pageArgs?.request?.throughSeq === 8, JSON.stringify(seen.pageArgs));
   check("chunk 被剥离", (r2?.payload?.data?.events ?? []).every((e) => e.event.type !== "assistant/chunk"));
-  check("tool/result 截断 ≤510", (r2?.payload?.data?.events ?? []).find((e) => e.event.type === "tool/result")?.event.data.message.content[0].text.length <= 510);
+  // B1：reasoning 剥离（手机端不渲染，白传）
+  const amEvent = (r2?.payload?.data?.events ?? []).find((e) => e.event.type === "assistant/message")?.event;
+  check("reasoning 被剥离（只剩 text 块）", Array.isArray(amEvent?.data?.message?.content) && amEvent.data.message.content.length === 1 && amEvent.data.message.content[0].type === "text", JSON.stringify(amEvent?.data?.message?.content));
+  // B2a：按真实嵌套结构截断内层文本
+  const trEvent = (r2?.payload?.data?.events ?? []).find((e) => e.event.type === "tool/result")?.event;
+  const trInner = trEvent?.data?.message?.content?.[0]?.content?.[0]?.text ?? "";
+  check("tool/result 内层文本截断 ≤510", trInner.length > 0 && trInner.length <= 510, `len=${trInner.length}`);
+  // B2b：摘要字段（新 App 渲染用）
+  check("tool/result 带 toolSummary 摘要", trEvent?.data?.toolSummary?.truncated === true && trEvent.data.toolSummary.bytes === 600 && trEvent.data.toolSummary.preview?.length === 500, JSON.stringify(trEvent?.data?.toolSummary));
+  // B2c：toolResult.full 按需取回全文（缓存命中）
+  await adapter.handleRequest({ requestId: "r2f", type: "toolResult.full", payload: { sessionId: "sess-1", callId: "call-1" } });
+  const r2f = relayResponses.find((r) => r.requestId === "r2f");
+  check("toolResult.full 命中缓存返回全文", r2f?.payload?.ok === true && r2f.payload.data?.text?.length === 600, `ok=${r2f?.payload?.ok} len=${r2f?.payload?.data?.text?.length}`);
+  await adapter.handleRequest({ requestId: "r2g", type: "toolResult.full", payload: { sessionId: "sess-1", callId: "nope" } });
+  check("toolResult.full 未命中回 not-cached", relayResponses.find((r) => r.requestId === "r2g")?.payload?.error?.code === "not-cached");
   check("projections 透传", r2?.payload?.data?.projections?.values?.title === "测试会话");
 
   console.log("[6] $events：审批/提问瀑布 → 转发 + $events/result 应答");

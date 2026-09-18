@@ -101,9 +101,9 @@ const server = createServer((req, res) => {
           case "session.history": value = {
             events: [
               { seq: 2, event: { type: "user/message", data: { content: [{ type: "text", text: "你好" }] } } },
-              { seq: 3, event: { type: "assistant/message", data: { content: [{ type: "text", text: "回复" }] } } },
+              { seq: 3, event: { type: "assistant/message", data: { content: [{ type: "reasoning", text: "r".repeat(200) }, { type: "text", text: "回复" }] } } },
               { seq: 4, event: { type: "assistant/chunk", data: {} } },
-              { seq: 5, event: { type: "tool/result", data: { message: { content: [{ type: "text", text: "y".repeat(600) }] } } } },
+              { seq: 5, event: { type: "tool/result", data: { message: { source: { kind: "tool", callId: "call-1" }, content: [{ type: "tool-result", toolCallId: "call-1", content: [{ type: "text", text: "y".repeat(600) }] }] } } } },
             ],
             hasMore: false,
             projections: { sessionStats: { tokens: 100 } },
@@ -215,7 +215,9 @@ try {
   await adapter.handleRequest({ requestId: "r2", type: "sessions.history", payload: { sessionId: "sess-1" } });
   const r2 = relayResponses.find((r) => r.requestId === "r2");
   const evts = r2?.payload?.data?.events ?? [];
-  check("history ok + chunk 剥离 + 截断", r2?.payload?.ok === true && evts.length === 3 && evts.find((e) => e.event.type === "tool/result")?.event.data.message.content[0].text.length <= 510, JSON.stringify(evts.map((e) => e.event.type)));
+  check("history ok + chunk 剥离 + 截断", r2?.payload?.ok === true && evts.length === 3 && evts.find((e) => e.event.type === "tool/result")?.event.data.message.content[0].content[0].text.length <= 510, JSON.stringify(evts.map((e) => e.event.type)));
+  check("legacy reasoning 剥离", (evts.find((e) => e.event.type === "assistant/message")?.event.data.content ?? []).every((b) => b.type !== "reasoning"), JSON.stringify(evts.find((e) => e.event.type === "assistant/message")?.event.data.content));
+  check("legacy toolSummary 摘要", evts.find((e) => e.event.type === "tool/result")?.event.data.toolSummary?.truncated === true);
   check("legacy projections 透传", r2?.payload?.data?.projections?.sessionStats?.tokens === 100);
 
   check("approval/requested 转发", relayEvents.some((e) => e.rpcId === "mux-apr" && e.frame?.type === "approval/requested"));

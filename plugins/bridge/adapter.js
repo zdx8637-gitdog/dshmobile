@@ -52,46 +52,116 @@ function ancestryCrumbs(target) {
   }
 }
 
+const TOOL_TEXT_LIMIT = 500;
+
+/** 在 {content:[...]} 容器里剥掉 reasoning；无 reasoning 时返回 null 表示无需改动。 */
+function stripReasoningIn(container) {
+  const content = container?.content;
+  if (!Array.isArray(content) || content.length === 0) return null;
+  const kept = content.filter((b) => b?.type !== "reasoning");
+  return kept.length === content.length ? null : kept;
+}
+
+/** B1：剥离 assistant/message 的 reasoning 块。
+ * 手机端从不渲染思考（实测占 content 字节 63%~70%），白传；桌面端不受影响（桥只做下行投影）。
+ * v2 形状是 data.message.content；legacy 存在 data.content 变体，两种都处理。 */
+function stripReasoning(event) {
+  if (!event || event.type !== "assistant/message") return event;
+  const message = event.data?.message;
+  const keptInMessage = stripReasoningIn(message);
+  if (keptInMessage) {
+    return { ...event, data: { ...event.data, message: { ...message, content: keptInMessage } } };
+  }
+  const keptInData = stripReasoningIn(event.data);
+  if (keptInData) return { ...event, data: { ...event.data, content: keptInData } };
+  return event;
+}
+
 /**
- * history wire 投影：剥离 UI 不渲染的海量流式碎片（assistant/chunk、step/*），
- * 截断超长工具输出。4.3MB 大会话压到 ~50KB，解决服务器 1Mbps 带宽下的传输瓶颈。
+ * B2：tool/result 压缩。真实结构（会话日志 + 实时 API 双向确认）：
+ *   data.message.content = [{ type:'tool-result', toolCallId, content:[{ type:'text', text }] }]
+ * 旧实现只判断顶层 type==='text'（与真实结构不符、却与 smoke 夹具的扁平形状一致）→ 从未生效，
+ * 导致工具输出"全文传输 + 手机一个字也显示不出来"。
+ * 这里按真实层级截断内层文本，并附加 data.toolSummary 摘要字段（新 App 渲染用，老 App 忽略）。
+ * 被截断的全文交给 remember() 存入桥内 LRU，供 toolResult.full 按需取回。
  */
-function compactHistoryEvents(events) {
+function compactToolResult(message, meta, remember) {
+  const content = message?.content;
+  if (!Array.isArray(content)) return { message, summary: null };
+  let bytes = 0;
+  let preview = "";
+  let truncated = false;
+  let callId = typeof meta?.callId === "string" ? meta.callId : null;
+  const full = [];
+  const next = content.map((block) => {
+    if (block?.type !== "tool-result" || !Array.isArray(block.content)) return block;
+    if (!callId && typeof block.toolCallId === "string") callId = block.toolCallId;
+    const inner = block.content.map((b) => {
+      if (b?.type !== "text" || typeof b.text !== "string") return b;
+      bytes += Buffer.byteLength(b.text);
+      full.push(b.text);
+      if (!preview) preview = b.text.slice(0, TOOL_TEXT_LIMIT);
+      if (b.text.length > TOOL_TEXT_LIMIT) {
+        truncated = true;
+        return { ...b, text: b.text.slice(0, TOOL_TEXT_LIMIT) + "\n…[截断]" };
+      }
+      return b;
+    });
+    return { ...block, content: inner };
+  });
+  if (bytes === 0) return { message, summary: null };
+  if (truncated && typeof remember === "function") {
+    remember({ callId, seq: meta?.seq, sessionId: meta?.sessionId, text: full.join("\n") });
+  }
+  return { message: { ...message, content: next }, summary: { callId, bytes, truncated, preview } };
+}
+
+/**
+ * history wire 投影：剥离 UI 不渲染的海量流式碎片（assistant/chunk、step/*）、
+ * 剥掉 reasoning、压缩工具输出。4.3MB 大会话压到 ~50KB，解决服务器 1Mbps 带宽下的传输瓶颈。
+ */
+function compactHistoryEvents(events, opts = {}) {
+  const { sessionId, remember } = opts;
   const kept = [];
   for (const event of events) {
     const t = event?.type;
     if (t === "assistant/chunk" || t === "step/start" || t === "step/end") continue;
     if (t === "tool/result") {
-      // 截断到 500 字符：远程只做预览展示，完整内容在桌面端
-      const copy = { ...event };
-      const content = copy.data?.message?.content;
-      if (Array.isArray(content)) {
-        copy.data = { ...copy.data, message: { ...copy.data.message, content: content.map((b) => b.type === "text" && typeof b.text === "string" && b.text.length > 500 ? { ...b, text: b.text.slice(0, 500) + "\n…[截断]" } : b) } };
-      }
-      kept.push(copy);
+      const { message, summary } = compactToolResult(
+        event.data?.message,
+        { sessionId, seq: event?.seq, callId: event.data?.message?.source?.callId },
+        remember,
+      );
+      kept.push(summary ? { ...event, data: { ...event.data, message, toolSummary: summary } } : event);
       continue;
     }
-    kept.push(event);
+    kept.push(stripReasoning(event));
   }
   return kept;
 }
 
 /** legacy（老版 DSH）history 投影：条目形如 {seq, event:{type,data}}。 */
-function compactLegacyHistoryEvents(events) {
+function compactLegacyHistoryEvents(entries, opts = {}) {
+  const { sessionId, remember } = opts;
   const kept = [];
-  for (const entry of events) {
+  for (const entry of entries) {
     const t = entry?.event?.type;
     if (t === "assistant/chunk" || t === "step/start" || t === "step/end") continue;
     if (t === "tool/result") {
-      const copy = { seq: entry.seq, event: { type: t, data: { ...entry.event.data } } };
-      const content = copy.event.data?.message?.content;
-      if (Array.isArray(content)) {
-        copy.event.data.message = { ...copy.event.data.message, content: content.map((b) => b.type === "text" && typeof b.text === "string" && b.text.length > 500 ? { ...b, text: b.text.slice(0, 500) + "\n…[截断]" } : b) };
+      const { message, summary } = compactToolResult(
+        entry.event.data?.message,
+        { sessionId, seq: entry?.seq ?? entry?.event?.seq, callId: entry.event.data?.message?.source?.callId },
+        remember,
+      );
+      if (!summary) {
+        kept.push(entry);
+      } else {
+        kept.push({ seq: entry.seq, event: { ...entry.event, data: { ...entry.event.data, message, toolSummary: summary } } });
       }
-      kept.push(copy);
       continue;
     }
-    kept.push(entry);
+    const stripped = stripReasoning(entry?.event);
+    kept.push(stripped === entry?.event ? entry : { seq: entry.seq, event: stripped });
   }
   return kept;
 }
@@ -148,6 +218,9 @@ export class Adapter {
     this.workspaceWaiter = null;     // 等待首个 workspace 基线的 promise
     // eventId（$events waterfall rpcId）-> { sessionId, frame, request }，供 cancel 应答与重放
     this.waterfallStash = new Map();
+    // 工具输出全文缓存（toolResult.full 按需取回）：被截断的 tool/result 存这里，LRU 逐出
+    this.toolFullCache = new Map();
+    this.toolFullCacheBytes = 0;
   }
 
   /** 是否老版 DSH（legacy 协议：点号端点 + events.mux/host + respond）。 */
@@ -306,7 +379,60 @@ export class Adapter {
     }
     this.relay.forwardEvent({
       sessionId: typeof sid === "string" ? sid : undefined,
-      frame: { type: "session/event", sessionId: sid, event },
+      frame: { type: "session/event", sessionId: sid, event: this.#projectLiveEvent(sid, event) },
+    });
+  }
+
+  /** 实时事件下行投影：剥 reasoning + 压缩工具输出（与 history 投影同口径）。 */
+  #projectLiveEvent(sid, event) {
+    if (event.type === "tool/result") {
+      const { message, summary } = compactToolResult(
+        event.data?.message,
+        { sessionId: sid, seq: event?.seq, callId: event.data?.message?.source?.callId },
+        (info) => this.#rememberToolFull(info),
+      );
+      return summary ? { ...event, data: { ...event.data, message, toolSummary: summary } } : event;
+    }
+    return stripReasoning(event);
+  }
+
+  /** 记录被截断的工具输出全文（供 toolResult.full 按需取回）。键优先 callId，其次 sessionId+seq。 */
+  #rememberToolFull({ callId, seq, sessionId, text }) {
+    if (typeof text !== "string" || text.length === 0) return;
+    const key = typeof callId === "string" && callId
+      ? `c:${callId}`
+      : Number.isInteger(seq) ? `s:${typeof sessionId === "string" ? sessionId : ""}:${seq}` : null;
+    if (!key || this.toolFullCache.has(key)) return;
+    const bytes = Buffer.byteLength(text);
+    this.toolFullCache.set(key, { text, bytes, at: Date.now() });
+    this.toolFullCacheBytes += bytes;
+    // LRU：最多 80 条 / 6MB，超出逐出最旧
+    while (this.toolFullCache.size > 80 || this.toolFullCacheBytes > 6 * 1024 * 1024) {
+      const oldest = this.toolFullCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.toolFullCacheBytes -= this.toolFullCache.get(oldest)?.bytes ?? 0;
+      this.toolFullCache.delete(oldest);
+    }
+  }
+
+  /** 工具输出全文按需取回：{sessionId, callId?, seq?} → 完整文本；未命中回 not-cached。 */
+  #toolResultFull(payload, requestId) {
+    const { sessionId, callId, seq } = payload ?? {};
+    const keys = [];
+    if (typeof callId === "string" && callId) keys.push(`c:${callId}`);
+    if (Number.isInteger(seq)) keys.push(`s:${typeof sessionId === "string" ? sessionId : ""}:${seq}`);
+    for (const k of keys) {
+      const hit = this.toolFullCache.get(k);
+      if (hit) {
+        // LRU 触达：移到队尾
+        this.toolFullCache.delete(k);
+        this.toolFullCache.set(k, hit);
+        return this.relay.respond(requestId, "toolResult.full", { ok: true, data: { text: hit.text, bytes: hit.bytes } });
+      }
+    }
+    return this.relay.respond(requestId, "toolResult.full", {
+      ok: false,
+      error: { code: "not-cached", message: "tool output not cached (bridge restarted or evicted); view it on the desktop" },
     });
   }
 
@@ -473,6 +599,7 @@ export class Adapter {
       return this.#deliver(payload, requestId);
     }
     if (type === "upload.commit") return this.#commitUpload(payload, requestId);
+    if (type === "toolResult.full") return this.#toolResultFull(payload, requestId);
     if (type === "attachment.resolve") return this.#resolveAttachment(payload, requestId);
     if (type === "key.exchange") return this.#keyExchange(payload, requestId);
     if (type === "e2ee.hello") return this.#e2eeHello(payload, requestId);
@@ -851,7 +978,10 @@ export class Adapter {
         const events = (r.value.records ?? [])
           .filter((rec) => rec?.type === "event" && rec.event)
           .map((rec) => rec.event);
-        const compacted = compactHistoryEvents(events);
+        const compacted = compactHistoryEvents(events, {
+          sessionId,
+          remember: (info) => this.#rememberToolFull(info),
+        });
         // DSH 条目的 seq 在 event 信封内；补到顶层作为客户端分页游标（beforeSeq）
         const wire = compacted.map((event) => ({ event, seq: event?.seq }));
         const dropped = events.length - wire.length;
@@ -1291,7 +1421,10 @@ export class Adapter {
       maxMessages: capped,
     }, { timeoutMs: 60000 });
     if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    const compacted = compactLegacyHistoryEvents(r.value.events ?? []);
+    const compacted = compactLegacyHistoryEvents(r.value.events ?? [], {
+      sessionId,
+      remember: (info) => this.#rememberToolFull(info),
+    });
     const wire = compacted.map((entry) => {
       const event = entry?.event ?? entry;
       return { ...entry, event, seq: event?.seq ?? entry?.seq };
@@ -1541,7 +1674,9 @@ export class Adapter {
 
     this.relay.forwardEvent({
       sessionId: typeof sid === "string" ? sid : undefined,
-      frame: p,
+      frame: p.type === "session/event" && p.event
+        ? { ...p, event: this.#projectLiveEvent(typeof sid === "string" ? sid : undefined, p.event) }
+        : p,
       rpcId: frame.rpcId,
     });
   }
