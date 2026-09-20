@@ -119,20 +119,26 @@ node D:\p\pw-check\verify-download-flow.mjs http://127.0.0.1:8099/
 2. **微信 UA**：引导条可见、两个 `.apk` 按钮隐藏且 `href` 已移除、链接框显示、点「复制下载链接」后剪贴板**逐字符相等**、全程**零 `.apk` 请求**；
 3. **APK 可达**：`HEAD` 200 + `Content-Length` 与 `latest.json` 一致 + 前 64KB 是 ZIP 魔数 `PK`（完整 sha256 由服务器侧 `sha256sum` 保证）。
 
-**最近一次验证结果（2026-09-20）**：
+**最近一次验证结果（2026-09-20 19:1x，APK 0.2.18 上线后）**：
 ```
+=== preview-landing.mjs（线上 22 项）===
+期望：版本 0.2.18 / DSH-Mobile-0.2.18.apk / 二维码=https://www.deepseek-claudex.cn/dshmobile/#download / 约 13 MB / 2026-09-20
+✅ 所有 [data-ver] 均为 v0.2.18（来自 latest.json）        ✅ 全部通过
+
+=== verify-download-flow.mjs（线上 12 项）===
+✅ APK HEAD 200   ✅ Content-Length 与 latest.json 一致（13600617 == 13600617）
+✅ 前 65536 字节是 APK/ZIP 魔数（PK）                     ✅ 下载链路全部通过
+
 === verify-qr.mjs ===
-latest.json → 200
-页面显示版本: ["v0.2.16","v0.2.16","v0.2.16","v0.2.16"]
-二维码实际编码内容: [ "https://www.deepseek-claudex.cn/dshmobile/DSH-Mobile-0.2.16.apk", "…同上（Hero 卡第二个二维码）" ]
+页面显示版本 v0.2.18 ×4；下载按钮 href = …/DSH-Mobile-0.2.18.apk
+二维码实际编码内容 = "https://www.deepseek-claudex.cn/dshmobile/#download"（两个码都是）
 ✅ 所有二维码都是绝对 https URL
-HTTP 404 https://www.deepseek-claudex.cn/auth/registration-status   ← 见 §5 待办 a
 
 === verify-pair-inline.mjs ===
-[1] mode=pair   PASS ×4（不跳 pair.html / 配对码 123456 / dshmobile://pair 深链 / 版本 v0.2.16）
-[2] mode=e2ee   PASS   [3] mode=grant  PASS   [4] 无参数 PASS   [5] 微信 UA PASS   [6] 自动拉起后仍同页 PASS
+[1] mode=pair PASS ×4   [2] e2ee PASS   [3] grant PASS   [4] 无参数 PASS   [5] 微信 UA PASS   [6] 自动拉起仍同页 PASS
 ALL PASS
 ```
+> 线上已无 404：`/auth/registration-status` 随 relay 部署上线（见 §5 待办 a）。
 
 ---
 
@@ -144,7 +150,8 @@ ALL PASS
 | b | 页面"电脑端安装"命令用 `@zdx8637/dshmobile-bridge@latest` | ✅ **已解决（2026-09-20）**：`0.1.0-beta.22` 已发布，`latest`=`beta`=`0.1.0-beta.22`；已下载 tarball 校验 `bridge/adapter.js` 含 `stripReasoning`/`toolSummary`/`toolResult.full`、`bridge/relay.js` 含 `transfer.deliver` 白名单 | — |
 | c | 旧工程 `D:\p\dshmobile-landing\` | `site/` 已在 2026-09-20 **镜像为权威内容**；其 `icon/` 仍由该工程（另一智能体）产出，我们只读取合并 | `deploy-dshmobile.py` 仍禁止执行；改完落地页记得重新镜像（§3） |
 | e | 品牌资源（icon / logo） | **v4-traced 代已于 2026-09-20 部署到网站**（另一智能体出素材 + `DEPLOY-LIST.md`；我方用 `D:\p\pw-check\apply-web-icons.mjs` 落盘）：A-1 覆盖 `favicon.ico`/`dsh-mobile-app.svg`(白底版)/`app-180.png`，A-2 新增 `favicon-16/32.png`+`icon-192/512.png`+`dsh-mobile-mark.svg` 并补两行 `<head>`，A-3 导航 logo 换成白底版内联 SVG。素材 6 件 sha256 与 `manifest.json` 逐一校验一致 | 网站已上线；**App 图标已进工程并构建验证，但要让用户看到需发布新 APK（见 f）** |
-| f | App 启动图标（原本完全没有 `android:icon`） | ✅ **已随 APK 0.2.17 发布（2026-09-20 12:5x）**：图标资源 + `mipmap-anydpi-v26/ic_launcher.xml` + manifest `android:icon` 已进工程；`versionCode 28 / versionName 0.2.17`，`latest.json` 指向 `DSH-Mobile-0.2.17.apk`（sha256 前 32 `1e59fcbbb8598a88be90325e62a08c78`），页面 22 项验收全绿 | 已完成；App 工程不在 git（用户自管），改动只在本机 `D:\p\dsh-mobile` |
+| f | App 启动图标（原本完全没有 `android:icon`） | ✅ 随 **APK 0.2.17** 发布（2026-09-20 12:5x）：图标资源 + `mipmap-anydpi-v26/ic_launcher.xml` + manifest `android:icon`；`versionCode 28` | 已完成（App 工程不在 git，改动只在本机 `D:\p\dsh-mobile`） |
+| g | **APK 0.2.18 上线（E2EE 自愈）** | ✅ **已上线（2026-09-20 19:1x）**：`versionCode 29 / versionName 0.2.18`，`DSH-Mobile-0.2.18.apk` sha256 前 32 `65db623d50edf75b4856bf04f7380498`、13,600,617 字节，服务器与本地一致；`latest.json`/`index.html` 兜底版本同步为 0.2.18；线上 **22 项 + 下载链路 12 项 + 二维码 + 单页配对 6 组** 全绿 | 已完成。内容是"对端安全身份变化时自动丢过期 pin 并回退明文"，替代此前必须手动「取消加密」的卡死行为（详见 `dsh-session-archive.md` 同目录的 `e2ee-identity-issues.md`） |
 
 > relay 侧的安全事项单独登记在 **`D:\p\dshmobile-private\docs\security-findings.md`**（**SEC-001：JWT 签名密钥仍是示例默认值**，影响=任意账号接管；用户 2026-09-20 决定暂缓处理，已落账）。改 relay 前先读那一条。
 | d | 静态兜底文案 | `index.html` 里 `<span data-ver>v0.2.x</span>` 为静态兜底，运行时由 JS 覆盖 | 无需处理（无 JS 环境才可见） |
