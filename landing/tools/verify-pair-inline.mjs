@@ -7,7 +7,7 @@
 import { chromium } from "playwright-core";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const BASE = "https://www.deepseek-claudex.cn/dshmobile/";
+const BASE = process.argv[2] || "https://www.deepseek-claudex.cn/dshmobile/";
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 let fail = 0;
 const check = (n, ok, extra = "") => { console.log((ok ? "  PASS " : "  FAIL ") + n + (ok ? "" : "  " + extra)); if (!ok) fail++; };

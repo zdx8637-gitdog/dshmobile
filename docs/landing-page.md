@@ -13,6 +13,7 @@
 | `index.html` | 落地页主页面（单文件内联 CSS/JS，零构建） | 本仓库 `landing/index.html` |
 | `pair.html` | **遗留文件**（页面已不再引用；保留仅以防旧书签/缓存链接） | 不再维护 |
 | `qrcode.min.js` | davidshimjs QR 库（本地，无第三方 CDN 依赖） | 随 `landing/` 同步 |
+| `icon/*` | 品牌资源：`favicon.ico` / `dsh-mobile-app.svg`（favicon + 页头 logo 同源）/ `app-180.png`（iOS 主屏图标）/ `app-192.png` / `app-512.png` / `*-dark.svg` | **产出方是另一个智能体的工程**（`D:\p\dshmobile-landing\site\icon\`）；本仓库只做**同步/合并**，不编辑其内容 |
 | `shots/*.webp` | 脱敏截图 6 张 | 随 `landing/` 同步 |
 | **`latest.json`** | **版本真相源**：`{version,file,size,sha256,releasedAt,notes}` | 每次发版由发布方更新 |
 | `DSH-Mobile-<ver>.apk` | 各历史版本 APK（扫码/按钮的下载目标） | 发布时上传 |
@@ -32,6 +33,13 @@
    - 不带参数 → 普通落地页（下载/注册），不显示配对卡。
    - **不要**再写"跳转到 pair.html"的逻辑：`pair.html` 已退化为遗留文件（仅保留，页面不再引用），历史上"先闪落地页再跳旧样式页"就是这条重定向造成的。
 6. **不要运行** `D:\p\dshmobile-landing\scripts\deploy-dshmobile.py`（旧部署脚本）：它会把 `index.html` 的版本退回 0.2.14、`pair.html` 退回 `DSH-Mobile-0.2.9.apk`。该脚本已废弃。
+7. **页面只有一份源，部署入口有两个 → 必须镜像。**
+   *事故（2026-09-20 10:21）*：另一个智能体做完品牌资源后，用新写的 `dshmobile-landing/scripts/deploy-landing-only.py` 把**它自己那份 `site/` 整目录**推上服务器，直接盖掉了我们 09:39 的部署——线上因此回到"页面显示 0.2.14 + 二维码是相对路径扫了不下载"。两版是同一设计的分叉：他们那版有新 logo 资源但没有功能修复，我们那版有修复但没有 logo。
+   处置与预防：
+   - 已完成**合并**：以本仓库 `landing/index.html`（含全部修复）为基线，并入他们的品牌资源（head 图标链接、页头 `<svg class="mark">` logo、`.brand .mark` 样式、`icon/` 8 个文件）——合并脚本 `D:\p\pw-check\merge-brand.mjs`（可复现）。
+   - 已**镜像**：`landing/{index.html,latest.json,pair.html}` 复制到 `D:\p\dshmobile-landing\site\`，因此即便有人再跑一次旧脚本，推上去的也是正确内容。
+   - 规矩：**改完落地页，除了上传服务器，还要重新镜像一次**（见 §3 末）；改品牌资源只改本仓库 `landing/icon/`。
+8. **包体大小与更新日期同样来自 `latest.json`**（`data-size` ← `size` 字节换算、`data-date` ← `releasedAt`）。HTML 里的文案只是兜底；不要手写日期，否则页面会显示旧日期、让人以为没发新版。
 
 ---
 
@@ -60,7 +68,27 @@ Invoke-WebRequest https://www.deepseek-claudex.cn/dshmobile/DSH-Mobile-<ver>.apk
 node D:\p\tools\pwt\verify-qr.mjs
 ```
 
-改页面（样式/文案/截图）时：编辑 `landing/` 下的文件 → 传 `index.html` / `pair.html` / `qrcode.min.js` / `shots/*`，**不要传任何 APK**。
+改页面（样式/文案/截图）时：编辑 `landing/` 下的文件 → 传 `index.html` / `pair.html` / `qrcode.min.js` / `shots/*` / `icon/*`，**不要传任何 APK**。
+
+```powershell
+# 改页面/品牌资源后（index.html + icon/*）
+cd D:\p\srv-tools
+node run.mjs --put D:\p\dshmobile-repo\landing\index.html /opt/session-control-relay/web/dshmobile/index.html
+Get-ChildItem D:\p\dshmobile-repo\landing\icon -File | ForEach-Object {
+  node run.mjs --put $_.FullName "/opt/session-control-relay/web/dshmobile/icon/$($_.Name)"
+}
+node run.mjs "md5sum /opt/session-control-relay/web/dshmobile/index.html"
+(Get-FileHash D:\p\dshmobile-repo\landing\index.html -Algorithm MD5).Hash.ToLower()   # 两边必须一致
+
+# 必做：镜像回旧工程 site/，防止旧脚本把旧版推回线上（§2 第 7 条）
+foreach ($f in @("index.html","latest.json","pair.html")) {
+  Copy-Item "D:\p\dshmobile-repo\landing\$f" "D:\p\dshmobile-landing\site\$f" -Force
+}
+
+# 部署前本地验收（品牌/版本/二维码/配对卡 17 项）：先起本地服务再跑
+node D:\p\pw-check\serve-landing.mjs 8099        # 后台，root=landing/
+node D:\p\pw-check\preview-landing.mjs http://127.0.0.1:8099/
+```
 
 ---
 
@@ -98,5 +126,6 @@ ALL PASS
 |---|---|---|---|
 | a | relay `GET /auth/registration-status`（注册名额硬上限 `MAX_USERS`） | **代码已改（本工作区 `dshmobile-private/relay/src`：`config.maxUsers`、`routes/auth.ts` 路由、`RegistrationClosedError`、`auth-service.register()` 双校验），未部署**；页面 404 时降级显示"名额有限"，不阻断 | 需重建 + 重启 relay 服务（**生产动作，先经用户确认**） |
 | b | 页面"电脑端安装"命令用 `@zdx8637/dshmobile-bridge@latest` | ✅ **已解决（2026-09-20）**：`0.1.0-beta.22` 已发布，`latest`=`beta`=`0.1.0-beta.22`；已下载 tarball 校验 `bridge/adapter.js` 含 `stripReasoning`/`toolSummary`/`toolResult.full`、`bridge/relay.js` 含 `transfer.deliver` 白名单 | — |
-| c | 旧工程 `D:\p\dshmobile-landing\` | 其 `site/` 副本陈旧（0.2.14）、`deploy-dshmobile.py` 会回退线上版本 | 视为只读参考资料，**不要执行其部署脚本** |
+| c | 旧工程 `D:\p\dshmobile-landing\` | `site/` 已在 2026-09-20 **镜像为权威内容**；其 `icon/` 仍由该工程（另一智能体）产出，我们只读取合并 | `deploy-dshmobile.py` 仍禁止执行；改完落地页记得重新镜像（§3） |
+| e | 品牌资源（icon / logo） | 归属另一智能体，**仍在进行中** | 我们不改其文件；他们出新版后跑 `D:\p\pw-check\merge-brand.mjs` 重新并入（脚本会备份并校验修复标记不丢） |
 | d | 静态兜底文案 | `index.html` 里 `<span data-ver>v0.2.x</span>` 为静态兜底，运行时由 JS 覆盖 | 无需处理（无 JS 环境才可见） |
