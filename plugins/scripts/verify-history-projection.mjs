@@ -5,7 +5,7 @@
 // 只读：不创建会话、不写状态目录（复用桥已缓存的 Cookie）、不经 relay/E2EE。
 //
 // 用法: node scripts/verify-history-projection.mjs [sessionId]
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Adapter } from "../bridge/adapter.js";
@@ -31,9 +31,43 @@ if (!list.ok) {
   process.exit(1);
 }
 const sessions = (list.value?.items ?? []).filter((s) => (s.origin ?? "session") !== "subagent");
-const target = sessions.find((s) => s.sessionId === process.argv[2]) ?? sessions[0];
+
+/**
+ * 目标选择（2026-09-20 事故后加固）：
+ * 曾因"不带参数 → 取 sessions[0]"，把这个探针**指到了用户正在用的那个会话**
+ * （列表第一个＝最新活跃），后续一次误归档就把它从 GUI 列表里隐藏了。
+ * 现在：默认**排除最近 10 分钟仍在写入的活跃会话**；要用活跃会话必须显式给 id + --allow-live。
+ */
+const LIVE_WINDOW_MS = 10 * 60 * 1000;
+const SESS_ROOT = join(homedir(), ".dsh", "sessions");
+function lastWriteMs(sessionId) {
+  try {
+    const dir = join(SESS_ROOT, "--D-p--", sessionId);   // 当前工作区（D:\p）分桶
+    const f = ["session.v3.jsonl.zstd", "session.jsonl.zstd"].map((n) => join(dir, n)).find((p) => existsSync(p));
+    return f ? statSync(f).mtimeMs : 0;
+  } catch {
+    return 0;
+  }
+}
+const allowLive = process.argv.includes("--allow-live");
+const wanted = process.argv[2] && !process.argv[2].startsWith("--") ? process.argv[2] : null;
+let target;
+if (wanted) {
+  target = sessions.find((s) => s.sessionId === wanted);
+  if (!target) { console.error(`找不到会话 ${wanted}`); process.exit(1); }
+  const age = Date.now() - lastWriteMs(target.sessionId);
+  if (age < LIVE_WINDOW_MS && !allowLive) {
+    console.error(`拒绝：${wanted} 在 ${Math.round(age / 1000)}s 前还在写入（可能正在使用中）。`);
+    console.error("如确认要用它，请加 --allow-live。");
+    process.exit(1);
+  }
+} else {
+  target = sessions.find((s) => Date.now() - lastWriteMs(s.sessionId) >= LIVE_WINDOW_MS);
+  if (!target) { console.error("没有可用的非活跃会话（可用 --allow-live 或显式传 sessionId）"); process.exit(1); }
+  console.log(`（未指定 sessionId：已自动跳过最近 ${LIVE_WINDOW_MS / 60000} 分钟内活跃的会话）`);
+}
 const sessionId = target?.sessionId;
-console.log("protocol:", dsh.protocol, "| session:", sessionId);
+console.log("protocol:", dsh.protocol, "| 本次只读分析目标 session:", sessionId, "| 本探针只读，不写任何状态");
 
 // 真实投影路径：需要 mux 提供 session/follow 游标
 const mux = dsh.openMux(() => {});
