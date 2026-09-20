@@ -97,6 +97,6 @@ ALL PASS
 | # | 事项 | 现状 | 动作 |
 |---|---|---|---|
 | a | relay `GET /auth/registration-status`（注册名额硬上限 `MAX_USERS`） | **代码已改（本工作区 `dshmobile-private/relay/src`：`config.maxUsers`、`routes/auth.ts` 路由、`RegistrationClosedError`、`auth-service.register()` 双校验），未部署**；页面 404 时降级显示"名额有限"，不阻断 | 需重建 + 重启 relay 服务（**生产动作，先经用户确认**） |
-| b | 页面"电脑端安装"命令用 `@zdx8637/dshmobile-bridge@latest` | npm `latest` 仍指向 `0.1.0-beta.20`（不含桥端 B1/B2 修复） | 用户发布 `0.1.0-beta.22` 后 `npm dist-tag add … latest` |
+| b | 页面"电脑端安装"命令用 `@zdx8637/dshmobile-bridge@latest` | ✅ **已解决（2026-09-20）**：`0.1.0-beta.22` 已发布，`latest`=`beta`=`0.1.0-beta.22`；已下载 tarball 校验 `bridge/adapter.js` 含 `stripReasoning`/`toolSummary`/`toolResult.full`、`bridge/relay.js` 含 `transfer.deliver` 白名单 | — |
 | c | 旧工程 `D:\p\dshmobile-landing\` | 其 `site/` 副本陈旧（0.2.14）、`deploy-dshmobile.py` 会回退线上版本 | 视为只读参考资料，**不要执行其部署脚本** |
 | d | 静态兜底文案 | `index.html` 里 `<span data-ver>v0.2.x</span>` 为静态兜底，运行时由 JS 覆盖 | 无需处理（无 JS 环境才可见） |
