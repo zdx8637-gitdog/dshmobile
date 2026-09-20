@@ -639,16 +639,24 @@ export class Adapter {
 
   /** E2EE 每连接 hello：派生本连接密钥，回本端 keyId+cNonce。 */
   #e2eeHello(payload, requestId) {
-    const fail = (code, message) =>
-      this.relay.respond(requestId, "e2ee.hello", { ok: false, error: { code, message } });
+    const fail = (code, message, data) =>
+      this.relay.respond(requestId, "e2ee.hello", { ok: false, error: { code, message, ...(data ? { data } : {}) } });
     if (!this.e2ee) return fail("disabled", "e2ee not available");
     if (typeof payload?.keyId !== "string" || typeof payload?.cNonce !== "string") {
       return fail("bad-request", "keyId/cNonce required");
     }
     const hello = this.e2ee.beginConnection();
     if (!this.e2ee.establishConnection({ peerKeyIdHex: payload.keyId, peerCNonceB64url: payload.cNonce })) {
-      e2eeDebug(`e2ee.hello keyId=${payload.keyId} -> FAIL(key-mismatch, pinned=${this.e2ee.pinnedPeer?.keyId})`);
-      return fail("key-mismatch", "peer keyId does not match pinned key");
+      const pin = this.e2ee.pinState ?? { pinned: this.e2ee.isPinned ?? false, bridgeKeyId: "", peerKeyId: null };
+      // 错误码保持 "key-mismatch" 不变（老版 App 只认这个码，换码会让它们静默卡住、连提示都没有）；
+      // 但把"为什么"放进 data：pinned=false 表示本机 E2EE 绑定已丢（重装/状态目录变化/身份文件损坏），
+      // 新版 App 据此**自动丢弃过期 pin 并回退明文**，不再需要用户手动「取消加密」。
+      const reason = pin.pinned ? "peer-key-changed" : "no-pin";
+      const message = pin.pinned
+        ? "peer keyId does not match pinned key"
+        : "bridge has no E2EE pin (identity/pin lost); clear local pin and continue in plaintext, or re-pair with the ② QR";
+      e2eeDebug(`e2ee.hello keyId=${payload.keyId} -> FAIL(key-mismatch reason=${reason} pinned=${pin.pinned} peer=${pin.peerKeyId} bridge=${pin.bridgeKeyId})`);
+      return fail("key-mismatch", message, { reason, pinned: pin.pinned, bridgeKeyId: pin.bridgeKeyId, peerKeyId: pin.peerKeyId });
     }
     e2eeDebug(`e2ee.hello keyId=${payload.keyId} -> OK (connection keys derived)`);
     return this.relay.respond(requestId, "e2ee.hello", { ok: true, data: hello });

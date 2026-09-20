@@ -397,14 +397,21 @@ export function apply(ctx: any, _config: any = {}) {
     return login.data.accessToken;
   }
 
-  /** 确保长期身份密钥存在（bridge 也会读同一份），返回 pubkey(b64url)。 */
+  /** 确保长期身份密钥存在（bridge 也会读同一份），返回 pubkey(b64url)。
+   *  注意：**文件存在但读不出来时不再重建**——宿主写这份文件会把 `pinnedPeer` 清空，
+   *  等于静默销毁 E2EE 绑定（手机端会卡在 key-mismatch，用户必须手动取消加密）。
+   *  交给桥按"先备份再重建"的规则处理，这里只返回空并告警。 */
   function ensureIdentityKey(): string {
-    try {
-      if (existsSync(DEVICE_KEY_FILE)) {
+    if (existsSync(DEVICE_KEY_FILE)) {
+      try {
         const d = JSON.parse(readFileSync(DEVICE_KEY_FILE, "utf8"));
         if (d.pubKey && d.privKey && d.keyId) return d.pubKey;
+        console.warn("[dshmobile] device-key.json 字段不完整：交由桥重建（宿主不覆盖，避免清掉 E2EE pin）");
+      } catch (err: any) {
+        console.warn("[dshmobile] device-key.json 读取失败：交由桥重建（宿主不覆盖）", err?.message ?? err);
       }
-    } catch {}
+      return "";
+    }
     const kp = generateIdentityKeypair();
     try {
       mkdirSync(STATE_DIR, { recursive: true });

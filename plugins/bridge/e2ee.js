@@ -1,6 +1,6 @@
 // bridge 侧 E2EE 状态机：身份密钥、pinning、QR 配对、每连接密钥、payload 加解密、replay。
 // 与 docs/plan-e2ee.md 及 bridge/crypto.js 字节格式一一对应。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as c from "./crypto.js";
 
@@ -20,23 +20,40 @@ export class E2eeSession {
   }
 
   #load() {
-    try {
-      if (existsSync(this.keyFile)) {
+    if (existsSync(this.keyFile)) {
+      try {
         const d = JSON.parse(readFileSync(this.keyFile, "utf8"));
         if (d.pubKey && d.privKey && d.keyId) {
           return { identity: { pubKey: d.pubKey, privKey: d.privKey, keyId: d.keyId }, pinnedPeer: d.pinnedPeer ?? null };
         }
+        this.loadWarning = "device-key.json 缺少 pubKey/privKey/keyId";
+      } catch (err) {
+        this.loadWarning = `device-key.json 解析失败：${err?.message ?? err}`;
       }
-    } catch {}
+      // 文件存在但不可用：**先备份再重建**。pin 丢失会让手机端卡在 key-mismatch（用户必须手动取消加密），
+      // 所以这里必须留痕：备份文件 + 明确日志，便于事后判断"pin 是怎么没的"。
+      try {
+        const bak = `${this.keyFile}.broken-${Date.now()}`;
+        copyFileSync(this.keyFile, bak);
+        this.loadWarning += `；已备份到 ${bak}`;
+        console.warn(`[dshmobile] ${this.loadWarning}；将重建 E2EE 身份（手机需重新扫码配对 ② 码）`);
+      } catch (err) {
+        console.warn(`[dshmobile] ${this.loadWarning}；备份失败：${err?.message ?? err}`);
+      }
+    }
     const identity = c.generateIdentityKeypair();
     this.#save({ identity, pinnedPeer: null });
     return { identity, pinnedPeer: null };
   }
 
+  /** 原子写：先写临时文件再 rename，避免半截写被宿主/其它进程读到（读到坏文件会触发上面的重建+丢 pin）。 */
   #save({ identity, pinnedPeer }) {
     try {
       mkdirSync(this.stateDir, { recursive: true });
-      writeFileSync(this.keyFile, JSON.stringify({ pubKey: identity.pubKey, privKey: identity.privKey, keyId: identity.keyId, pinnedPeer }, null, 2), { mode: 0o600 });
+      const body = JSON.stringify({ pubKey: identity.pubKey, privKey: identity.privKey, keyId: identity.keyId, pinnedPeer }, null, 2);
+      const tmp = `${this.keyFile}.tmp-${process.pid}`;
+      writeFileSync(tmp, body, { mode: 0o600 });
+      renameSync(tmp, this.keyFile);
     } catch {}
   }
 
@@ -47,6 +64,16 @@ export class E2eeSession {
 
   get isConnectionEstablished() {
     return this.conn?.keys != null;
+  }
+
+  /** 供诊断/上报：pin 与身份现状（adapter 在 hello 失败时据此给出可自愈的错误码）。 */
+  get pinState() {
+    return {
+      pinned: this.pinnedPeer !== null,
+      peerKeyId: this.pinnedPeer?.keyId ?? null,
+      bridgeKeyId: this.identity?.keyId ?? null,
+      loadWarning: this.loadWarning ?? "",
+    };
   }
 
   /** 从 pairing.json 按 pairingId 查一次性配对 secret（HOST 出码时写入，短 TTL）。 */
