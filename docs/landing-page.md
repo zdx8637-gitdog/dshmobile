@@ -129,4 +129,6 @@ ALL PASS
 | c | 旧工程 `D:\p\dshmobile-landing\` | `site/` 已在 2026-09-20 **镜像为权威内容**；其 `icon/` 仍由该工程（另一智能体）产出，我们只读取合并 | `deploy-dshmobile.py` 仍禁止执行；改完落地页记得重新镜像（§3） |
 | e | 品牌资源（icon / logo） | **v4-traced 代已于 2026-09-20 部署到网站**（另一智能体出素材 + `DEPLOY-LIST.md`；我方用 `D:\p\pw-check\apply-web-icons.mjs` 落盘）：A-1 覆盖 `favicon.ico`/`dsh-mobile-app.svg`(白底版)/`app-180.png`，A-2 新增 `favicon-16/32.png`+`icon-192/512.png`+`dsh-mobile-mark.svg` 并补两行 `<head>`，A-3 导航 logo 换成白底版内联 SVG。素材 6 件 sha256 与 `manifest.json` 逐一校验一致 | 网站已上线；**App 图标已进工程并构建验证，但要让用户看到需发布新 APK（见 f）** |
 | f | App 启动图标（原本完全没有 `android:icon`） | ✅ **已随 APK 0.2.17 发布（2026-09-20 12:5x）**：图标资源 + `mipmap-anydpi-v26/ic_launcher.xml` + manifest `android:icon` 已进工程；`versionCode 28 / versionName 0.2.17`，`latest.json` 指向 `DSH-Mobile-0.2.17.apk`（sha256 前 32 `1e59fcbbb8598a88be90325e62a08c78`），页面 22 项验收全绿 | 已完成；App 工程不在 git（用户自管），改动只在本机 `D:\p\dsh-mobile` |
+
+> relay 侧的安全事项单独登记在 **`D:\p\dshmobile-private\docs\security-findings.md`**（**SEC-001：JWT 签名密钥仍是示例默认值**，影响=任意账号接管；用户 2026-09-20 决定暂缓处理，已落账）。改 relay 前先读那一条。
 | d | 静态兜底文案 | `index.html` 里 `<span data-ver>v0.2.x</span>` 为静态兜底，运行时由 JS 覆盖 | 无需处理（无 JS 环境才可见） |
