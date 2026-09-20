@@ -8,6 +8,10 @@ import { chromium } from "playwright-core";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const BASE = process.argv[2] || "https://www.deepseek-claudex.cn/dshmobile/";
+// 期望版本从该站点的 latest.json 动态读取（发新版后无需改脚本）
+const EXPECT_VER = await (await fetch(new URL("latest.json", BASE), { cache: "no-store" }))
+  .json().then((d) => d.version).catch(() => "");
+console.log(`目标 ${BASE}  期望版本 v${EXPECT_VER}\n`);
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 let fail = 0;
 const check = (n, ok, extra = "") => { console.log((ok ? "  PASS " : "  FAIL ") + n + (ok ? "" : "  " + extra)); if (!ok) fail++; };
@@ -42,7 +46,7 @@ const a = await probe(BASE + "?mode=pair&code=123456");
 check("不再跳 pair.html", !a.navs.some((u) => u.includes("pair.html")), JSON.stringify(a.navs));
 check("配对卡显示且配对码正确", a.cardShown && a.title === "扫码登录" && a.code === "123456", JSON.stringify(a));
 check("深链为 dshmobile://pair 且带 relay/code", (a.deepLink || "").startsWith("dshmobile://pair?relay=") && a.deepLink.includes("code=123456"), a.deepLink);
-check("版本号仍是最新（latest.json 生效）", a.verd === "v0.2.16", a.verd);
+check("版本号仍是最新（latest.json 生效）", a.verd === "v" + EXPECT_VER, a.verd);
 
 console.log("[2] 加密配对扫码（mode=e2ee）");
 const b = await probe(BASE + "?mode=e2ee&deviceId=dev-1&pk=PK&ps=PS&pid=PID&cv=1");

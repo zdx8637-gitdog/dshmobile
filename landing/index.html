@@ -226,7 +226,18 @@
   .dl-list li { padding: 5px 0; }
   .dl-list b { color: #fff; font-weight: 500; }
   .wechat { display: none; margin-top: 16px; font-size: 13px; color: #f0b429; border: 1px solid rgba(240,180,41,.3); background: rgba(240,180,41,.07); border-radius: 12px; padding: 12px 16px; line-height: 1.7; }
-  @media (max-width: 780px) { .dl { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 26px; } .dl-list { text-align: left; display: inline-block; } }
+  /* 可一键全选的下载链接（长按手选容易带进多余文字） */
+  .linkbox { display: none; margin-top: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 18px; color: var(--muted); background: #0d0e11; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; word-break: break-all; user-select: all; }
+  /* 手机上扫自己屏幕没意义：藏二维码、只留按钮/引导 */
+  .mob-only { display: none; }
+  @media (max-width: 780px) {
+    .dl { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 26px; }
+    .dl-list { text-align: left; display: inline-block; }
+    .mob-only { display: inline-flex; }
+    #qrDlBox, #qrHeroBox { display: none; }
+    #dlBtn, #dlBtnHero, #copyLinkBtn { width: 100%; justify-content: center; }
+    .linkbox { text-align: left; }
+  }
 
   /* ---------- 注册 ---------- */
   .reg-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: start; }
@@ -294,10 +305,10 @@
 <nav class="nav">
   <a class="brand" href="#top"><svg class="mark" width="24" height="24" viewBox="0 0 50 50" fill="none" aria-hidden="true"><rect width="50" height="50" rx="11" fill="#ffffff"/><path d="M31.659 6.777L31.898 6.840L32.068 7.018L32.686 8.373L32.962 8.772L33.214 9.023L33.732 9.385L35.766 10.440L36.204 10.748L36.660 11.164L37.128 11.882L37.440 12.794L38.477 11.907L39.447 11.404L40.470 11.117L42.384 10.867L42.943 10.667L43.541 10.266L44.557 9.211L44.856 9.039L45.096 9.039L45.255 9.117L45.496 9.490L45.585 10.088L45.544 11.005L45.343 12.121L44.922 13.317L44.314 14.394L43.504 15.351L42.783 15.963L41.746 16.593L40.431 17.163L38.716 17.691L38.506 17.863L38.451 18.062L38.470 19.298L38.284 20.654L37.923 22.010L37.400 23.393L36.284 23.158L35.486 23.233L35.048 23.387L34.569 23.674L34.038 24.242L30.672 31.459L28.549 35.865L27.831 35.415L26.914 34.702L25.997 33.858L25.349 33.174L23.993 31.459L21.075 27.113L19.678 25.279L18.630 24.123L17.863 23.393L16.786 22.512L15.869 21.872L14.633 21.163L13.317 20.560L11.523 19.974L10.008 19.652L8.174 19.500L6.499 19.608L5.861 19.736L5.268 19.936L5.040 20.136L4.922 20.375L4.872 21.292L4.970 22.608L5.208 24.043L5.488 25.199L5.966 26.675L6.523 28.030L7.244 29.426L7.967 30.582L8.886 31.818L9.766 32.815L10.766 33.783L11.643 34.505L12.799 35.302L13.796 35.857L14.952 36.339L15.869 36.574L16.746 36.631L17.384 36.534L17.863 36.298L18.163 35.925L18.226 35.566L18.159 35.207L17.375 33.772L17.212 33.293L17.157 32.855L17.210 32.416L17.424 32.023L17.783 31.805L18.102 31.778L18.541 31.846L19.219 32.084L20.574 32.766L22.249 33.762L25.040 35.540L26.316 36.257L27.632 36.819L28.509 37.057L28.971 37.121L29.247 36.324L34.609 24.883L34.758 24.641L35.088 24.308L35.407 24.109L35.925 23.953L36.603 23.986L41.826 25.665L42.145 25.827L42.559 26.236L42.843 26.874L42.872 27.352L42.798 27.751L40.623 32.496L40.989 32.636L41.188 32.774L41.521 33.293L41.656 34.011L41.597 34.809L41.400 35.447L41.081 36.085L40.723 36.603L40.271 37.092L39.793 37.457L39.195 37.766L38.636 37.924L37.919 37.997L37.121 39.663L36.722 40.076L36.204 40.358L35.845 40.444L35.327 40.439L31.818 39.417L30.981 40.040L29.984 40.677L29.027 41.194L28.030 41.637L27.033 41.999L25.598 42.399L24.163 42.674L23.166 42.795L20.813 42.879L18.740 42.713L16.627 42.318L14.394 41.638L12.440 40.798L10.486 39.683L8.692 38.369L6.962 36.762L6.061 35.760L5.368 34.888L4.202 33.134L3.262 31.300L2.541 29.346L2.225 28.150L2.030 27.153L1.827 25.080L1.823 23.884L1.909 22.687L2.225 20.734L2.623 19.258L3.187 17.743L3.904 16.268L4.581 15.152L5.574 13.836L6.539 12.796L7.735 11.756L8.892 10.963L10.008 10.359L10.845 10.001L11.922 9.638L12.919 9.400L14.354 9.204L15.750 9.162L17.225 9.278L18.780 9.570L20.574 8.806L21.970 8.321L23.126 8.039L24.203 7.912L25.040 7.924L25.558 8.003L26.037 8.170L26.253 8.413L26.246 8.533L26.156 8.660L25.478 9.081L25.108 9.410L24.863 9.729L24.671 10.128L24.592 10.566L24.631 11.005L24.787 11.443L25.070 11.882L25.558 12.344L27.113 13.504L28.509 14.738L29.466 15.696L31.459 17.899L32.097 18.531L32.775 19.071L33.333 19.430L33.892 19.711L34.051 19.720L34.230 19.498L34.537 18.740L34.866 17.584L34.863 17.225L34.769 17.094L32.974 15.878L32.297 15.290L31.725 14.673L31.287 14.035L31.003 13.477L30.718 12.719L30.527 11.962L30.407 11.005L30.394 10.167L30.564 8.772L30.799 7.935L31.092 7.257L31.380 6.878L31.644 6.778ZM42.783 19.969L43.222 19.965L43.780 20.051L44.498 20.251L45.056 20.482L45.654 20.809L46.212 21.201L47.056 22.010L47.419 22.488L47.816 23.166L48.098 23.844L48.286 24.482L48.410 25.279L48.414 25.797L48.296 26.077L48.006 26.248L47.648 26.216L47.386 25.957L47.173 24.721L46.970 24.092L46.614 23.365L46.095 22.648L45.455 22.039L44.657 21.523L43.979 21.238L42.743 20.981L42.584 20.894L42.413 20.654L42.409 20.335L42.544 20.110L42.761 19.976ZM26.515 20.288L26.954 20.277L27.472 20.362L28.349 20.727L28.907 21.122L29.346 21.526L30.154 22.488L30.554 23.126L30.905 23.844L31.112 24.442L31.263 25.239L31.232 25.638L31.100 25.867L30.861 26.045L30.463 26.171L29.785 26.171L29.226 26.001L28.668 25.646L28.263 25.199L28.061 24.801L27.945 24.322L28.014 23.206L27.971 22.807L27.839 22.488L27.592 22.165L27.313 21.952L26.954 21.795L25.877 21.664L25.678 21.557L25.506 21.372L25.464 21.013L25.638 20.705L25.997 20.442L26.479 20.295ZM42.424 21.959L42.743 21.952L43.182 22.031L44.019 22.319L44.737 22.754L45.422 23.405L45.698 23.764L45.984 24.282L46.295 25.199L46.391 26.077L46.294 26.316L46.132 26.446L45.933 26.490L45.774 26.457L45.552 26.276L45.380 25.399L45.191 24.841L44.829 24.203L44.454 23.764L44.059 23.433L43.501 23.110L42.943 22.914L42.384 22.819L42.185 22.678L42.093 22.488L42.096 22.289L42.185 22.112L42.401 21.970ZM26.236 22.636L26.595 22.665L26.794 22.805L26.895 22.967L26.925 23.365L26.794 23.603L26.635 23.727L26.396 23.788L26.116 23.734L25.948 23.604L25.824 23.405L25.790 23.166L25.864 22.927L25.997 22.759L26.209 22.648ZM42.225 23.761L42.663 23.785L43.222 24.000L43.740 24.349L44.059 24.690L44.399 25.279L44.552 25.797L44.561 26.196L44.418 26.410L44.179 26.488L43.939 26.411L43.784 26.196L43.600 25.518L43.301 25.088L42.823 24.714L42.186 24.522L42.026 24.395L41.942 24.163L41.968 24.003L42.080 23.844L42.220 23.764ZM35.925 24.958L36.404 24.946L41.348 26.546L41.642 26.794L41.760 27.033L41.791 27.273L41.678 27.671L39.220 33.014L39.197 33.134L39.593 33.158L39.640 33.174L39.609 33.214L39.155 33.421L38.716 33.544L37.281 33.722L36.284 33.961L35.526 34.369L35.242 34.649L35.073 34.928L34.959 35.287L34.956 35.646L35.043 36.005L35.202 36.324L35.553 36.762L35.925 37.097L36.898 37.679L36.340 38.955L36.030 39.234L35.726 39.324L35.367 39.279L30.423 37.811L30.091 37.560L29.972 37.161L30.048 36.842L30.764 35.287L35.395 25.399L35.621 25.120L35.921 24.960ZM36.404 25.627L36.643 25.632L36.922 25.751L37.101 25.957L37.172 26.156L37.179 26.396L37.083 26.675L36.922 26.852L36.683 26.965L36.364 26.976L36.164 26.896L35.959 26.715L35.844 26.435L35.844 26.196L35.952 25.917L36.124 25.745L36.366 25.638ZM38.078 26.188L38.261 26.236L38.364 26.396L38.318 26.595L38.198 26.687L37.998 26.685L37.851 26.515L37.885 26.316L38.047 26.196ZM37.520 26.983L37.839 26.980L38.038 27.061L38.265 27.273L38.359 27.472L38.373 27.751L38.292 27.990L38.118 28.194L37.879 28.317L37.600 28.340L37.400 28.276L37.183 28.110L37.041 27.871L37.007 27.592L37.073 27.352L37.264 27.113L37.487 26.994ZM35.766 27.263L36.005 27.274L36.244 27.378L36.421 27.552L36.528 27.791L36.536 28.070L36.448 28.309L36.284 28.490L36.045 28.613L35.766 28.634L35.526 28.556L35.326 28.389L35.203 28.150L35.193 27.831L35.279 27.592L35.486 27.382L35.726 27.273ZM37.201 28.588L37.383 28.589L37.523 28.708L37.558 28.907L37.440 29.083L37.241 29.131L37.038 28.987L37.029 28.748L37.200 28.589Z" fill="#000000" fill-rule="evenodd"/></svg>DSH Mobile <span class="tag">开发者预览版</span></a>
   <div class="nav-links">
+    <a href="#download">下载</a>
     <a href="#about">产品简介</a>
     <a href="#shots">客户端</a>
     <a href="#start">安装</a>
-    <a href="#download">下载</a>
     <a href="#faq">常见问题</a>
   </div>
   <div class="nav-right">
@@ -352,15 +363,47 @@
             <div class="qr-box" id="qrHeroBox"><div id="qrHero"></div></div>
             <div class="qr-meta">
               <b>DSH Mobile <span data-ver>v0.2.17</span></b>
-              手机扫码直接下载 APK<br />Android 8.0+ · <span data-size>约 13 MB</span><br /><a href="#download" style="color:var(--blue-2)">或查看下载页 →</a>
+              扫码打开本页下载区，点「下载 APK」即可<br />Android 8.0+ · <span data-size>约 13 MB</span><br /><a href="#download" style="color:var(--blue-2)">或直接跳到下载区 →</a>
             </div>
           </div>
+          <a class="btn btn-blue btn-lg mob-only" id="dlBtnHero" style="margin-top:16px">下载 APK</a>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ③ 能力三列 -->
+  <!-- ③ 下载（紧跟 hero：扫码 / 微信扫码都先落到这里） -->
+  <section class="sec" id="download">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="chip">Download</span>
+        <h2>下载 <span class="hl">Android 客户端</span></h2>
+        <p class="sec-sub">点按钮或扫码下载，不经过应用市场。</p>
+      </div>
+      <div class="card dl reveal">
+        <div>
+          <div class="qr-box" id="qrDlBox"><div id="qrDl"></div></div>
+          <div class="wechat" id="wechatTip">微信内无法直接下载 APK：请点右上角「…」→ 在浏览器中打开；或点「复制下载链接」后粘贴到浏览器打开。</div>
+          <div class="linkbox" id="linkBox"></div>
+        </div>
+        <div>
+          <h3 style="font-size:20px;font-weight:500">DSH Mobile <span data-ver>v0.2.17</span></h3>
+          <ul class="dl-list">
+            <li><b>版本：</b><span data-ver>v0.2.17</span>（最新）</li>
+            <li><b>包体：</b><span data-size>约 13 MB</span> · Android 8.0+ · 无需 Google 服务</li>
+            <li><b>更新：</b><span data-date>2026-09-20</span></li>
+          </ul>
+          <a class="btn btn-blue btn-lg" id="dlBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
+            下载 APK
+          </a>
+          <button class="btn btn-lg" id="copyLinkBtn" style="margin-top:10px;width:100%;justify-content:center">复制下载链接</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ④ 能力三列 -->
   <section class="sec" id="about">
     <div class="wrap">
       <div class="sec-head reveal">
@@ -391,7 +434,7 @@
     </div>
   </section>
 
-  <!-- ④ 客户端实拍 -->
+  <!-- ⑤ 客户端实拍 -->
   <section class="sec" id="shots">
     <div class="wrap">
       <div class="sec-head reveal">
@@ -428,7 +471,7 @@
     </div>
   </section>
 
-  <!-- ⑤ 三步上手 -->
+  <!-- ⑥ 三步上手 -->
   <section class="sec" id="start">
     <div class="wrap steps-wrap">
       <div class="reveal">
@@ -451,35 +494,6 @@
         <div class="card step reveal">
           <div class="step-head"><span class="num">3</span><h3>登录并扫码配对</h3></div>
           <p>在 App 内用本页注册的账号登录，扫描电脑插件面板的二维码完成配对；设备上线后即可进入任意会话。</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ⑥ 下载 -->
-  <section class="sec" id="download">
-    <div class="wrap">
-      <div class="sec-head reveal">
-        <span class="chip">Download</span>
-        <h2>扫描下载 <span class="hl">Android 客户端</span></h2>
-        <p class="sec-sub">扫码即下载，不经过应用市场。</p>
-      </div>
-      <div class="card dl reveal">
-        <div>
-          <div class="qr-box" id="qrDlBox"><div id="qrDl"></div></div>
-          <div class="wechat" id="wechatTip">微信内无法直接下载 APK：请点右上角「…」→ 在浏览器中打开，或用系统浏览器扫码。</div>
-        </div>
-        <div>
-          <h3 style="font-size:20px;font-weight:500">DSH Mobile <span data-ver>v0.2.17</span></h3>
-          <ul class="dl-list">
-            <li><b>版本：</b><span data-ver>v0.2.17</span>（最新）</li>
-            <li><b>包体：</b><span data-size>约 13 MB</span> · Android 8.0+ · 无需 Google 服务</li>
-            <li><b>更新：</b><span data-date>2026-09-20</span></li>
-          </ul>
-          <a class="btn btn-blue btn-lg" id="dlBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
-            下载 APK
-          </a>
         </div>
       </div>
     </div>
@@ -601,6 +615,17 @@
   var IS_PREVIEW = location.protocol === "file:" ||
     location.hostname === "localhost" || location.hostname === "127.0.0.1";
 
+  /* ===== 二维码编码目标 = 本页下载区（不是 APK 直链）=====
+     微信内置浏览器会拦截 .apk 直链（"该网页可能存在文件下载内容"），网页本身不拦；
+     于是统一让码指向 本页#download：微信里看到引导（右上角 ⋯ → 浏览器打开），
+     其它浏览器直接落到下载区点按钮下载。副作用红利：**同一张码永久有效**，换版本不用换码。 */
+  function pageUrl() {
+    if (location.protocol === "file:") return PROD_ORIGIN + "/dshmobile/";
+    return location.origin + location.pathname;      // 目录形式，丢弃查询串与 hash
+  }
+  var DOWNLOAD_PAGE = pageUrl() + "#download";
+  var IS_WECHAT = params.get("ua") === "wechat" || /MicroMessenger/i.test(navigator.userAgent);
+
   /* ===== 配对参数（mode/code）在本页内处理，不再跳转 pair.html =====
      需求：用户扫任何码都落到同一个页面，都能下载；PC 面板的码只是多一个"配对/授权"入口。 */
   (function () {
@@ -610,7 +635,7 @@
     var pid = (params.get("pid") || "").trim();
     if (!mode && !code) return;                        // 普通访问：不显示配对卡
     var relay = location.origin;
-    var isWechat = params.get("ua") === "wechat" || /MicroMessenger/i.test(navigator.userAgent);
+    var isWechat = IS_WECHAT;
     var title, hint, deepLink;
     if (mode === "grant") {
       title = "授权电脑登录";
@@ -693,13 +718,27 @@
     if (dateText) {
       Array.prototype.forEach.call(document.querySelectorAll("[data-date]"), function (el) { el.textContent = dateText; });
     }
-    var dlBtn = document.getElementById("dlBtn");
-    if (dlBtn) {
-      dlBtn.href = apkUrl;
-      dlBtn.setAttribute("download", APK_FILE);
-      dlBtn.setAttribute("data-apk-url", apkUrl); // 供验收脚本断言"绝对 URL"
-    }
+    applyDownloadTargets();
     return apkUrl;
+  }
+
+  // 下载按钮目标：微信内**不给 href**（点了必撞微信的 .apk 拦截页），非微信才挂 APK 直链。
+  // 注意：每次版本刷新（latest.json 回来）都要重跑本函数，否则会把 href 又挂回微信下的隐藏按钮。
+  function applyDownloadTargets() {
+    ["dlBtn", "dlBtnHero"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.setAttribute("data-apk-url", apkUrl); // 供验收脚本断言"绝对 URL"（微信下也保留，便于排查）
+      if (IS_WECHAT) {
+        el.style.display = "none";
+        el.removeAttribute("href");
+        el.removeAttribute("download");
+        return;
+      }
+      el.style.display = "";
+      el.href = apkUrl;
+      el.setAttribute("download", APK_FILE);
+    });
   }
 
   applyVersion(APK_VERSION, APK_FILE);
@@ -719,28 +758,35 @@
     }
   })();
 
-  /* ===== 二维码（APK 直链，扫即下载） ===== */
+  /* ===== 二维码（指向本页下载区，扫即落到下载入口） ===== */
   function makeQR(id) {
     var host = document.getElementById(id);
     if (!host || !window.QRCode) return;
-    new QRCode(host, { text: apkUrl, width: 168, height: 168, correctLevel: QRCode.CorrectLevel.M });
+    new QRCode(host, { text: DOWNLOAD_PAGE, width: 168, height: 168, correctLevel: QRCode.CorrectLevel.M });
   }
 
   /* ===== 安装卡标签页（二维码懒生成） ===== */
   var qrHeroDone = false;
+  function activateTab(tab) {
+    Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (t) { t.classList.remove("active"); });
+    Array.prototype.forEach.call(document.querySelectorAll(".pane"), function (p) { p.classList.remove("active"); });
+    tab.classList.add("active");
+    document.getElementById("pane-" + tab.dataset.pane).classList.add("active");
+    // 二维码等版本号就绪后再生成，避免指向旧版本
+    if (tab.dataset.pane === "phone" && !qrHeroDone) {
+      qrHeroDone = true;
+      versionReady.then(function () { makeQR("qrHero"); });
+    }
+  }
   Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
-    tab.addEventListener("click", function () {
-      Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (t) { t.classList.remove("active"); });
-      Array.prototype.forEach.call(document.querySelectorAll(".pane"), function (p) { p.classList.remove("active"); });
-      tab.classList.add("active");
-      document.getElementById("pane-" + tab.dataset.pane).classList.add("active");
-      // 二维码等版本号就绪后再生成，避免指向旧版本
-      if (tab.dataset.pane === "phone" && !qrHeroDone) {
-        qrHeroDone = true;
-        versionReady.then(function () { makeQR("qrHero"); });
-      }
-    });
+    tab.addEventListener("click", function () { activateTab(tab); });
   });
+
+  // 手机访问：默认展开「手机端下载」（扫码进来的人第一眼就是下载入口，而不是电脑端命令）
+  if (window.matchMedia && window.matchMedia("(max-width: 780px)").matches) {
+    var phoneTab = document.querySelector('.tab[data-pane="phone"]');
+    if (phoneTab && !phoneTab.classList.contains("active")) activateTab(phoneTab);
+  }
 
   /* ===== 复制命令 ===== */
   function copyText(text, btn) {
@@ -766,9 +812,19 @@
     btn.addEventListener("click", function () { copyText(NPM_CMD, btn); });
   });
 
-  /* ===== 微信内提示 ===== */
-  if (/MicroMessenger/i.test(navigator.userAgent)) {
-    document.getElementById("wechatTip").style.display = "block";
+  /* ===== 下载链接展示 + 复制（根治"长按复制会带进多余文字"） ===== */
+  var linkBox = document.getElementById("linkBox");
+  if (linkBox) linkBox.textContent = DOWNLOAD_PAGE;
+  var copyLinkBtn = document.getElementById("copyLinkBtn");
+  if (copyLinkBtn) copyLinkBtn.addEventListener("click", function () { copyText(DOWNLOAD_PAGE, copyLinkBtn); });
+
+  /* ===== 微信内：.apk 直链必被拦，所以不给下载按钮，只给"右上角 ⋯ → 浏览器打开"引导 ===== */
+  if (IS_WECHAT) {
+    applyDownloadTargets();              // 兜底再跑一次（版本刷新路径已包含）
+    var tip = document.getElementById("wechatTip");
+    if (tip) tip.style.display = "block";
+    if (linkBox) linkBox.style.display = "block";
+    if (copyLinkBtn) copyLinkBtn.classList.add("btn-blue");
   }
 
   /* ===== 滚动入场 ===== */

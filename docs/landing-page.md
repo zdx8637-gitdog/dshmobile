@@ -22,9 +22,12 @@
 
 ## 2. 不变量（改动前必读，破坏任一条都会造成线上问题）
 
-1. **二维码内容必须是绝对 `https://` URL。**
-   二维码没有 base URL，相对路径扫出来只会显示字面文本、不下载。
-   *历史事故（2026-09-20）*：改版页面把二维码内容写成 `"./" + APK_FILE`，用户扫码只看到 `./DSH-Mobile-0.2.16.apk`，无法下载；而页面上的下载按钮正常（浏览器会按页面 URL 解析相对路径）——所以"按钮好用、扫码不行"是这条不变量被破坏的典型症状。
+1. **二维码内容 = 落地页绝对 URL（带 `#download`），不要编 APK 直链。**
+   两个理由：
+   - **微信会拦 `.apk` 直链**：微信内置浏览器识别到文件下载会弹"该网页可能存在文件下载内容…如需浏览，请长按网址复制后使用浏览器访问"，用户被迫长按复制，常把多余文字一起选进去，链接不可靠（2026-09-20 用户实拍反馈）。
+   - **一张码永久有效**：码里是页面地址，换版本只改 `latest.json`，**旧二维码永远能下到最新版**；编直链则每次发版旧码全废。
+   页面对应的处理：微信 UA 下隐藏所有 `.apk` 按钮（并移除 `href`，避免点进拦截页）、显示右上角引导 + 可整段选中的链接 + 「复制下载链接」一键精确复制；非微信直接落到 `#download` 点按钮下载。
+   *历史事故（2026-09-20 上午）*：二维码内容写成 `"./" + APK_FILE` 相对路径 → 扫码只显示字面文本、无法下载（"按钮好用、扫码不行"）。修成绝对 URL 后微信里又被拦，最终改成"指向本页下载区"。
 2. **版本号只认 `latest.json`**：`index.html` 里内置的 `APK_VERSION` 只是 `file://` 预览/网络失败时的兜底。改版本号请改 `latest.json`，不要只改 HTML（改了也会被覆盖）。
 3. **`latest.json.version` 与 `file` 必须和实际 APK 一致**（`file` 默认按 `DSH-Mobile-<version>.apk` 推导，可显式指定）。
 4. **`pair.html` 的下载按钮同样跟随 `latest.json`**（不要写死版本号）。
@@ -40,6 +43,8 @@
    - 已**镜像**：`landing/{index.html,latest.json,pair.html}` 复制到 `D:\p\dshmobile-landing\site\`，因此即便有人再跑一次旧脚本，推上去的也是正确内容。
    - 规矩：**改完落地页，除了上传服务器，还要重新镜像一次**（见 §3 末）；改品牌资源只改本仓库 `landing/icon/`。
 8. **包体大小与更新日期同样来自 `latest.json`**（`data-size` ← `size` 字节换算、`data-date` ← `releasedAt`）。HTML 里的文案只是兜底；不要手写日期，否则页面会显示旧日期、让人以为没发新版。
+9. **微信内绝不暴露 `.apk` 链接**：`applyDownloadTargets()` 在 `IS_WECHAT` 时隐藏 `#dlBtn`/`#dlBtnHero` 并移除 `href`。**每次 `applyVersion()`（latest.json 回来）都会重跑它**——曾经踩过"守卫先跑、版本刷新又把 href 挂回去"的坑，改这段务必保持"赋值集中在 `applyDownloadTargets()` 一处"。
+10. **下载区紧跟 hero**（`#download` 是第 2 个区块，导航第一项也是「下载」）：扫码进来的人第一眼就是下载入口。手机端（≤780px）隐藏二维码（扫自己屏幕没意义）、默认展开 hero 卡的「手机端下载」并显示按钮。
 
 ---
 
@@ -85,10 +90,15 @@ foreach ($f in @("index.html","latest.json","pair.html")) {
   Copy-Item "D:\p\dshmobile-repo\landing\$f" "D:\p\dshmobile-landing\site\$f" -Force
 }
 
-# 部署前本地验收（品牌/版本/二维码/配对卡 17 项）：先起本地服务再跑
+# 部署前本地验收（品牌/版本/二维码/配对卡 22 项）：先起本地服务再跑
 node D:\p\pw-check\serve-landing.mjs 8099        # 后台，root=landing/
 node D:\p\pw-check\preview-landing.mjs http://127.0.0.1:8099/
+
+# 下载链路专测（扫码落地 / 微信引导 / 手机端默认栏 / 复制按钮 / APK 可达 12 项）
+node D:\p\pw-check\verify-download-flow.mjs http://127.0.0.1:8099/
 ```
+
+**发新版时二维码不用动**：码里是页面地址，只需上传新 APK + 改 `latest.json`（§3 步骤 1–3），页面与码都自动指向新版。
 
 ---
 
@@ -102,6 +112,12 @@ node D:\p\pw-check\preview-landing.mjs http://127.0.0.1:8099/
 
 **单页配对**：`node D:\p\tools\pwt\verify-pair-inline.mjs`（仓库副本：`landing/tools/verify-pair-inline.mjs`）覆盖 6 组：
 `mode=pair`（不跳 pair.html + 配对码 + `dshmobile://pair` 深链 + 版本号）、`mode=e2ee`、`mode=grant`、无参数（不显示卡片）、微信 UA（隐藏打开 App + 显示兜底）、等待自动拉起后仍在同页。
+> 期望版本从站点 `latest.json` 动态读取，发版不用改脚本。
+
+**下载链路**：`node D:\p\pw-check\verify-download-flow.mjs [url]`（仓库副本 `landing/tools/verify-download-flow.mjs`）12 项：
+1. **扫码落地**（手机视口开 `#download`）：自动滚到下载区、标题不被吸顶导航遮挡、`reveal` 动画已显现、手机端隐藏二维码、hero 卡显示按钮、默认展开「手机端下载」；
+2. **微信 UA**：引导条可见、两个 `.apk` 按钮隐藏且 `href` 已移除、链接框显示、点「复制下载链接」后剪贴板**逐字符相等**、全程**零 `.apk` 请求**；
+3. **APK 可达**：`HEAD` 200 + `Content-Length` 与 `latest.json` 一致 + 前 64KB 是 ZIP 魔数 `PK`（完整 sha256 由服务器侧 `sha256sum` 保证）。
 
 **最近一次验证结果（2026-09-20）**：
 ```
