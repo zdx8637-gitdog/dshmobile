@@ -75,6 +75,28 @@ archive live ones by default), `node scripts/unarchive-session.mjs <id>` and
 in the host's memory, so editing the state file only takes effect after a DSH restart — see
 [docs/dsh-session-archive.md](https://github.com/zdx8637-gitdog/dshmobile/blob/main/docs/dsh-session-archive.md)).
 
+## Single-instance protection (against two bridges kicking each other)
+
+If two bridges ever run on the same machine (a second DSH instance, an orphaned bridge left behind when
+DSH was killed, or a mix of old/new plugin versions) they share the same state directory
+`~/.dsh-mobile` ⇒ **the same relay device identity** ⇒ they kick each other off the relay, and the phone
+shows "**cannot refresh conversations after login**". Since 0.1.0-beta.23 there are four layers of defence:
+
+- **Bridge-side singleton lock**: a loopback port derived from the state directory acts as the lock
+  (released automatically when the process dies); a new instance asks the holder to *yield*, and exits
+  with code 42 if the holder refuses — the two never coexist;
+- **Host takeover**: before starting the bridge the host terminates any other bridge process on the
+  machine (so updating/restarting DSH also cleans up old orphans, and the newest code is the one running);
+- **Parent watchdog**: the bridge exits as soon as its host disappears, so orphans are no longer created;
+- **Bridge-side self-healing**: if the relay keeps closing this bridge with `4000 duplicate connection`
+  (meaning an *older* bridge is still around), it cleans up the other bridge processes.
+
+The panel entry dot then shows "另一个桥实例在运行" (another bridge instance is running); saving once in the
+panel (or restarting DSH) takes control back. Diagnostics: `~/.dsh-mobile/bridge.lock.json` and
+`bridge.log` (UTF-8). For a **temporary second bridge** (UI verification) use a separate state directory
+plus `--state-dir=<that dir>`, or set `DSHMOBILE_BRIDGE_SINGLETON=0`. Details:
+[docs/bridge-singleton.md](https://github.com/zdx8637-gitdog/dshmobile/blob/main/docs/bridge-singleton.md).
+
 ## relay
 
 The plugin connects to `https://www.deepseek-claudex.cn` by default (author-operated relay:

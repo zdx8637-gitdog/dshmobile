@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateIdentityKeypair, randomPairingSecret } from "../bridge/crypto.js";
+import { killOtherBridges } from "../bridge/scan.js";
 
 export const name = "dshmobile-bridge";
 
@@ -25,6 +26,12 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // 状态目录放在用户主目录（与包目录解耦）：插件升级/重装不会丢登录态与面板配置。
 const STATE_DIR = process.env.DSHMOBILE_STATE_DIR || path.join(homedir(), ".dsh-mobile");
 const BRIDGE_MAIN = path.join(HERE, "..", "bridge", "main.js");
+// 传给桥的命令行标记：既是"同一 relay 身份（同一 stateDir）"的显式标识，也供宿主精确接管残留桥进程。
+const BRIDGE_STATE_MARKER = `--state-dir=${STATE_DIR}`;
+// 桥的退出码约定（见 bridge/singleton.js）：抢不到单例 / 已让位 → 宿主**不得**自动重启，
+// 否则两个宿主会互相重启、互相顶替。
+const BRIDGE_EXIT_ANOTHER_INSTANCE = 42;
+const BRIDGE_EXIT_YIELDED = 43;
 const CONFIG_FILE = path.join(STATE_DIR, "config.json");
 const KEY_FILE = path.join(STATE_DIR, "machine-key.txt");
 const SESSION_FILE = path.join(STATE_DIR, "session.json");
@@ -292,8 +299,25 @@ export function apply(ctx: any, _config: any = {}) {
     patchState({ bridgeStatus: "stopped" });
   }
 
+  /**
+   * 接管残留桥进程（上次 DSH 被强杀留下的孤儿、或另一个 DSH 实例起的桥）。
+   * 为什么必须做：它们与本宿主共用同一份 config/设备标识，只要并存就会在 relay 侧互相顶替，
+   * 手机端表现为"刷新不出会话"。
+   * 扫描/判定逻辑与桥侧自愈共用 `bridge/scan.js`（命令行形如 `node … bridge/main.js` 才算桥）。
+   */
+  function takeoverStaleBridges() {
+    if (process.platform !== "win32") return; // 目前用户全是 Windows；其它平台仅靠桥侧单例锁
+    try {
+      const { killed } = killOtherBridges({ stateDir: STATE_DIR, log: (m: string) => console.log(`[dshmobile] ${m}`) });
+      if (killed.length) hostLog(`takeover: 已结束残留桥进程 ${killed.join(",")}`);
+    } catch (err: any) {
+      hostLog(`takeover: 扫描失败（已忽略）：${err?.message ?? err}`);
+    }
+  }
+
   function startBridge(value: PanelState) {
     stopBridge();
+    takeoverStaleBridges();
     try {
       mkdirSync(STATE_DIR, { recursive: true });
       const cfg = {
@@ -322,15 +346,24 @@ export function apply(ctx: any, _config: any = {}) {
         mkdirSync(STATE_DIR, { recursive: true });
         logFd = openSync(path.join(STATE_DIR, "bridge.log"), "a");
       } catch { /* 打不开日志则不落盘 */ }
-      const p = spawn(process.execPath, [BRIDGE_MAIN], {
+      const p = spawn(process.execPath, [BRIDGE_MAIN, BRIDGE_STATE_MARKER], {
         env: { ...process.env, DSHMOBILE_BRIDGE_CONFIG: CONFIG_FILE },
-        stdio: ["ignore", logFd >= 0 ? logFd : "ignore", logFd >= 0 ? logFd : "ignore"],
+        // 第 4 位 "ipc"：给桥一条与宿主的通信通道，宿主消失时桥会收到 disconnect 并退出
+        // （防"孤儿桥"：孤儿桥会与下次启动的桥共用设备标识，在 relay 侧互相顶替）。
+        stdio: ["ignore", logFd >= 0 ? logFd : "ignore", logFd >= 0 ? logFd : "ignore", "ipc"],
       });
       if (logFd >= 0) { try { closeSync(logFd); } catch { /* 子进程已持有句柄 */ } }
       child = p;
       p.on("exit", (code) => {
         // child !== p → 已被新桥替换或主动停止，忽略该退出事件
         if (stopped || child !== p) return;
+        if (code === BRIDGE_EXIT_ANOTHER_INSTANCE || code === BRIDGE_EXIT_YIELDED) {
+          // 桥侧单例锁判定"另一个桥实例在运行/已让位"：**不要自动重启**，否则两个宿主会互相重启顶替
+          const why = code === BRIDGE_EXIT_YIELDED ? "已让位给另一个桥实例" : "另一个桥实例正在运行";
+          hostLog(`bridge exited ${code}: ${why}（不自动重启）`);
+          patchState({ bridgeStatus: `${why}（未自动重启；在面板保存一次即可重新接管）` });
+          return;
+        }
         // 异常退出则 3 秒后自动拉起（60 秒内最多一次，防崩溃循环）
         patchState({ bridgeStatus: `exited:${code}，3 秒后自动重启` });
         const now = Date.now();

@@ -1,0 +1,79 @@
+# 桥单实例保护：为什么会出现"两个桥互相顶替"，以及怎么根治
+
+> 2026-09-20 落地。相关背景与现场证据见工作区 `WORKFLOW.md` §7.0 第 3 项。
+> 覆盖测试：`plugins/scripts/smoke-bridge-singleton.mjs`（21 项断言）。
+
+## 1. 症状：手机"登录后刷新不出会话"
+
+PC 端如果同时有两个桥在跑，它们共用**同一份状态目录**（默认 `~/.dsh-mobile`）⇒ 同一份
+`config.json` / `clientDeviceKey` ⇒ **同一个 relay deviceId**。relay 对同一 deviceId 的策略是
+"只保留最新一条连接"（`relay/src/ws/relay.ts` `addBridge()`，旧连接按 `4000 duplicate connection` 关闭），
+于是两条连接**互相把对方踢下线**，各自按 1/2/4/8/16/30 秒退避重连 —— **永动互踢，永不收敛**。
+
+后果：手机的 `sessions.list` 请求会被路由到"马上要被踢掉"的那条连接，响应丢失 ⇒ App 侧
+`loadSessions()` 失败（此前是**静默**失败）⇒ 用户看到的就是"登录后刷新不出对话"。
+
+判据（relay 日志，`journalctl -u session-control-relay`）：
+
+```
+duplicate bridge connection - closing old connection   ← 反复出现即确诊
+bridge connected / bridge connection closed code=4000  ← 同一秒内成对出现（说明被踢的那条是活连接）
+```
+
+## 2. 第二个桥从哪来（代码级路径）
+
+| # | 路径 | 说明 |
+|---|---|---|
+| 1 | **多个 DSH 实例** | 每个 DSH 进程的插件宿主都会 spawn 自己的桥；宿主只杀"自己进程内"的 child（`startBridge()` → `stopBridge()`），**没有任何跨进程互斥** |
+| 2 | **孤儿桥** | 宿主没有 dispose 钩子、桥没有父进程看门狗、子进程 stdio 是文件 fd（非管道）⇒ DSH 被强杀（taskkill/更新器）或优雅退出时，桥可能活下来；下次启动 DSH 就变成两个 |
+| 3 | **新旧混跑** | 旧版本桥不认单例锁；只要它还在，新桥加进来就会互踢 |
+| 4 | 多个 profile / 旧安装目录 / 手工 `node bridge/main.js` | 同上，都会共用同一个状态目录身份 |
+
+> 注：`startBridge()` 先杀旧 child，崩溃重启有 60 秒限流，配置变化才触发重起 —— **单实例内部不会重复起桥**，
+> 所以问题一定出在"跨进程"。
+
+## 3. 四层防护（本次实现）
+
+1. **桥侧单例锁**（`bridge/singleton.js`）
+   按 `stateDir` 散列出一个**本机回环端口**（17660–17699）当锁：操作系统保证同一时刻只有一个进程能绑定，
+   进程死亡自动释放，因此没有 pid 文件的"僵尸锁 / PID 复用"问题。
+   - 抢到 → 记日志 `[singleton] 已持有单实例锁（127.0.0.1:xxxxx）`，并把 `bridge.lock.json` 落到状态目录（诊断用）；
+   - 抢不到 → 向占用者发 `{"cmd":"yield"}` 让位请求，等它释放后重试绑定（3 秒）；
+   - 让位失败 → **本进程以退出码 42 退出**（绝不与对方并存）。
+2. **宿主接管**（`src/index.ts` `takeoverStaleBridges()`）
+   每次 `startBridge()` 之前，扫描并结束本机其它桥进程（判定：命令行形如 `node … bridge/main.js`，
+   即"桥入口是脚本参数"）。实测只命中真桥，不会误伤恰好提到该路径的其它进程。
+   这样"更新插件/重启 DSH"就会顺手清掉上次留下的孤儿 —— 保证**最新代码的那个桥在跑**。
+3. **父进程看门狗**（`bridge/main.js`）
+   宿主 spawn 时带上 IPC 通道（`stdio: [..., "ipc"]`）；父进程消失时 Node 触发 `disconnect`，
+   桥立即退出 —— 从源头杜绝"孤儿桥"。
+4. **桥侧自愈**（`bridge/scan.js` + `relay.js` 的 `onDuplicateKick`）
+   若本桥在 2 分钟内被 relay 按 `4000` 顶替 3 次（说明本机还有一个**老版本**桥，它不认单例锁），
+   主动清理本机其它桥进程（5 分钟内最多一次）。
+
+## 4. 退出码约定（宿主据此决定是否自动重启）
+
+| 退出码 | 含义 | 宿主行为 |
+|---|---|---|
+| `42` | 另一个桥实例正在运行（让位失败） | **不自动重启**；面板状态显示"另一个桥实例正在运行" |
+| `43` | 已让位给新启动的桥实例 | **不自动重启**；同上 |
+
+面板入口按钮的状态点会变成警示色并显示「另一个桥实例在运行」。此时在面板里**保存一次**（或重启 DSH）
+即会走"宿主接管"路径重新拿回控制权。
+
+## 5. 诊断入口
+
+- `~/.dsh-mobile/bridge.lock.json`：当前持锁的 `pid / port / startedAt`；
+- `~/.dsh-mobile/takeover-scan.ps1`：宿主/桥实际使用的进程扫描脚本（ASCII，便于人工执行排查）；
+- `bridge.log`（UTF-8，读时用 `Get-Content -Encoding utf8`）关键字：
+  `已持有单实例锁` / `本桥被另一个桥实例顶替` / `连续 3 次被其它桥顶替` / `父进程（DSH 插件宿主）已消失`；
+- `host.log` 关键字：`takeover: 已结束残留桥进程 …`。
+
+## 6. 逃生门与测试约定
+
+- `DSHMOBILE_BRIDGE_SINGLETON=0`：关闭单例保护（**仅**用于"临时第二桥"验证 UI 等场景）。
+- 临时第二桥请使用**独立 stateDir**，并给桥加上 `--state-dir=<该目录>` 参数：
+  这样它会被归类为"另一个身份"，宿主接管与桥自愈都不会动它；
+  反之（无标记）会被当作"旧版本桥"清理掉。
+- 回归：`node scripts/smoke-bridge-singleton.mjs`
+  （端口互斥前提 / 让位协议 / 不让位则 42 退出 / 看门狗 / 逃生门 / 扫描分类：同身份清掉、不同身份不动、legacy 归类）。

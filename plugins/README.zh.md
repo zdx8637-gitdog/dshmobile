@@ -65,6 +65,25 @@ v0.1.5 起 DSH 给本地 Web 服务加了浏览器会话鉴权（`dsh web` 打�
 （DSH 没有"取消归档"接口：归档集合在宿主内存里，改状态文件后需重启 DSH 才生效——细节与检查清单见
 [docs/dsh-session-archive.md](https://github.com/zdx8637-gitdog/dshmobile/blob/main/docs/dsh-session-archive.md)）。
 
+## 单实例保护（防"两个桥互相顶替"）
+
+同一台机器上如果同时跑着两个桥（多开了一个 DSH、上次 DSH 被强杀留下的孤儿桥、或新旧插件混跑），
+它们共用同一份状态目录 `~/.dsh-mobile` ⇒ **同一个 relay 设备身份** ⇒ 在 relay 侧互相把对方踢下线，
+手机端表现为"**登录后刷新不出会话**"。自 0.1.0-beta.23 起有四层防护：
+
+- **桥侧单例锁**：按状态目录散列出一个本机回环端口当锁（进程退出即自动释放）；新实例会请旧实例"让位"，
+  让位失败则以退出码 42 退出，绝不并存；
+- **宿主接管**：每次启动桥之前先结束本机其它桥进程（更新/重启 DSH 时会顺手清掉旧孤儿，保证新代码在跑）；
+- **父进程看门狗**：宿主消失时桥立即退出，不再产生孤儿；
+- **桥侧自愈**：若被 relay 按 `4000 duplicate connection` 反复顶替（说明本机还有**老版本**桥），
+  主动清理其它桥进程。
+
+面板入口的状态点会显示「另一个桥实例在运行」；此时在面板**保存一次**或重启 DSH 即可重新接管。
+诊断用 `~/.dsh-mobile/bridge.lock.json` 与 `bridge.log`（UTF-8）。
+**临时第二桥**（做 UI 验证时）请用独立状态目录并加 `--state-dir=<该目录>` 参数，或设
+`DSHMOBILE_BRIDGE_SINGLETON=0`。细节见
+[docs/bridge-singleton.md](https://github.com/zdx8637-gitdog/dshmobile/blob/main/docs/bridge-singleton.md)。
+
 ## relay 说明
 
 插件默认连接 `https://www.deepseek-claudex.cn`（作者自营 relay：账号注册、

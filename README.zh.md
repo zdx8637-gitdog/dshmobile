@@ -75,6 +75,7 @@ npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@lates
 | `docs/02-protocol.md` | relay 信封、消息类型、设备语义（线格式契约） |
 | `docs/plan-e2ee.md` | E2EE v1 设计（威胁模型、密码学、握手、pinning） |
 | `docs/e2ee-identity-issues.md` | E2EE 身份/配对问题调研（撕裂读再生、重启自愈等） |
+| `docs/bridge-singleton.md` | 桥单实例保护：多实例/孤儿桥互相顶替的原理、四层防护与诊断入口 |
 
 ## 信任与自托管（路线图）
 

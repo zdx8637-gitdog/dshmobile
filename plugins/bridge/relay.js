@@ -34,6 +34,7 @@ export class RelayBridge {
     this.lastCloseCode = null;
     this.lastCloseReason = null;
     this.onEnvelope = null; // (envelope) => void
+    this.onDuplicateKick = null; // () => void：本连接被 relay 按 "duplicate connection"(4000) 顶替时回调
     this.e2ee = e2ee; // 可选 E2eeSession：加解密透传（未建立则原样）
   }
 
@@ -147,6 +148,12 @@ export class RelayBridge {
     };
     ws.onclose = () => {
       if (this.connected) console.log("[relay] bridge disconnected", this.lastCloseCode, this.lastCloseReason);
+      // 4000 = relay 侧的 "duplicate connection"：本机有另一个桥实例用同一设备标识连了上来，
+      // relay 只保留最新一条，于是把本连接踢掉。反复出现即为"双桥互踢"，见 WORKFLOW.md §7.0。
+      if (this.lastCloseCode === 4000) {
+        console.warn("[relay] 本桥被另一个桥实例顶替（relay close 4000 = duplicate connection）");
+        try { this.onDuplicateKick?.(); } catch { /* 自愈失败不影响重连 */ }
+      }
       this.connected = false;
     };
     ws.onerror = () => {};

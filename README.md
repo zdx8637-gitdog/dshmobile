@@ -80,6 +80,7 @@ everything keeps working.
 | `docs/02-protocol.md` | Relay envelopes, message types, device semantics (wire-format contract) |
 | `docs/plan-e2ee.md` | E2EE v1 design (threat model, cryptography, handshake, pinning) |
 | `docs/e2ee-identity-issues.md` | E2EE identity/pairing investigation (torn-read key regeneration, restart self-heal, etc.) |
+| `docs/bridge-singleton.md` | Bridge single-instance protection: why duplicate bridges fight, the four defence layers, diagnostics |
 
 ## Trust & Self-hosting (roadmap)
 
