@@ -11,7 +11,7 @@
 | 文件 | 作用 | 谁维护 |
 |---|---|---|
 | `index.html` | 落地页主页面（单文件内联 CSS/JS，零构建） | 本仓库 `landing/index.html` |
-| `pair.html` | 扫码进入的配对页（`mode=pair/grant/e2ee` → `dshmobile://…` 深链 + 下载按钮） | 本仓库 `landing/pair.html` |
+| `pair.html` | **遗留文件**（页面已不再引用；保留仅以防旧书签/缓存链接） | 不再维护 |
 | `qrcode.min.js` | davidshimjs QR 库（本地，无第三方 CDN 依赖） | 随 `landing/` 同步 |
 | `shots/*.webp` | 脱敏截图 6 张 | 随 `landing/` 同步 |
 | **`latest.json`** | **版本真相源**：`{version,file,size,sha256,releasedAt,notes}` | 每次发版由发布方更新 |
@@ -27,7 +27,10 @@
 2. **版本号只认 `latest.json`**：`index.html` 里内置的 `APK_VERSION` 只是 `file://` 预览/网络失败时的兜底。改版本号请改 `latest.json`，不要只改 HTML（改了也会被覆盖）。
 3. **`latest.json.version` 与 `file` 必须和实际 APK 一致**（`file` 默认按 `DSH-Mobile-<version>.apk` 推导，可显式指定）。
 4. **`pair.html` 的下载按钮同样跟随 `latest.json`**（不要写死版本号）。
-5. 旧配对链接兼容：`index.html` 检测到 `?mode=` / `?code=` 会 `location.replace("pair.html" + search)`，此逻辑不可删。
+5. **单页设计：扫任何码都落在同一个页面**（`/dshmobile/`）。
+   - 带 `?mode=pair|grant|e2ee`（PC 面板二维码就是这么编码的）→ 页面顶部显示**配对卡**：配对码/提示 + 「打开 App 完成配对」（`dshmobile://…` 深链，600ms 后自动拉起）+ 「还没装 App？去下载」；微信内 UA 隐藏「打开 App」并显示兜底提示。
+   - 不带参数 → 普通落地页（下载/注册），不显示配对卡。
+   - **不要**再写"跳转到 pair.html"的逻辑：`pair.html` 已退化为遗留文件（仅保留，页面不再引用），历史上"先闪落地页再跳旧样式页"就是这条重定向造成的。
 6. **不要运行** `D:\p\dshmobile-landing\scripts\deploy-dshmobile.py`（旧部署脚本）：它会把 `index.html` 的版本退回 0.2.14、`pair.html` 退回 `DSH-Mobile-0.2.9.apk`。该脚本已废弃。
 
 ---
@@ -63,20 +66,28 @@ node D:\p\tools\pwt\verify-qr.mjs
 
 ## 4. 验证脚本（可复现）
 
-`node D:\p\tools\pwt\verify-qr.mjs [url]`（playwright-core + 系统 Chrome，headless）会：
+**页面与二维码**：`node D:\p\tools\pwt\verify-qr.mjs [url]`（playwright-core + 系统 Chrome，headless）会：
 1. 加载线上页面，打印 `latest.json` 的 HTTP 状态；
 2. **拦截 `window.QRCode` 构造调用，抓出二维码真正编码的字符串**；
 3. 输出页面显示版本、下载按钮 href、`data-apk-url`；
 4. 断言所有二维码内容都以 `https://` 开头，并列出 4xx 资源。
 
+**单页配对**：`node D:\p\tools\pwt\verify-pair-inline.mjs`（仓库副本：`landing/tools/verify-pair-inline.mjs`）覆盖 6 组：
+`mode=pair`（不跳 pair.html + 配对码 + `dshmobile://pair` 深链 + 版本号）、`mode=e2ee`、`mode=grant`、无参数（不显示卡片）、微信 UA（隐藏打开 App + 显示兜底）、等待自动拉起后仍在同页。
+
 **最近一次验证结果（2026-09-20）**：
 ```
+=== verify-qr.mjs ===
 latest.json → 200
 页面显示版本: ["v0.2.16","v0.2.16","v0.2.16","v0.2.16"]
-下载按钮 href: https://www.deepseek-claudex.cn/dshmobile/DSH-Mobile-0.2.16.apk
 二维码实际编码内容: [ "https://www.deepseek-claudex.cn/dshmobile/DSH-Mobile-0.2.16.apk", "…同上（Hero 卡第二个二维码）" ]
 ✅ 所有二维码都是绝对 https URL
 HTTP 404 https://www.deepseek-claudex.cn/auth/registration-status   ← 见 §5 待办 a
+
+=== verify-pair-inline.mjs ===
+[1] mode=pair   PASS ×4（不跳 pair.html / 配对码 123456 / dshmobile://pair 深链 / 版本 v0.2.16）
+[2] mode=e2ee   PASS   [3] mode=grant  PASS   [4] 无参数 PASS   [5] 微信 UA PASS   [6] 自动拉起后仍同页 PASS
+ALL PASS
 ```
 
 ---

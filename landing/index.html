@@ -276,6 +276,16 @@
 </head>
 <body>
 
+<!-- ⓪ 配对卡：扫任何码都落在这个页面；只有带 mode/code 的扫码才显示（配对码 + 打开 App + 去下载） -->
+<section id="pairCard" style="display:none;margin:88px auto 0;max-width:520px;padding:20px 22px;border-radius:18px;background:#111214;border:1px solid #23252a;color:#e8eaee">
+  <div id="pairTitle" style="font-size:20px;font-weight:500;margin-bottom:6px">配对</div>
+  <div id="pairCode" style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:40px;font-weight:600;letter-spacing:.16em;text-align:center;padding:14px 0 10px;color:#8ab4ff">------</div>
+  <div id="pairHint" style="font-size:13px;line-height:20px;color:#9aa0a6;margin-bottom:16px"></div>
+  <a id="pairOpen" class="btn btn-blue btn-lg" href="#" style="display:inline-flex;width:100%;justify-content:center;margin-bottom:8px">打开 App 完成配对</a>
+  <a class="btn btn-lg" href="#download" style="display:inline-flex;width:100%;justify-content:center">还没装 App？去下载</a>
+  <div id="pairWarn" style="display:none;margin-top:12px;font-size:12px;line-height:18px;color:#f0b429">微信内无法直接打开 App：请点右上角「…」→ 在浏览器中打开，或在 App 内手动输入上方配对码。</div>
+</section>
+
 <!-- ① 悬浮胶囊导航 -->
 <nav class="nav">
   <a class="brand" href="#top"><span class="mark">D</span>DSH Mobile <span class="tag">开发者预览版</span></a>
@@ -587,11 +597,56 @@
   var IS_PREVIEW = location.protocol === "file:" ||
     location.hostname === "localhost" || location.hostname === "127.0.0.1";
 
-  /* ===== 保护旧配对页：带配对参数一律跳 pair.html ===== */
-  if (params.has("mode") || params.has("code")) {
-    location.replace("pair.html" + location.search);
-    return;
-  }
+  /* ===== 配对参数（mode/code）在本页内处理，不再跳转 pair.html =====
+     需求：用户扫任何码都落到同一个页面，都能下载；PC 面板的码只是多一个"配对/授权"入口。 */
+  (function () {
+    var mode = params.get("mode") || "";
+    var code = (params.get("code") || "").trim();
+    var deviceId = (params.get("deviceId") || "").trim();
+    var pid = (params.get("pid") || "").trim();
+    if (!mode && !code) return;                        // 普通访问：不显示配对卡
+    var relay = location.origin;
+    var isWechat = params.get("ua") === "wechat" || /MicroMessenger/i.test(navigator.userAgent);
+    var title, hint, deepLink;
+    if (mode === "grant") {
+      title = "授权电脑登录";
+      hint = "这是一次授权请求：请在 DSH Mobile App 中确认，允许这台电脑登录你的账号。确认后页面会自动跳转。";
+      deepLink = "dshmobile://grant?relay=" + encodeURIComponent(relay)
+        + "&code=" + encodeURIComponent(code) + "&pid=" + encodeURIComponent(pid);
+    } else if (mode === "e2ee") {
+      title = "端到端加密配对";
+      hint = "为本机与手机建立端到端加密通道；请在 App 内确认。配对成功后设备列表会出现钥匙图标。";
+      deepLink = "dshmobile://e2ee?relay=" + encodeURIComponent(relay)
+        + "&deviceId=" + encodeURIComponent(deviceId)
+        + "&pk=" + encodeURIComponent(params.get("pk") || "")
+        + "&ps=" + encodeURIComponent(params.get("ps") || "")
+        + "&pid=" + encodeURIComponent(pid)
+        + "&cv=" + encodeURIComponent(params.get("cv") || "1");
+    } else {
+      title = "扫码登录";
+      hint = "在 App 内确认后，本机将登录到电脑端出示的同一账号（无需输入密码）。";
+      deepLink = "dshmobile://pair?relay=" + encodeURIComponent(relay)
+        + "&code=" + encodeURIComponent(code)
+        + "&pk=" + encodeURIComponent(params.get("pk") || "")
+        + "&ps=" + encodeURIComponent(params.get("ps") || "")
+        + "&cv=" + encodeURIComponent(params.get("cv") || "1");
+    }
+    document.getElementById("pairTitle").textContent = title;
+    document.getElementById("pairHint").textContent = hint;
+    var codeEl = document.getElementById("pairCode");
+    if (code) codeEl.textContent = code; else codeEl.style.display = "none";
+    var openBtn = document.getElementById("pairOpen");
+    openBtn.href = deepLink;
+    openBtn.setAttribute("data-deep-link", deepLink);   // 供验收脚本断言
+    document.getElementById("pairCard").style.display = "block";
+    if (isWechat) {
+      openBtn.style.display = "none";
+      document.getElementById("pairWarn").style.display = "block";
+    } else if (code || mode === "e2ee") {
+      // 已装 App：扫码即拉起（未装则本页保留下载入口）
+      setTimeout(function () { location.href = deepLink; }, 600);
+    }
+  })();
 
   /* ===== 版本号 / 链接 =====
      二维码必须编码**绝对 URL**：二维码没有 base URL，相对路径扫出来只会显示字面文本
