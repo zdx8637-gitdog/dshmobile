@@ -207,6 +207,30 @@ const CSS = `
   background:${T.dangerWash}; border:1px solid ${T.dangerLine}; border-radius:${T.rSm}px; padding:8px 10px; margin-bottom:12px; }
 .dsm-note { font-size:12px; line-height:18px; color:${T.caption}; }
 .dsm-foot { display:flex; align-items:center; gap:10px; padding:12px 0 14px; }
+/* ---------- 横版（宽窗口）：细状态栏 + 三栏 ---------- */
+.dsm-bar { display:flex; align-items:center; gap:10px; height:44px; margin:0 -16px; padding:0 16px;
+  border-bottom:1px solid ${T.line1}; }
+.dsm-bar__title { font-size:13.5px; font-weight:600; color:${T.text}; flex:none; }
+.dsm-bar__state { display:flex; align-items:center; gap:6px; font-size:12px; color:${T.dim}; flex:none; }
+.dsm-bar__sep { width:1px; height:14px; background:${T.line2}; flex:none; }
+.dsm-bar__item { font-size:12px; color:${T.caption}; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; max-width:240px; }
+.dsm-bar__item--mono { font-family:${T.mono}; }
+.dsm-bar__ver { margin-left:auto; font-family:${T.mono}; font-size:11px; color:${T.caption}; flex:none; }
+.dsm-bar__link { flex:none; font-size:12px; color:${T.caption}; padding:0 6px; border-radius:6px; }
+.dsm-bar__link:hover { color:${T.text}; background:${T.hover}; }
+.dsm-bar__close { flex:none; width:26px; height:26px; border-radius:8px; border:1px solid transparent;
+  background:transparent; color:${T.caption}; cursor:pointer; font-size:13px; line-height:1; }
+.dsm-bar__close:hover { background:${T.hover}; color:${T.text}; }
+/* 三栏：等宽（320 + 1fr + 1fr）等高，卡片同构，底部动作对齐 */
+.dsm-cols { display:grid; grid-template-columns:320px 1fr 1fr; gap:16px; padding:16px 0 2px; align-items:stretch; }
+.dsm-col { min-width:0; display:flex; flex-direction:column; }
+.dsm-col > .dsm-h { margin-bottom:10px; }
+.dsm-colcard { flex:1 1 auto; display:flex; flex-direction:column; }
+.dsm-actions { margin-top:auto; }              /* 各栏底部动作落在同一基线 */
+.dsm-tilewrap { display:flex; justify-content:center; }  /* 二维码在卡内居中 */
+.dsm-rowgap { height:10px; flex:none; }
+.dsm-panel--wide { width:920px; }
 `;
 function ensureStyle() {
   if (typeof document === "undefined") return;
@@ -266,6 +290,7 @@ function StatusDot({ kind, badge = false }: { kind: DotKind; badge?: boolean }) 
 
 /* ============================ 面板 ============================ */
 function DshmobileCard(props: any) {
+  const wide = props.layout === "wide"; // 横版（宽窗口）还是竖排（窄窗口）
   const snap: CardSnapshot | null = props.useDshmobileCard((s: CardSnapshot) => s);
   const value: any = snap?.value ?? {};
   const [form, setForm] = React.useState<Record<string, string> | null>(null);
@@ -386,137 +411,276 @@ function DshmobileCard(props: any) {
   const cnt1 = value.pairingExpiresAt ? (left > 0 ? `剩余 ${left}s` : "已过期") : "未生成";
   const cnt2 = value.e2eePairingExpiresAt ? (e2eeLeft > 0 ? `剩余 ${e2eeLeft}s` : "已过期") : "";
 
+  // ---------- 共用内容（横版三栏 / 竖排三块 都从这里取） ----------
+  const statusRows = (
+    <>
+      <div className="dsm-row">
+        <span className="dsm-k">桥</span>
+        <span className="dsm-v" style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <StatusDot kind={st.kind} />
+          {st.text}
+        </span>
+      </div>
+      <div className="dsm-row">
+        <span className="dsm-k">账号</span>
+        <span className="dsm-v">{value.username || "未登录"}</span>
+      </div>
+      {value.deviceLabel ? (
+        <div className="dsm-row">
+          <span className="dsm-k">设备</span>
+          <span className="dsm-v">{value.deviceLabel}</span>
+        </div>
+      ) : null}
+      {value.relayUrl ? (
+        <div className="dsm-row">
+          <span className="dsm-k">relay</span>
+          <span className="dsm-v dsm-v--mono">{value.relayUrl}</span>
+        </div>
+      ) : null}
+    </>
+  );
+
+  const loginRows = (
+    <>
+      <div className="dsm-row">
+        <span className="dsm-k">relay 地址</span>
+        <input className="dsm-input" value={form?.relayUrl ?? ""} placeholder="https://www.deepseek-claudex.cn"
+          onChange={(e) => edit("relayUrl", e.target.value)} />
+      </div>
+      <div className="dsm-row">
+        <span className="dsm-k">账号</span>
+        <input className="dsm-input" value={form?.username ?? ""} placeholder="至少 3 位"
+          onChange={(e) => edit("username", e.target.value)} />
+      </div>
+      <div className="dsm-row">
+        <span className="dsm-k">密码</span>
+        <input className="dsm-input" type="password" value={form?.password ?? ""} placeholder={logged ? "留空表示不修改" : "至少 6 位"}
+          onChange={(e) => edit("password", e.target.value)} />
+      </div>
+      <div className="dsm-row">
+        <span className="dsm-k">设备名</span>
+        <input className="dsm-input" value={form?.deviceLabel ?? ""} placeholder="手机端显示的名称"
+          onChange={(e) => edit("deviceLabel", e.target.value)} />
+      </div>
+    </>
+  );
+
+  // 登录区的说明 + 动作（两种布局共用；横版靠 .dsm-actions 压到卡片底部与其它栏对齐）
+  const loginNote = (
+    <p className="dsm-note" style={{ marginTop: 12 }}>
+      已有账号直接连接；没有账号点「注册新账号」自动创建（账号 ≥3 位、密码 ≥6 位）。
+    </p>
+  );
+  const loginButtons = (bottomAligned: boolean) => (
+    <div
+      className={bottomAligned ? "dsm-actions" : undefined}
+      style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", ...(bottomAligned ? {} : { marginTop: 12 }) }}
+    >
+      <button className="dsm-btn dsm-btn--brand" onClick={save}>保存并连接</button>
+      <button className="dsm-btn dsm-btn--ghost" onClick={register}>注册新账号</button>
+      {/* 退出登录并进登录栏（不再单独占一行） */}
+      {logged ? (
+        <button className="dsm-btn dsm-btn--danger" style={{ marginLeft: "auto" }} onClick={logout}>退出登录</button>
+      ) : null}
+    </div>
+  );
+  const loginErr = errText ? <div className="dsm-err"><span>!</span><span>{errText}</span></div> : null;
+
+  // 竖版用：错误条 + 登录行 + 说明 + 按钮
+  const loginBody = (
+    <>
+      {loginErr}
+      {loginRows}
+      {loginNote}
+      {loginButtons(false)}
+    </>
+  );
+
+  // ① 登录 / 授权（未登录时也有：手机扫码授权本机登录）
+  const pairCard = (
+    <div className="dsm-qr-card">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: T.dim }}>① 登录 · 授权</span>
+        <span className="dsm-pill">{cnt1}</span>
+      </div>
+      <div style={{ marginTop: 2 }}>
+        <span className="dsm-tile">
+          <canvas ref={qr1Ref} />
+        </span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+        <span className="dsm-code">{value.pairingCode || "------"}</span>
+        <button className="dsm-btn dsm-btn--ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+          onClick={() => copy(String(value.pairingCode ?? ""), "code")} disabled={!value.pairingCode}>
+          {copied === "code" ? "已复制" : "复制"}
+        </button>
+      </div>
+      <p className="dsm-note" style={{ marginTop: 8 }}>
+        {mode === "grant"
+          ? "手机（已登录）扫码授权本机登录同一账号。"
+          : "手机扫码即可登录同一账号，无需输入密码。"}
+      </p>
+      <button className="dsm-btn dsm-btn--ghost" style={{ marginTop: 10, width: "100%" }} onClick={genPairing}>
+        刷新二维码
+      </button>
+    </div>
+  );
+
+  // ② 加密配对：本机登录后才可用
+  const e2eeCard = (
+    <div className="dsm-qr-card">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: T.dim }}>② 加密配对</span>
+        {cnt2 ? <span className="dsm-pill">{cnt2}</span> : null}
+      </div>
+      {e2eeReady ? (
+        <>
+          <div style={{ marginTop: 2 }}>
+            <span className="dsm-tile">
+              <canvas ref={qr2Ref} />
+            </span>
+          </div>
+          <p className="dsm-note" style={{ marginTop: 10, marginBottom: 0 }}>
+            手机登录后扫此码，把本机与手机做成端到端加密绑定，设备列表会出现钥匙图标。
+          </p>
+        </>
+      ) : (
+        <p className="dsm-note" style={{ margin: 0 }}>加密配对 · 本机登录后可用</p>
+      )}
+    </div>
+  );
+
+  // 横版顶部细状态栏
+  const bar = (
+    <div className="dsm-bar">
+      <WhaleTile size={18} />
+      <span className="dsm-bar__title">DSH Mobile</span>
+      <span className="dsm-bar__state"><StatusDot kind={st.kind} />{st.text}</span>
+      <span className="dsm-bar__sep" />
+      <span className="dsm-bar__item">账号 {value.username || "未登录"}</span>
+      {value.deviceLabel ? <span className="dsm-bar__item">设备 {value.deviceLabel}</span> : null}
+      {/* relay 地址不放状态栏（登录栏输入框里可读），避免挤掉账号/设备的显示 */}
+      <span className="dsm-bar__ver">{value.bridgeVersion ? `bridge v${value.bridgeVersion}` : ""}</span>
+      <a className="dsm-bar__link" style={{ textDecoration: "none" }} href="https://github.com/zdx8637-gitdog/dshmobile#readme" target="_blank" rel="noreferrer">帮助文档</a>
+      {props.onClose ? (
+        <button type="button" className="dsm-bar__close" onClick={props.onClose} title="关闭">✕</button>
+      ) : null}
+    </div>
+  );
+
+  // 横版：细状态栏 + 三栏（登录 / 配对二维码 / E2EE 二维码）
+  // 对齐规则：三栏等宽等高；每栏 = 栏标题(带倒计时/状态) → 卡片(同构) → 底部动作(同一基线)；二维码居中。
+  if (wide) {
+    const pairMeta = value.pairingCode ? (left > 0 ? `剩余 ${left}s` : "已过期") : "未生成";
+    const e2eeMeta = e2eeReady ? (e2eeLeft > 0 ? `剩余 ${e2eeLeft}s` : "已过期") : "登录后可用";
+    return (
+      <div>
+        {bar}
+        <div className="dsm-cols">
+          {/* 栏 1：登录 */}
+          <section className="dsm-col">
+            <div className="dsm-h">
+              <span>登录</span>
+              <span className="dsm-h__meta">{value.enabled === false ? "已停用" : logged ? "已登录" : "未登录"}</span>
+            </div>
+            <div className="dsm-qr-card dsm-colcard">
+              {loginErr}
+              {loginRows}
+              {loginNote}
+              {loginButtons(true)}
+            </div>
+          </section>
+
+          {/* 栏 2：配对二维码（未登录也有：手机扫码授权本机登录） */}
+          <section className="dsm-col">
+            <div className="dsm-h">
+              <span>配对二维码</span>
+              <span className="dsm-h__meta">{value.mode === "grant" ? "授权本机登录" : "登录同一账号"} · {pairMeta}</span>
+            </div>
+            <div className="dsm-qr-card dsm-colcard">
+              <div className="dsm-tilewrap">
+                <span className="dsm-tile">
+                  <canvas ref={qr1Ref} />
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 12 }}>
+                <span className="dsm-code">{value.pairingCode || "------"}</span>
+                <button className="dsm-btn dsm-btn--ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+                  onClick={() => copy(String(value.pairingCode ?? ""), "code")} disabled={!value.pairingCode}>
+                  {copied === "code" ? "已复制" : "复制"}
+                </button>
+              </div>
+              <p className="dsm-note" style={{ marginTop: 10, textAlign: "center" }}>
+                {mode === "grant"
+                  ? "手机（已登录）扫码授权本机登录同一账号。"
+                  : "手机扫码即可登录同一账号，无需输入密码。"}
+              </p>
+              <button className="dsm-btn dsm-btn--ghost dsm-actions" style={{ width: "100%" }} onClick={genPairing}>
+                刷新二维码
+              </button>
+            </div>
+          </section>
+
+          {/* 栏 3：E2EE 二维码（本机登录后才可用） */}
+          <section className="dsm-col">
+            <div className="dsm-h">
+              <span>E2EE 二维码</span>
+              <span className="dsm-h__meta">{e2eeReady ? `端到端加密 · ${e2eeMeta}` : "登录后可用"}</span>
+            </div>
+            <div className="dsm-qr-card dsm-colcard">
+              {e2eeReady ? (
+                <>
+                  <div className="dsm-tilewrap">
+                    <span className="dsm-tile">
+                      <canvas ref={qr2Ref} />
+                    </span>
+                  </div>
+                  <p className="dsm-note" style={{ marginTop: 12, textAlign: "center" }}>
+                    手机登录后扫此码，把本机与手机做成端到端加密绑定。
+                  </p>
+                  <p className="dsm-note dsm-actions" style={{ textAlign: "center", color: T.muted, marginBottom: 0 }}>
+                    配对成功后，设备列表会出现钥匙图标。
+                  </p>
+                </>
+              ) : (
+                <p className="dsm-note" style={{ margin: "auto 0", textAlign: "center" }}>
+                  加密配对 · 本机登录后可用
+                </p>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+    );
+  }
+
+  // 窄窗口：竖排三块（状态 / 登录 / 二维码）
   return (
     <div>
-      {/* ---- ① 状态 ---- */}
       <div className="dsm-sec">
         <div className="dsm-h">
           <span>状态</span>
           <span className="dsm-h__meta">{value.bridgeVersion ? `bridge v${value.bridgeVersion}` : ""}</span>
         </div>
-        <div className="dsm-row">
-          <span className="dsm-k">桥</span>
-          <span className="dsm-v" style={{ display: "flex", alignItems: "center", gap: 7 }}>
-            <StatusDot kind={st.kind} />
-            {st.text}
-          </span>
+        {statusRows}
+        <div style={{ marginTop: 12 }}>
+          <a className="dsm-btn dsm-btn--ghost" style={{ textDecoration: "none", height: 26, padding: "0 10px", fontSize: 12 }} href="https://github.com/zdx8637-gitdog/dshmobile#readme" target="_blank" rel="noreferrer">帮助文档</a>
         </div>
-        <div className="dsm-row">
-          <span className="dsm-k">账号</span>
-          <span className="dsm-v">{value.username || "未登录"}</span>
-        </div>
-        {value.deviceLabel ? (
-          <div className="dsm-row">
-            <span className="dsm-k">设备</span>
-            <span className="dsm-v">{value.deviceLabel}</span>
-          </div>
-        ) : null}
-        {value.relayUrl ? (
-          <div className="dsm-row">
-            <span className="dsm-k">relay</span>
-            <span className="dsm-v dsm-v--mono">{value.relayUrl}</span>
-          </div>
-        ) : null}
       </div>
-
-      {/* ---- ② 登录 ---- */}
       <div className="dsm-sec">
         <div className="dsm-h">
           <span>登录</span>
           <span className="dsm-h__meta">{value.enabled === false ? "已停用" : ""}</span>
         </div>
-        {errText ? <div className="dsm-err"><span>!</span><span>{errText}</span></div> : null}
-        <div className="dsm-row">
-          <span className="dsm-k">relay 地址</span>
-          <input className="dsm-input" value={form?.relayUrl ?? ""} placeholder="https://www.deepseek-claudex.cn"
-            onChange={(e) => edit("relayUrl", e.target.value)} />
-        </div>
-        <div className="dsm-row">
-          <span className="dsm-k">账号</span>
-          <input className="dsm-input" value={form?.username ?? ""} placeholder="至少 3 位"
-            onChange={(e) => edit("username", e.target.value)} />
-        </div>
-        <div className="dsm-row">
-          <span className="dsm-k">密码</span>
-          <input className="dsm-input" type="password" value={form?.password ?? ""} placeholder={logged ? "留空表示不修改" : "至少 6 位"}
-            onChange={(e) => edit("password", e.target.value)} />
-        </div>
-        <div className="dsm-row">
-          <span className="dsm-k">设备名</span>
-          <input className="dsm-input" value={form?.deviceLabel ?? ""} placeholder="手机端显示的名称"
-            onChange={(e) => edit("deviceLabel", e.target.value)} />
-        </div>
-        <div style={{ display: "flex", gap: 10, marginTop: 12, alignItems: "center" }}>
-          <button className="dsm-btn dsm-btn--brand" onClick={save}>保存并连接</button>
-          <button className="dsm-btn dsm-btn--ghost" onClick={register}>注册新账号</button>
-        </div>
-        <p className="dsm-note" style={{ marginTop: 10 }}>
-          已有账号直接连接；没有账号点「注册新账号」自动创建（账号 ≥3 位、密码 ≥6 位）。
-        </p>
+        {loginBody}
       </div>
-
-      {/* ---- ③ 二维码 ---- */}
       <div className="dsm-sec">
         <div className="dsm-h">
           <span>二维码</span>
           <span className="dsm-h__meta">{value.mode === "grant" ? "未登录 · 授权码" : "已登录 · 登录码"}</span>
         </div>
-
-        {/* ① 登录 / 授权（未登录时也有：手机扫码授权本机登录） */}
-        <div className="dsm-qr-card">
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <span style={{ fontSize: 12.5, fontWeight: 600, color: T.dim }}>① 登录 · 授权</span>
-            <span className="dsm-pill">{cnt1}</span>
-          </div>
-          <div style={{ marginTop: 2 }}>
-            <span className="dsm-tile">
-              <canvas ref={qr1Ref} />
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
-            <span className="dsm-code">{value.pairingCode || "------"}</span>
-            <button className="dsm-btn dsm-btn--ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }}
-              onClick={() => copy(String(value.pairingCode ?? ""), "code")} disabled={!value.pairingCode}>
-              {copied === "code" ? "已复制" : "复制"}
-            </button>
-          </div>
-          <p className="dsm-note" style={{ marginTop: 8 }}>
-            {mode === "grant"
-              ? "手机（已登录）扫码授权本机登录同一账号。"
-              : "手机扫码即可登录同一账号，无需输入密码。"}
-          </p>
-          <button className="dsm-btn dsm-btn--ghost" style={{ marginTop: 10, width: "100%" }} onClick={genPairing}>
-            刷新二维码
-          </button>
-        </div>
-
-        {/* ② 加密配对：本机登录后才可用 */}
-        <div className="dsm-qr-card">
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <span style={{ fontSize: 12.5, fontWeight: 600, color: T.dim }}>② 加密配对</span>
-            {cnt2 ? <span className="dsm-pill">{cnt2}</span> : null}
-          </div>
-          {e2eeReady ? (
-            <>
-              <div style={{ marginTop: 2 }}>
-                <span className="dsm-tile">
-                  <canvas ref={qr2Ref} />
-                </span>
-              </div>
-              <p className="dsm-note" style={{ marginTop: 10, marginBottom: 0 }}>
-                手机登录后扫此码，把本机与手机做成端到端加密绑定，设备列表会出现钥匙图标。
-              </p>
-            </>
-          ) : (
-            <p className="dsm-note" style={{ margin: 0 }}>加密配对 · 本机登录后可用</p>
-          )}
-        </div>
-      </div>
-
-      {/* ---- 底部 ---- */}
-      <div className="dsm-foot">
-        <a className="dsm-btn dsm-btn--ghost" style={{ textDecoration: "none" }} href="https://github.com/zdx8637-gitdog/dshmobile#readme" target="_blank" rel="noreferrer">帮助文档</a>
-        {logged ? <button className="dsm-btn dsm-btn--danger" onClick={logout}>退出登录</button> : null}
+        {pairCard}
+        {e2eeCard}
       </div>
     </div>
   );
@@ -588,10 +752,25 @@ export function apply(ctx: any) {
   };
 }
 
+/** 宽窗口用横版三栏（920px 面板），窄窗口回退竖排；阈值 1040 = 面板 960 + 遮罩内边距 48 + 余量。 */
+const WIDE_MIN = 1000;
+function usePanelWide(): boolean {
+  const [wide, setWide] = React.useState(
+    () => typeof window !== "undefined" && window.innerWidth >= WIDE_MIN
+  );
+  React.useEffect(() => {
+    const on = () => setWide(window.innerWidth >= WIDE_MIN);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  return wide;
+}
+
 /** 侧栏动作：入口按钮；点开后在**屏幕中央弹出模态面板**（点遮罩空白处或 Esc 关闭）。 */
 function DshmobileSidebarAction(props: any) {
   const [open, setOpen] = React.useState(false);
-  const wide = Boolean(props.wide);
+  const wide = Boolean(props.wide);      // 侧栏是否展开（宽栏/窄轨）
+  const panelWide = usePanelWide();      // 面板用横版还是竖排
   const btnRef = React.useRef<HTMLButtonElement | null>(null);
   const overlayRef = React.useRef<HTMLDivElement | null>(null);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
@@ -675,10 +854,10 @@ function DshmobileSidebarAction(props: any) {
             role="dialog"
             aria-modal={anchored ? undefined : true}
             aria-label="DSH Mobile 远程桥接"
-            className={anchored ? "dsm-panel dsm-panel--anchored" : "dsm-panel"}
+            className={"dsm-panel" + (panelWide ? " dsm-panel--wide" : "") + (anchored ? " dsm-panel--anchored" : "")}
             style={anchored ? { left: anchored.left, top: anchored.top, maxHeight: anchored.maxH } : undefined}
           >
-            <DshmobileCard {...props} />
+            <DshmobileCard {...props} layout={panelWide ? "wide" : "stack"} onClose={() => setOpen(false)} />
           </div>
         </div>
       ) : null}
