@@ -60,7 +60,10 @@ v0.1.5 起 DSH 给本地 Web 服务加了浏览器会话鉴权（`dsh web` 打�
 自检脚本：`node scripts/smoke-dsh-v2.mjs`（仿新版 DSH 全链路）、
 `node scripts/probe-real-dsh.mjs`（对运行中真实 DSH 只读验证，需本机浏览器
 已登录过一次 Web 面板以生成签名密钥）、
-`node scripts/archive-session.mjs <sessionId>`（归档只读探针产生的临时会话）。
+`node scripts/archive-session.mjs --list | --newest-idle`（安全清理闲置会话；默认**拒绝**归档活跃会话）、
+`node scripts/unarchive-session.mjs <id>` 与 `node scripts/probe-session-archive.mjs <id>`
+（DSH 没有"取消归档"接口：归档集合在宿主内存里，改状态文件后需重启 DSH 才生效——细节与检查清单见
+[docs/dsh-session-archive.md](https://github.com/zdx8637-gitdog/dshmobile/blob/main/docs/dsh-session-archive.md)）。
 
 ## relay 说明
 

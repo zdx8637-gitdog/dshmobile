@@ -69,7 +69,11 @@ approval/question waterfalls). The plugin adapts automatically since 0.1.0-beta.
 Self-check scripts: `node scripts/smoke-dsh-v2.mjs` (full pipeline against a simulated new DSH),
 `node scripts/probe-real-dsh.mjs` (read-only verification against a running real DSH; requires
 having logged into the web panel once in this browser to generate the signing secret),
-`node scripts/archive-session.mjs <sessionId>` (archive temp sessions created by the probes).
+`node scripts/archive-session.mjs --list | --newest-idle` (safely clean idle sessions; refuses to
+archive live ones by default), `node scripts/unarchive-session.mjs <id>` and
+`node scripts/probe-session-archive.mjs <id>` (DSH has **no** unarchive API: the archive set lives
+in the host's memory, so editing the state file only takes effect after a DSH restart — see
+[docs/dsh-session-archive.md](https://github.com/zdx8637-gitdog/dshmobile/blob/main/docs/dsh-session-archive.md)).
 
 ## relay
 
