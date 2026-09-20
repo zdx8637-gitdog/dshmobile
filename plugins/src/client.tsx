@@ -161,9 +161,15 @@ const CSS = `
 .dsm-entry--rail { width:36px; height:36px; padding:0; margin:0; justify-content:center; position:relative; }
 .dsm-entry__badge { position:absolute; right:4px; bottom:4px; width:8px; height:8px; border-radius:50%;
   box-shadow:0 0 0 1.5px ${T.bgBase}; }
-.dsm-panel { position:fixed; z-index:9999; width:${T.panelW}px; box-sizing:border-box; padding:0 ${T.pad}px;
+/* 弹窗遮罩：点空白处关闭。铺满视口（若被祖先的 transform 建了包含块，运行时自检后退回锚定模式）。 */
+.dsm-overlay { position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.45);
+  display:flex; align-items:center; justify-content:center; padding:24px; }
+.dsm-overlay--anchored { background:transparent; padding:0; display:block; }
+.dsm-panel { position:relative; box-sizing:border-box; width:${T.panelW}px; max-width:100%; max-height:100%;
+  overflow-y:auto; overscroll-behavior:contain; outline:none; padding:0 ${T.pad}px;
   background:${T.bg1}; border:1px solid ${T.line2}; border-radius:${T.rLg}px; color:${T.text};
-  box-shadow:0 12px 32px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35); overflow-y:auto; }
+  box-shadow:0 24px 64px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35); }
+.dsm-panel--anchored { position:fixed; max-width:none; }
 .dsm-sec { padding:16px 0; }
 .dsm-sec + .dsm-sec { border-top:1px solid ${T.line1}; }
 .dsm-h { display:flex; align-items:center; justify-content:space-between; font-size:12.5px; font-weight:600;
@@ -582,43 +588,55 @@ export function apply(ctx: any) {
   };
 }
 
-/** 侧栏动作：入口按钮（宽栏 = 图标+名称+状态点+箭头；窄轨 = 36×36 图标 + 角标状态点） */
+/** 侧栏动作：入口按钮；点开后在**屏幕中央弹出模态面板**（点遮罩空白处或 Esc 关闭）。 */
 function DshmobileSidebarAction(props: any) {
   const [open, setOpen] = React.useState(false);
   const wide = Boolean(props.wide);
   const btnRef = React.useRef<HTMLButtonElement | null>(null);
-  const [pos, setPos] = React.useState<{ left: number; top: number; maxH: number } | null>(null);
+  const overlayRef = React.useRef<HTMLDivElement | null>(null);
+  const panelRef = React.useRef<HTMLDivElement | null>(null);
+  // 兜底定位：仅当遮罩被祖先的包含块（transform 等）裁掉时才启用
+  const [anchored, setAnchored] = React.useState<{ left: number; top: number; maxH: number } | null>(null);
   const snap: CardSnapshot | null = props.useDshmobileCard?.((s: CardSnapshot) => s);
   const st = bridgeState(snap ?? null);
-  const title = `${open ? "收起" : "打开"} DSH Mobile 远程桥接${wide ? ` · ${st.text}` : ` · ${st.text}`}`;
+  const title = `${open ? "关闭" : "打开"} DSH Mobile 远程桥接 · ${st.text}`;
   ensureStyle();
 
-  const place = React.useCallback(() => {
-    const r = btnRef.current?.getBoundingClientRect();
-    if (!r) return;
-    const panelW = T.panelW;
-    const maxH = Math.max(240, window.innerHeight - 32);
-    const height = Math.min(maxH, btnRef.current ? 640 : maxH);
-    let left = r.right + 12;
-    if (!wide) left = r.right + 12;
-    if (left + panelW > window.innerWidth - 8) left = Math.max(8, window.innerWidth - panelW - 8);
-    let top = r.top - 8;
-    top = Math.min(top, window.innerHeight - Math.min(height, maxH) - 16);
-    top = Math.max(8, top);
-    setPos({ left, top, maxH });
-  }, [wide]);
-
+  // Esc 关闭 + 焦点处理
   React.useEffect(() => {
     if (!open) return;
-    place();
-    const on = () => place();
-    window.addEventListener("resize", on);
-    window.addEventListener("scroll", on, true);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", onKey);
+    const prev = document.activeElement as HTMLElement | null;
+    panelRef.current?.focus();
     return () => {
-      window.removeEventListener("resize", on);
-      window.removeEventListener("scroll", on, true);
+      window.removeEventListener("keydown", onKey);
+      try { prev?.focus?.(); } catch { /* 忽略 */ }
     };
-  }, [open, place]);
+  }, [open]);
+
+  // 自检：遮罩必须铺满视口。若祖先建了包含块 → 退回锚定定位（宁可贴边也不被裁）
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    const check = () => {
+      const el = overlayRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const clipped = Math.abs(r.left) > 1 || Math.abs(r.top) > 1 ||
+        Math.abs(r.width - window.innerWidth) > 2 || Math.abs(r.height - window.innerHeight) > 2;
+      if (!clipped) { setAnchored(null); return; }
+      console.warn("[dshmobile] 弹窗遮罩被祖先裁剪（含 transform 的包含块），已退回锚定定位");
+      const b = btnRef.current?.getBoundingClientRect();
+      const vh = window.innerHeight;
+      const maxH = Math.max(200, vh - 32);
+      const left = Math.min(Math.max(8, b ? b.right + 12 : 8), Math.max(8, window.innerWidth - T.panelW - 8));
+      const top = Math.max(8, Math.min(b ? b.top - 8 : 8, vh - 200));
+      setAnchored({ left, top, maxH });
+    };
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, [open]);
 
   return (
     <div style={{ position: "relative" }}>
@@ -646,8 +664,22 @@ function DshmobileSidebarAction(props: any) {
         )}
       </button>
       {open ? (
-        <div className="dsm-panel" style={{ left: pos?.left ?? -9999, top: pos?.top ?? 8, maxHeight: pos?.maxH ?? "78vh" }}>
-          <DshmobileCard {...props} />
+        <div
+          ref={overlayRef}
+          className={anchored ? "dsm-overlay dsm-overlay--anchored" : "dsm-overlay"}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setOpen(false); }}
+        >
+          <div
+            ref={panelRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal={anchored ? undefined : true}
+            aria-label="DSH Mobile 远程桥接"
+            className={anchored ? "dsm-panel dsm-panel--anchored" : "dsm-panel"}
+            style={anchored ? { left: anchored.left, top: anchored.top, maxHeight: anchored.maxH } : undefined}
+          >
+            <DshmobileCard {...props} />
+          </div>
         </div>
       ) : null}
     </div>

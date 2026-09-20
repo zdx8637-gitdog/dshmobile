@@ -59,9 +59,11 @@ for (const k of [...]) if (payload && payload[k] !== undefined) state[k] = paylo
 ## 2. 本次实现（`plugins/src/client.tsx`）
 
 - **入口按钮**：鲸鱼瓦片（内联 SVG，path 由 `pw-check/inject-whale-path.mjs` 从 App 图标注入，避免手抄 6 KB 出错）+ 名称 + 状态点 + 箭头；窄轨 36×36 + 角标状态点；hover/focus/展开态按规格（样式在注入的 `<style>` 里，因为内联 style 表达不了 `:hover`）。
-- **面板**：`状态 / 登录 / 二维码` 三块 + 1px 分隔线、界面无编号；行网格 52px + gap 10；面板 360、内边距 0 16、圆角 12；错误条、底部「帮助文档 ・ 退出登录」；面板相对入口按钮定位并做视口内收敛。
+- **弹窗（2026-09-20 第二轮，用户反馈"面板太长、下面被挡住"后改）**：从"贴着按钮的下拉"改成**屏幕居中模态** —— 点入口按钮弹出、点遮罩空白处或按 `Esc` 关闭、内容超高时**面板内部滚动**（`overscroll-behavior: contain`），面板 `max-height` 由遮罩内边距决定，**任何视口高度都不会被裁**。
+  - 同时修掉原实现的定位 bug：旧代码按固定 `height = 640` 估算并据此夹 `top`，900px 视口 + 868px 内容必然溢出被切；新实现不再做高度估算。
+  - **祖先裁剪兜底**：DSH 侧栏祖先可能带 `transform`（会让 `position: fixed` 的包含块变成该祖先、遮罩被裁）。打开时自检遮罩是否铺满视口，不满足则退回锚定定位并 `console.warn` 提示。harness 里不会触发（无 transform 祖先），真 GUI 若触发可在控制台看到该警告。
+- **面板**：`状态 / 登录 / 二维码` 三块 + 1px 分隔线、界面无编号；行网格 52px + gap 10；面板 360、内边距 0 16、圆角 12；错误条、底部「帮助文档 ・ 退出登录」；去掉旧 debug 行。
 - **状态**：未连接也保留 ① 授权码（`mode=grant`），② 登录后才可用（占位一行）；状态点映射 ok/warn/off/err。
-- **删除**：旧的 `debug: channel=... status=...` 调试行（界面上不该出现）。
 
 ## 3. 验收证据（可复现）
 
@@ -74,9 +76,12 @@ node scripts/smoke-host-token.mjs ; node scripts/smoke-e2ee-restart.mjs      # 4
 # 2) 面板渲染验收（真源码 + 真 React + 真浏览器 + jsQR 真解码）
 cd D:\p\pw-check\panel-harness
 node bundle.mjs            # 把 src/client.tsx 打进 harness
-node run-panel-tests.mjs   # 结构/对齐/密码语义/二维码几何+解码/状态映射/主题/入口按钮
-#   截图：..\panel-B-connected-dark.png / panel-A-disconnected-dark.png / panel-B-light.png
-#         ..\entry-wide-dark.png / entry-rail-dark.png / qr-e2ee-zoom3x.png
+node run-panel-tests.mjs   # 结构/对齐/密码语义/二维码几何+解码/状态映射/主题/入口按钮 + 弹窗交互
+#   弹窗部分：5 种分辨率（1440×1000 / 1280×900 / 1280×720 / 1024×600 / 900×520）逐一断言
+#     遮罩铺满视口且四角命中遮罩、面板完整可见（top/bottom 都在视口内）、水平+垂直居中、
+#     内容超高时内部滚动、滚到底后底部按钮可见；另有 点遮罩关闭 / Esc 关闭 / 面板内按下外边松开不误关
+#   截图：..\modal-<w>x<h>.png（暗色主题）；像素采样复核 ..\sample-shot-pixels.mjs
+#         四角 rgb(12,12,13)=遮罩已压暗、面板中心 rgb(35,35,36)=暗色令牌
 
 # 3) 构建产物校验（转义还原后查文案 + 不变量 + 旧痕迹已移除）
 cd D:\p\pw-check ; node check-client-bundle.mjs
