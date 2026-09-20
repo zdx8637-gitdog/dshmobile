@@ -124,9 +124,9 @@ ALL PASS
 
 | # | 事项 | 现状 | 动作 |
 |---|---|---|---|
-| a | relay `GET /auth/registration-status`（注册名额硬上限 `MAX_USERS`） | **代码已改（本工作区 `dshmobile-private/relay/src`：`config.maxUsers`、`routes/auth.ts` 路由、`RegistrationClosedError`、`auth-service.register()` 双校验），未部署**；页面 404 时降级显示"名额有限"，不阻断 | 需重建 + 重启 relay 服务（**生产动作，先经用户确认**） |
+| a | relay `GET /auth/registration-status`（注册名额上限 `MAX_USERS`） | ✅ **已部署（2026-09-20 12:50）**：dist 差异 5 文件上传（备份 `dist.bak-regstatus-20260920-125040`）→ 重启服务 → 线上 `{"ok":true,"data":{"open":true,"limit":53,"remaining":20}}`，页面显示"剩余 20 / 53" | 已完成。**`MAX_USERS` 是账号总上限**：本次按"现有 33 + 新增 20 = 53"写入 `.env`；以后加名额改这个值再重启 |
 | b | 页面"电脑端安装"命令用 `@zdx8637/dshmobile-bridge@latest` | ✅ **已解决（2026-09-20）**：`0.1.0-beta.22` 已发布，`latest`=`beta`=`0.1.0-beta.22`；已下载 tarball 校验 `bridge/adapter.js` 含 `stripReasoning`/`toolSummary`/`toolResult.full`、`bridge/relay.js` 含 `transfer.deliver` 白名单 | — |
 | c | 旧工程 `D:\p\dshmobile-landing\` | `site/` 已在 2026-09-20 **镜像为权威内容**；其 `icon/` 仍由该工程（另一智能体）产出，我们只读取合并 | `deploy-dshmobile.py` 仍禁止执行；改完落地页记得重新镜像（§3） |
 | e | 品牌资源（icon / logo） | **v4-traced 代已于 2026-09-20 部署到网站**（另一智能体出素材 + `DEPLOY-LIST.md`；我方用 `D:\p\pw-check\apply-web-icons.mjs` 落盘）：A-1 覆盖 `favicon.ico`/`dsh-mobile-app.svg`(白底版)/`app-180.png`，A-2 新增 `favicon-16/32.png`+`icon-192/512.png`+`dsh-mobile-mark.svg` 并补两行 `<head>`，A-3 导航 logo 换成白底版内联 SVG。素材 6 件 sha256 与 `manifest.json` 逐一校验一致 | 网站已上线；**App 图标已进工程并构建验证，但要让用户看到需发布新 APK（见 f）** |
-| f | App 启动图标（原本完全没有 `android:icon`） | 已落盘到 `D:\p\dsh-mobile\app\src\main\res\`：5 档 `mipmap-*/ic_launcher{,_foreground}.png` + `mipmap-anydpi-v26/ic_launcher.xml` + `values/colors.xml(ic_launcher_background=#FFFFFF)` + manifest `android:icon="@mipmap/ic_launcher"`。构建后 `aapt2 dump badging` 显示 `icon='res/BW.xml'`（全密度自适应）；模拟器桌面/应用详情页肉眼确认圆鲸图标、App 启动无崩溃 | ⬜ **需发新 APK 才能触达用户**（版本号未动，仍 0.2.16/27） |
+| f | App 启动图标（原本完全没有 `android:icon`） | ✅ **已随 APK 0.2.17 发布（2026-09-20 12:5x）**：图标资源 + `mipmap-anydpi-v26/ic_launcher.xml` + manifest `android:icon` 已进工程；`versionCode 28 / versionName 0.2.17`，`latest.json` 指向 `DSH-Mobile-0.2.17.apk`（sha256 前 32 `1e59fcbbb8598a88be90325e62a08c78`），页面 22 项验收全绿 | 已完成；App 工程不在 git（用户自管），改动只在本机 `D:\p\dsh-mobile` |
 | d | 静态兜底文案 | `index.html` 里 `<span data-ver>v0.2.x</span>` 为静态兜底，运行时由 JS 覆盖 | 无需处理（无 JS 环境才可见） |
