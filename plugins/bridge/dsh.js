@@ -1,8 +1,8 @@
-// DSH 本地 API 客户端（双协议）：
-//   v2（DSH v0.1.5+）：launch token → 会话 Cookie（HMAC、30 天）→ POST /api/<ns/method> {args} 载荷；
-//           流走单一 WS /api/remote.mux（open/item/end/error/cancel 复用）。
-//           流走 /api/events.mux + /api/events.host，审批/提问走 /api/respond。
-//   协议在首次调用时自动探测（v2 探针 401=新版鉴权；双探针都要求 ok:true 防误判）。
+// DSH 本地 API 客户端（**只支持 v2 / DSH v0.1.5+**；旧版 DSH 的 legacy 协议已于 0.1.0-beta.23 整体删除）：
+//   v2：launch token → 会话 Cookie（HMAC、30 天）→ POST /api/<ns/method> {args} 载荷；
+//       流走单一 WS /api/remote.mux（open/item/end/error/cancel 复用）；
+//       审批/提问走 $events 瀑布 + $events/result（不再有 events.mux / events.host / respond）。
+//   协议在首次调用时自动探测（v2 探针 401=新版鉴权，探针要求 ok:true 防误判）；探测失败即 fail-fast 并提示升级 DSH。
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
