@@ -1,7 +1,6 @@
 // DSH 本地 API 客户端（双协议）：
 //   v2（DSH v0.1.5+）：launch token → 会话 Cookie（HMAC、30 天）→ POST /api/<ns/method> {args} 载荷；
 //           流走单一 WS /api/remote.mux（open/item/end/error/cancel 复用）。
-//   legacy（老版 DSH）：无鉴权直连，POST /api/<method>（点号端点、裸 payload）；
 //           流走 /api/events.mux + /api/events.host，审批/提问走 /api/respond。
 //   协议在首次调用时自动探测（v2 探针 401=新版鉴权；双探针都要求 ok:true 防误判）。
 import { randomUUID } from "node:crypto";
@@ -15,7 +14,7 @@ export class DshClient {
     this.stateDir = stateDir ?? null;
     this.cookie = this.#loadCookie(); // { name, value, expiresAt }
     this.mux = null;
-    this.protocol = null; // "v2" | "legacy"（ensureProtocol() 探测后确定）
+    this.protocol = null; // 固定 "v2"（旧版 DSH 支持已移除）
   }
 
   /** 探测并确定协议代际；DSH 未就绪/双探针失败时抛错（调用方退避重试）。 */
@@ -35,11 +34,10 @@ export class DshClient {
       this.protocol = "v2";
       return "v2";
     }
-    if (await this.#legacyProbe()) {
-      this.protocol = "legacy";
-      return "legacy";
-    }
-    throw new Error("dsh protocol probe failed (dsh web not reachable?)");
+    // 只支持 v2（新 DSH）。失败通常是：DSH 没在跑，或装的是已不再支持的旧版 DSH（≤0.1.5-rc.6）。
+    throw new Error(
+      "v2 协议握手失败：请确认 DSH 正在运行（dsh web）；本插件版本已不再支持旧版 DSH（≤0.1.5-rc.6），如为旧版请先升级 DSH",
+    );
   }
 
   /** v2 探针：POST /api/session/list。401→"auth-required"；ok:true 且 items 为数组→"v2"；否则 null。 */
@@ -63,22 +61,6 @@ export class DshClient {
     }
   }
 
-  /** legacy 探针：POST /api/session.list（点号端点）。要求 ok:true（新 DSH 会对该端点回 ok:false 错误信封）。 */
-  async #legacyProbe() {
-    try {
-      const rpcId = randomUUID();
-      const res = await fetch(`${this.baseUrl}/api/session.list`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "client-request", rpcId, method: "session.list", payload: {} }),
-        signal: AbortSignal.timeout(5000),
-      });
-      const body = await res.json().catch(() => null);
-      return body?.type === "server-response" && body.rpcId === rpcId && body.result?.ok === true;
-    } catch {
-      return false;
-    }
-  }
 
   setToken(token) {
     if (token && token !== this.token) {
@@ -174,10 +156,9 @@ export class DshClient {
     return res;
   }
 
-  /** unary：首次调用自动探测协议；v2 走 {args} 载荷，legacy 走裸 payload。 */
+  /** unary：首次调用自动完成 v2 协议探测；载荷为 {args}。 */
   async unary(endpoint, args = {}, opts = {}) {
     await this.ensureProtocol();
-    if (this.protocol === "legacy") return this.#legacyUnary(endpoint, args, opts);
     return this.#v2Unary(endpoint, args, opts);
   }
 
@@ -197,57 +178,8 @@ export class DshClient {
     return body.result;
   }
 
-  /** legacy unary：POST /api/<method>（点号端点），payload 原样发送。 */
-  async #legacyUnary(method, payload = {}, { timeoutMs = 30000 } = {}) {
-    const rpcId = randomUUID();
-    const res = await fetch(`${this.baseUrl}/api/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "client-request", rpcId, method, payload }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (body?.type !== "server-response" || body.rpcId !== rpcId) {
-      return { ok: false, error: { code: "protocol-error", message: `unexpected response for ${method}: HTTP ${res.status}` } };
-    }
-    return body.result;
-  }
 
-  /** legacy 应答审批/提问：POST /api/respond。cancel=true 时发 ok:false + cancelled（旧 DSH 跳过语义）。 */
-  async respond(rpcId, value, { timeoutMs = 30000, cancel = false } = {}) {
-    const result = cancel
-      ? { ok: false, error: { code: "cancelled", message: "user cancelled", details: {} } }
-      : { ok: true, value };
-    const res = await fetch(`${this.baseUrl}/api/respond`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "client-response", rpcId, result }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) return { ok: false, error: { code: "transport", message: `respond HTTP ${res.status}` } };
-    const body = await res.json().catch(() => ({}));
-    if (body?.accepted === false) {
-      return { ok: false, error: { code: "respond-rejected", message: `DSH rejected respond: ${body.reason ?? "unknown"}` } };
-    }
-    return { ok: true };
-  }
 
-  /** legacy 下行 WS 流；onFrame 收到 {rpcId, method, payload}；onState 收到 open/close/error。 */
-  openStream(path, onFrame, onState) {
-    const ws = new WebSocket(`${this.baseUrl.replace(/^http/, "ws")}${path}`);
-    ws.onopen = () => onState?.("open");
-    ws.onclose = () => onState?.("close");
-    ws.onerror = () => onState?.("error");
-    ws.onmessage = (ev) => {
-      try {
-        const f = JSON.parse(ev.data);
-        if (f?.type === "server-request") onFrame?.(f);
-      } catch {
-        /* 跳过坏帧 */
-      }
-    };
-    return ws;
-  }
 
   /**
    * 打开（或换新）一条到 /api/remote.mux 的物理连接（v2）。

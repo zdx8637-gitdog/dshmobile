@@ -140,31 +140,6 @@ function compactHistoryEvents(events, opts = {}) {
   return kept;
 }
 
-/** legacy（老版 DSH）history 投影：条目形如 {seq, event:{type,data}}。 */
-function compactLegacyHistoryEvents(entries, opts = {}) {
-  const { sessionId, remember } = opts;
-  const kept = [];
-  for (const entry of entries) {
-    const t = entry?.event?.type;
-    if (t === "assistant/chunk" || t === "step/start" || t === "step/end") continue;
-    if (t === "tool/result") {
-      const { message, summary } = compactToolResult(
-        entry.event.data?.message,
-        { sessionId, seq: entry?.seq ?? entry?.event?.seq, callId: entry.event.data?.message?.source?.callId },
-        remember,
-      );
-      if (!summary) {
-        kept.push(entry);
-      } else {
-        kept.push({ seq: entry.seq, event: { ...entry.event, data: { ...entry.event.data, message, toolSummary: summary } } });
-      }
-      continue;
-    }
-    const stripped = stripReasoning(entry?.event);
-    kept.push(stripped === entry?.event ? entry : { seq: entry.seq, event: stripped });
-  }
-  return kept;
-}
 
 /**
  * 在 workspaceRoot 内解析相对路径：拒绝绝对路径、`..` 穿越、空字节，
@@ -223,10 +198,6 @@ export class Adapter {
     this.toolFullCacheBytes = 0;
   }
 
-  /** 是否老版 DSH（legacy 协议：点号端点 + events.mux/host + respond）。 */
-  isLegacy() {
-    return this.dsh?.protocol === "legacy";
-  }
 
   /**
    * 挂载 /api/remote.mux：重开全部常驻流（$events、session/control、workspace/follow）
@@ -730,7 +701,6 @@ export class Adapter {
    */
   /** 单次 session/prompt（queue 模式），带会话释放后的原位重建重试。 */
   async #promptOnce(sessionId, content) {
-    if (this.isLegacy()) return this.#legacyPromptOnce(sessionId, content);
     const req = () => ({
       request: { requestId: randomUUID(), sessionId, mode: "queue", content },
     });
@@ -917,7 +887,6 @@ export class Adapter {
   async #read(type, payload, requestId) {
     switch (type) {
       case "sessions.list": {
-        if (this.isLegacy()) return this.#legacySessionsList(type, requestId);
         // 归档集合来自 workspace/follow 基线（新版无 workspace/list unary）
         const ws = await this.ensureWorkspaceBaseline();
         if (ws?.archivedSessionIds) this.archivedSessionIds = ws.archivedSessionIds;
@@ -956,7 +925,6 @@ export class Adapter {
         });
       }
       case "sessions.history": {
-        if (this.isLegacy()) return this.#legacyHistory(type, payload, requestId);
         const { sessionId, beforeSeq, maxMessages } = payload;
         if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
         // 默认只取最近 20 条消息；上限 100 防止大会话打爆中继
@@ -1033,7 +1001,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: {} });
       }
       case "session.models": {
-        if (this.isLegacy()) return this.#legacyModels(type, payload, requestId);
         const { sessionId } = payload;
         if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
         const r = await this.dsh.unary("session/modelCatalog", {}, { timeoutMs: 30000 });
@@ -1051,7 +1018,6 @@ export class Adapter {
         });
       }
       case "commands.list": {
-        if (this.isLegacy()) return this.#legacyCommandsList(type, payload, requestId);
         const { sessionId } = payload;
         if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
         const r = await this.dsh.unary("commands/list", { agentId: sessionId }, { timeoutMs: 30000 });
@@ -1059,7 +1025,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: { commands: r.value } });
       }
       case "workspace.list": {
-        if (this.isLegacy()) return this.#legacyWorkspaceList(type, requestId);
         // 工作区列表：新建会话时选目录用（手机端目录选择，无需推送目录）
         const ws = await this.ensureWorkspaceBaseline();
         if (!ws) return this.relay.respond(requestId, type, { ok: false, error: { code: "unavailable", message: "workspace baseline not ready yet" } });
@@ -1129,7 +1094,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: { accepted: true } });
       }
       case "sessions.create": {
-        if (this.isLegacy()) return this.#legacyCreate(type, payload, requestId);
         // workspaceId（优先）或 cwd。cwd 路径先尝试注册/解析工作区：
         // web 端只按工作区分组（workspace.sessionIds），cwd-only 会话必然落「未分组」——
         // workspace.create 对已存在目录幂等（不 mkdir），成功后用 workspaceId 建会话即可
@@ -1192,7 +1156,6 @@ export class Adapter {
         }
       }
       case "sessions.run": {
-        if (this.isLegacy()) return this.#legacyRun(type, payload, requestId);
         const { sessionId, content } = payload ?? {};
         if (typeof sessionId !== "string" || !Array.isArray(content) || content.length === 0) {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and content are required" } });
@@ -1217,7 +1180,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "sessions.rename": {
-        if (this.isLegacy()) return this.#legacyRename(type, payload, requestId);
         const { sessionId, title } = payload ?? {};
         if (typeof sessionId !== "string" || typeof title !== "string" || title.trim() === "") {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and non-blank title are required" } });
@@ -1227,7 +1189,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "sessions.fork": {
-        if (this.isLegacy()) return this.#legacyFork(type, payload, requestId);
         const { sessionId } = payload ?? {};
         if (typeof sessionId !== "string") {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
@@ -1238,7 +1199,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "sessions.archive": {
-        if (this.isLegacy()) return this.#legacyArchive(type, payload, requestId);
         const { sessionId } = payload ?? {};
         if (typeof sessionId !== "string") {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
@@ -1249,7 +1209,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "sessions.updateQueue": {
-        if (this.isLegacy()) return this.#legacyUpdateQueue(type, payload, requestId);
         // 排队消息管理（web 端语义）：edit 改文本 / remove 删除 / steer 提升为插话（仅运行中、仅 next-turn 项）
         const { sessionId, itemId, action } = payload ?? {};
         if (typeof sessionId !== "string" || typeof itemId !== "string" || typeof action !== "object" || action === null) {
@@ -1266,14 +1225,12 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "sessions.interrupt": {
-        if (this.isLegacy()) return this.#legacyInterrupt(type, payload, requestId);
         const { sessionId } = payload ?? {};
         const r = await this.dsh.unary("session/cancel", { request: { sessionId } }, { timeoutMs: 30000 });
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "sessions.steer": {
-        if (this.isLegacy()) return this.#legacySteer(type, payload, requestId);
         // 中途介入：对运行中的会话插入引导消息（mode=steer）
         const { sessionId, content } = payload ?? {};
         if (!Array.isArray(content) || content.length === 0) {
@@ -1291,7 +1248,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "session.selectModel": {
-        if (this.isLegacy()) return this.#legacySelectModel(type, payload, requestId);
         const { sessionId, provider, model, reasoningEffort } = payload ?? {};
         if (typeof sessionId !== "string" || typeof provider !== "string" || typeof model !== "string") {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId/provider/model are required" } });
@@ -1306,7 +1262,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "commands.execute": {
-        if (this.isLegacy()) return this.#legacyCommandsExecute(type, payload, requestId);
         // DSH 斜杠命令（/plan、/permission 等）走 commands/execute 通道
         const { sessionId, line } = payload ?? {};
         if (typeof sessionId !== "string" || typeof line !== "string" || !line.startsWith("/")) {
@@ -1317,7 +1272,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: r.value });
       }
       case "approvals.respond": {
-        if (this.isLegacy()) return this.#legacyApprove(type, payload, requestId);
         const { approvalId, outcome, rpcId, sessionId } = payload ?? {};
         if (!rpcId) return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "rpcId (waterfall eventId) is required" } });
         // 新版审批：$events/result 上报瀑布监听器返回值（'allowed-once' | 'rejected'）
@@ -1328,7 +1282,6 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: { accepted: true } });
       }
       case "questions.respond": {
-        if (this.isLegacy()) return this.#legacyAnswerQuestion(type, payload, requestId);
         const { sessionId, answer, rpcId, cancel } = payload ?? {};
         if (!rpcId) return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "rpcId (waterfall eventId) is required" } });
         // cancel=true：跳过整个提问批次（全部问题回空选中，等价旧语义 ok:false + cancelled）
@@ -1369,335 +1322,25 @@ export class Adapter {
     this.waterfallStash.delete(rpcId);
   }
 
-  // ==================== legacy（老版 DSH）协议路径 ====================
   // 端点用点号名、payload 裸传；事件走 events.mux/host；审批/提问走 /api/respond。
-  // 实现与 beta.16 一致（从 git 历史恢复），仅由 isLegacy() 分支调用。
 
-  /** legacy 单次 session.prompt（queue 模式），带会话释放后的原位重建重试。 */
-  async #legacyPromptOnce(sessionId, content) {
-    let r = await this.dsh.unary(
-      "session.prompt",
-      { sessionId, mode: "queue", content },
-      { timeoutMs: 30000 },
-    );
-    if (!r.ok && r.error?.code === "session-not-found") {
-      const cwd = this.sessionCwd.get(sessionId);
-      const re = await this.dsh.unary(
-        "session.create",
-        { sessionId, ...(cwd ? { cwd } : {}) },
-        { timeoutMs: 30000 },
-      );
-      if (re.ok) {
-        r = await this.dsh.unary(
-          "session.prompt",
-          { sessionId, mode: "queue", content },
-          { timeoutMs: 30000 },
-        );
-      }
-    }
-    return r;
-  }
 
-  async #legacySessionsList(type, requestId) {
-    const [r, w] = await Promise.all([
-      this.dsh.unary("session.list", {}),
-      this.dsh.unary("workspace.list", {}).catch(() => ({ ok: false })),
-    ]);
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    if (w.ok && Array.isArray(w.value?.archivedSessionIds)) this.archivedSessionIds = w.value.archivedSessionIds;
-    for (const s of r.value.items ?? []) {
-      if (typeof s.sessionId === "string" && typeof s.cwd === "string") this.sessionCwd.set(s.sessionId, s.cwd);
-    }
-    return this.relay.respond(requestId, type, {
-      ok: true,
-      data: {
-        sessions: r.value.items,
-        archivedSessionIds: [...this.archivedSessionIds],
-        completedSessionIds: [...this.completedSessions],
-        pendingSessionIds: [...this.pendingRequests.keys()],
-      },
-    });
-  }
 
-  async #legacyHistory(type, payload, requestId) {
-    const { sessionId, beforeSeq, maxMessages } = payload;
-    if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
-    const capped = Math.min(Math.max(1, Number.isInteger(maxMessages) ? maxMessages : 10), 100);
-    const r = await this.dsh.unary("session.history", {
-      sessionId,
-      ...(Number.isInteger(beforeSeq) ? { beforeSeq } : {}),
-      maxMessages: capped,
-    }, { timeoutMs: 60000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    const compacted = compactLegacyHistoryEvents(r.value.events ?? [], {
-      sessionId,
-      remember: (info) => this.#rememberToolFull(info),
-    });
-    const wire = compacted.map((entry) => {
-      const event = entry?.event ?? entry;
-      return { ...entry, event, seq: event?.seq ?? entry?.seq };
-    });
-    const data = { events: wire, hasMore: r.value.hasMore };
-    if (r.value.projections) data.projections = r.value.projections;
-    return this.relay.respond(requestId, type, { ok: true, data });
-  }
 
-  async #legacyModels(type, payload, requestId) {
-    const { sessionId } = payload;
-    if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
-    const r = await this.dsh.unary("session.models", { sessionId }, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyCommandsList(type, payload, requestId) {
-    const { sessionId } = payload;
-    if (typeof sessionId !== "string") return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
-    const r = await this.dsh.unary("commands/list", { args: { agentId: sessionId } }, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: { commands: r.value } });
-  }
 
-  async #legacyWorkspaceList(type, requestId) {
-    const r = await this.dsh.unary("workspace.list", {}, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyCreate(type, payload, requestId) {
-    const requestedCwd = typeof payload?.cwd === "string" ? payload.cwd : undefined;
-    const requestedWs = typeof payload?.workspaceId === "string" ? payload.workspaceId : undefined;
-    let createPayload;
-    let createdWorkspaceForCwd;
-    if (requestedWs) {
-      createPayload = { workspaceId: requestedWs };
-    } else if (requestedCwd) {
-      const isDriveRoot = /^[A-Za-z]:[\\/]$/.test(requestedCwd);
-      if (isDriveRoot) {
-        createPayload = { cwd: requestedCwd };
-      } else {
-        const w = await this.dsh.unary("workspace.create", { path: requestedCwd }, { timeoutMs: 30000 });
-        if (w.ok) {
-          createPayload = { workspaceId: w.value.workspace.workspaceId };
-          if (w.value.created) createdWorkspaceForCwd = w.value.workspace.workspaceId;
-          console.log("[adapter] sessions.create: cwd mapped to workspace", w.value.workspace.workspaceId, "(created:", w.value.created + ")", "for", requestedCwd);
-        } else {
-          console.warn("[adapter] sessions.create: workspace.create failed, falling back to cwd:", w.error?.message);
-          createPayload = { cwd: requestedCwd };
-        }
-      }
-    } else {
-      createPayload = {};
-    }
-    const r = await this.dsh.unary("session.create", createPayload);
-    if (!r.ok) {
-      if (createdWorkspaceForCwd) {
-        const d = await this.dsh.unary("workspace.delete", { workspaceId: createdWorkspaceForCwd }, { timeoutMs: 30000 }).catch(() => ({ ok: false }));
-        console.log("[adapter] sessions.create: rolled back workspace", createdWorkspaceForCwd, "after session.create failure:", d.ok ? "ok" : (d.error?.message ?? "unreachable"));
-      }
-      return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    }
-    console.log("[adapter] created session:", r.value?.sessionId, "payload:", JSON.stringify(createPayload));
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyRun(type, payload, requestId) {
-    const { sessionId, content } = payload ?? {};
-    if (typeof sessionId !== "string" || !Array.isArray(content) || content.length === 0) {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and content are required" } });
-    }
-    const isSlash = content.length === 1 && content[0]?.type === "text" && typeof content[0].text === "string" && content[0].text.trim().startsWith("/");
-    const run = () => isSlash
-      ? this.dsh.unary("commands/execute", { args: { agentId: sessionId, line: content[0].text.trim(), images: [] } }, { timeoutMs: 30000 })
-      : this.dsh.unary("session.prompt", { sessionId, mode: "queue", content }, { timeoutMs: 30000 });
-    let r = await run();
-    if (!r.ok && r.error?.code === "session-not-found") {
-      console.log("[adapter] session-not-found on run; re-ensuring session", sessionId);
-      const cwd = this.sessionCwd.get(sessionId);
-      const re = await this.dsh.unary("session.create", { sessionId, ...(cwd ? { cwd } : {}) }, { timeoutMs: 30000 });
-      if (!re.ok) {
-        return this.relay.respond(requestId, type, { ok: false, error: r.error });
-      }
-      r = await run();
-    }
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyRename(type, payload, requestId) {
-    const { sessionId, title } = payload ?? {};
-    if (typeof sessionId !== "string" || typeof title !== "string" || title.trim() === "") {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and non-blank title are required" } });
-    }
-    const r = await this.dsh.unary("session.rename", { sessionId, title: title.trim() }, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyFork(type, payload, requestId) {
-    const { sessionId } = payload ?? {};
-    if (typeof sessionId !== "string") {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
-    }
-    const r = await this.dsh.unary("session.fork", { sessionId }, { timeoutMs: 60000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyArchive(type, payload, requestId) {
-    const { sessionId } = payload ?? {};
-    if (typeof sessionId !== "string") {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId is required" } });
-    }
-    const r = await this.dsh.unary("workspace.archiveSession", { sessionId }, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    if (Array.isArray(r.value?.archivedSessionIds)) this.archivedSessionIds = r.value.archivedSessionIds;
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyUpdateQueue(type, payload, requestId) {
-    const { sessionId, itemId, action } = payload ?? {};
-    if (typeof sessionId !== "string" || typeof itemId !== "string" || typeof action !== "object" || action === null) {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId, itemId and action are required" } });
-    }
-    if (!["edit", "remove", "steer"].includes(action.kind)) {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "action.kind must be edit | remove | steer" } });
-    }
-    const wireAction = action.kind === "edit"
-      ? { kind: "edit", content: (Array.isArray(action.content) ? action.content : []).map((b) => ({ type: "text", text: String(b?.text ?? "") })) }
-      : { kind: action.kind };
-    const r = await this.dsh.unary("session.updateQueue", { sessionId, itemId, action: wireAction }, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyInterrupt(type, payload, requestId) {
-    const { sessionId, reason } = payload ?? {};
-    const r = await this.dsh.unary("session.cancel", { sessionId, reason: typeof reason === "string" ? reason : "remote interrupt" }, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacySteer(type, payload, requestId) {
-    const { sessionId, content } = payload ?? {};
-    if (!Array.isArray(content) || content.length === 0) {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "content is required" } });
-    }
-    let r = await this.dsh.unary("session.prompt", { sessionId, mode: "steer", content }, { timeoutMs: 30000 });
-    if (!r.ok && r.error?.code === "session-not-found") {
-      const cwd = this.sessionCwd.get(sessionId);
-      const re = await this.dsh.unary("session.create", { sessionId, ...(cwd ? { cwd } : {}) }, { timeoutMs: 30000 });
-      if (!re.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-      r = await this.dsh.unary("session.prompt", { sessionId, mode: "steer", content }, { timeoutMs: 30000 });
-    }
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacySelectModel(type, payload, requestId) {
-    const { sessionId, provider, model, reasoningEffort } = payload ?? {};
-    if (typeof sessionId !== "string" || typeof provider !== "string" || typeof model !== "string") {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId/provider/model are required" } });
-    }
-    const r = await this.dsh.unary("session.selectModel", {
-      sessionId, provider, model,
-      ...(typeof reasoningEffort === "string" ? { reasoningEffort } : {}),
-    }, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyCommandsExecute(type, payload, requestId) {
-    const { sessionId, line } = payload ?? {};
-    if (typeof sessionId !== "string" || typeof line !== "string" || !line.startsWith("/")) {
-      return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and line (starting with /) are required" } });
-    }
-    const r = await this.dsh.unary("commands/execute", { args: { agentId: sessionId, line, images: [] } }, { timeoutMs: 30000 });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    return this.relay.respond(requestId, type, { ok: true, data: r.value });
-  }
 
-  async #legacyApprove(type, payload, requestId) {
-    const { sessionId, approvalId, outcome, rpcId } = payload ?? {};
-    if (!rpcId) return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "rpcId (server-request id) is required" } });
-    const r = await this.dsh.respond(rpcId, { sessionId, approvalId, outcome: outcome === "rejected" ? "rejected" : "allowed-once" });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    if (typeof sessionId === "string") this.clearPendingRequest(rpcId, sessionId);
-    return this.relay.respond(requestId, type, { ok: true, data: { accepted: true } });
-  }
 
-  async #legacyAnswerQuestion(type, payload, requestId) {
-    const { sessionId, answer, rpcId, cancel } = payload ?? {};
-    if (!rpcId) return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "rpcId (server-request id) is required" } });
-    const r = cancel
-      ? await this.dsh.respond(rpcId, undefined, { cancel: true })
-      : await this.dsh.respond(rpcId, { sessionId, answer });
-    if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-    if (typeof sessionId === "string") this.clearPendingRequest(rpcId, sessionId);
-    return this.relay.respond(requestId, type, { ok: true, data: { accepted: true } });
-  }
 
-  /** legacy DSH mux 帧 → relay 事件（与 beta.16 一致：剥离流式碎片、暂存/重放待应答请求）。 */
-  handleMuxFrame(frame) {
-    const p = frame?.payload;
-    if (!p || typeof p.type !== "string") return;
-    if (p.type === "stream/error") { console.warn("[dsh] mux stream error:", p.error?.message); return; }
-    const sid = p.sessionId;
 
-    if (typeof sid === "string") {
-      if (p.type === "question/requested" || p.type === "approval/requested") {
-        const entry = { rpcId: frame.rpcId, payload: p };
-        const stash = this.pendingRequests.get(sid) ?? [];
-        const idx = stash.findIndex((e) => e.rpcId === frame.rpcId && e.payload.type === p.type);
-        if (idx >= 0) stash[idx] = entry; else stash.push(entry);
-        this.pendingRequests.set(sid, stash);
-      } else if (p.type === "question/resolved" || p.type === "approval/resolved") {
-        const kind = p.type === "question/resolved" ? "question/requested" : "approval/requested";
-        const stash = this.pendingRequests.get(sid) ?? [];
-        const kept = stash.filter((e) => e.payload.type !== kind);
-        if (kept.length) this.pendingRequests.set(sid, kept); else this.pendingRequests.delete(sid);
-      } else if (p.type === "session/queue") {
-        this.queueFrames.set(sid, p);
-      }
-    }
-
-    if (p.type === "session/event") {
-      const et = p.event?.type;
-      if (typeof sid === "string") {
-        if (et === "turn/start") this.turnProducedResponse.delete(sid);
-        else if (et === "assistant/message") this.turnProducedResponse.add(sid);
-        else if (et === "turn/end") {
-          if (this.turnProducedResponse.has(sid)) {
-            this.completedSessions.add(sid);
-            this.turnProducedResponse.delete(sid);
-          }
-        }
-      }
-      if (et === "assistant/chunk" || et === "step/start" || et === "step/end") {
-        this._chunkDropped = (this._chunkDropped ?? 0) + 1;
-        if (this._chunkDropped % 500 === 1) console.log("[adapter] live chunks dropped (unrendered):", this._chunkDropped);
-        return;
-      }
-    }
-
-    this.relay.forwardEvent({
-      sessionId: typeof sid === "string" ? sid : undefined,
-      frame: p.type === "session/event" && p.event
-        ? { ...p, event: this.#projectLiveEvent(typeof sid === "string" ? sid : undefined, p.event) }
-        : p,
-      rpcId: frame.rpcId,
-    });
-  }
-
-  /** legacy DSH host 帧：session-added/removed/status 对全部客户端广播。 */
-  handleHostFrame(frame) {
-    const p = frame?.payload;
-    if (!p || typeof p.type !== "string") return;
-    if (p.type === "host/archived-sessions-changed" && Array.isArray(p.archivedSessionIds)) {
-      this.archivedSessionIds = p.archivedSessionIds;
-    }
-    if (["host/session-added", "host/session-removed", "host/session-status", "host/archived-sessions-changed"].includes(p.type)) {
-      this.relay.forwardEvent({ frame: p, rpcId: frame.rpcId });
-    }
-  }
 }

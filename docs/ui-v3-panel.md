@@ -75,7 +75,7 @@ for (const k of [...]) if (payload && payload[k] !== undefined) state[k] = paylo
 ```powershell
 # 1) 插件桥/宿主侧回归（我没改桥，仍全量跑）
 cd D:\p\dshmobile-plugin
-node scripts/smoke-dsh-v2.mjs ; node scripts/smoke-dsh-legacy.mjs
+node scripts/smoke-dsh-v2.mjs ; node scripts/smoke-host-token.mjs ; node scripts/smoke-e2ee-restart.mjs
 node scripts/smoke-host-token.mjs ; node scripts/smoke-e2ee-restart.mjs      # 4/4 ALL PASS
 
 # 2) 面板渲染验收（真源码 + 真 React + 真浏览器 + jsQR 真解码）

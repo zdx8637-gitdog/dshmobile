@@ -46,22 +46,6 @@ function readPackageVersion(): string {
 }
 const BRIDGE_VERSION = readPackageVersion();
 
-/** 迁移 ≤0.1.0-beta.5 时代的包内 state 目录（升级后旧目录可能已随包消失；存在则搬走）。 */
-function migrateLegacyState() {
-  const legacy = process.env.DSHMOBILE_STATE_DIR ? null : path.join(HERE, "..", "state");
-  if (!legacy || !existsSync(legacy)) return;
-  try {
-    mkdirSync(STATE_DIR, { recursive: true });
-    for (const f of ["session.json", "panel.json", "machine-key.txt"]) {
-      const from = path.join(legacy, f);
-      const to = path.join(STATE_DIR, f);
-      if (existsSync(from) && !existsSync(to)) copyFileSync(from, to);
-    }
-  } catch (err: any) {
-    console.error("[dshmobile] legacy state migration failed:", err?.message);
-  }
-}
-migrateLegacyState();
 
 interface PanelState {
   enabled: boolean;

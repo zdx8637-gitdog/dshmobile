@@ -42,7 +42,7 @@ local origins), therefore
 - DSH upgrades cannot break it (historical versions ≤ 0.1.0-beta.3 needed the deprecated
   `scripts/expose-settings-namespace.ps1` patch).
 
-## DSH v0.1.5+ adaptation & dual-protocol compatibility
+## DSH v0.1.5+ adaptation (legacy DSH support removed)
 
 Since v0.1.5 DSH added browser-session auth to the local web service (the URL printed by
 `dsh web` carries a process-level launch token → the browser exchanges it for a session Cookie,
@@ -58,16 +58,18 @@ approval/question waterfalls). The plugin adapts automatically since 0.1.0-beta.
   `/api/remote.mux` (`session/follow` + `workspace/follow` + `session/control`); approvals and
   questions flow through `$events` + `$events/result`.
 
-**Dual-protocol auto-detection (since 0.1.0-beta.18)**: at startup the bridge detects the DSH
-generation — new versions use the v2 protocol above; old DSH versions automatically fall back to
-the legacy protocol (dot endpoints, raw payloads, `events.mux`/`events.host` streams,
-`/api/respond` replies, no auth — same behavior as beta.16). So **upgrade order doesn't matter**:
-plugin first, DSH first, or either way; users on old DSH versions keep working without upgrading.
+> ⚠️ **Legacy DSH support (≤ v0.1.0-rc.6) was removed in 0.1.0-beta.23**: the former
+> dual-protocol auto-detection (dot endpoints, raw payloads, `events.mux`/`events.host`,
+> `/api/respond`, no auth) is gone — one protocol path removed: **adapter −283 lines /
+> dsh −59 / main −21 / host −8**, plus the whole "simulated legacy DSH" smoke script.
+> **DSH ≥ v0.1.5 is now required.** If the bridge cannot reach DSH it logs a clear
+> message in `bridge.log`:
+> "v2 协议握手失败：请确认 DSH 正在运行（dsh web）；本插件版本已不再支持旧版 DSH（≤0.1.5-rc.6）".
 
 Self-check scripts: `node scripts/smoke-dsh-v2.mjs` (full pipeline against a simulated new DSH),
-`node scripts/smoke-dsh-legacy.mjs` (full pipeline against a simulated legacy DSH),
 `node scripts/probe-real-dsh.mjs` (read-only verification against a running real DSH; requires
-having logged into the web panel once in this browser to generate the signing secret).
+having logged into the web panel once in this browser to generate the signing secret),
+`node scripts/archive-session.mjs <sessionId>` (archive temp sessions created by the probes).
 
 ## relay
 

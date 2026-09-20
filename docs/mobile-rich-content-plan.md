@@ -92,7 +92,7 @@
 
 | # | 验证 | 方法 | 通过标准 |
 |---|---|---|---|
-| V1 | 桥端全量 smoke | `smoke-dsh-v2` / `smoke-dsh-legacy` / `smoke-host-token` / `smoke-e2ee-restart` | 全绿；**含修正后的 tool/result 夹具断言**（真实嵌套形状） |
+| V1 | 桥端全量 smoke | `smoke-dsh-v2` / `smoke-host-token` / `smoke-e2ee-restart`（`smoke-dsh-legacy` 已随 legacy 协议于 2026-09-20 删除） | 全绿；**含修正后的 tool/result 夹具断言**（真实嵌套形状） |
 | V2 | B1/B2 实测 | `probe-downlink.mjs`（真实 DSH 一页）+ 桥日志 | reasoning 块为 0；tool/result 内层文本 ≤500+标记；下行体积下降 |
 | V3 | 老 APK × 新桥 | 装机版 APK 连热重载后的桥 | 会话列表/历史/发送/审批/提问/图片/长按复制全部正常；无空白、无异常 |
 | V4 | 新 APK × 老桥 | 保留旧桥副本连新 APK | 工具输出降级正常、无 `UNSUPPORTED` 弹错 |
