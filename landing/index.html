@@ -1,0 +1,843 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="DSH Mobile — DeepSeek Harness 的 Android 远程客户端。电脑一条命令安装插件，手机扫码即连；无需公网 IP、无需内网穿透。" />
+<title>DSH Mobile · 离开电脑，继续你的 Agent 工作</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234d6bfe'/%3E%3Ctext x='16' y='22' font-size='17' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ED%3C/text%3E%3C/svg%3E" />
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0a0a;
+    --panel: #101011;
+    --line: rgba(255, 255, 255, .10);
+    --line-2: rgba(255, 255, 255, .16);
+    --text: #ffffff;
+    --muted: #9ca3af;
+    --muted-2: #8691a1;
+    --blue: #4d6bfe;
+    --blue-2: #6799fe;
+    --blue-dim: #73a3d2;
+    --radius: 16px;
+    --font: "DM Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    --mono: "Fragment Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Microsoft YaHei", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--font); font-size: 16px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased; overflow-x: hidden;
+  }
+  a { color: inherit; text-decoration: none; }
+  img { max-width: 100%; display: block; }
+  .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+  section { scroll-margin-top: 96px; }
+
+  /* ---------- 悬浮胶囊导航 ---------- */
+  .nav {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    width: min(1120px, 94vw); z-index: 60;
+    display: flex; align-items: center; gap: 14px;
+    padding: 8px 10px 8px 16px;
+    background: rgba(16, 16, 17, .72);
+    border: 1px solid var(--line); border-radius: 999px;
+    backdrop-filter: saturate(160%) blur(14px);
+  }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 15px; white-space: nowrap; }
+  .brand .mark { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(140deg, #4d6bfe, #6799fe); display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(77,107,254,.45); color: var(--blue-2); background: rgba(77,107,254,.10); white-space: nowrap; }
+  .nav-links { display: flex; gap: 22px; margin-left: 14px; flex: 1; font-size: 14px; color: var(--muted); }
+  .nav-links a:hover { color: var(--text); }
+  .nav-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  @media (max-width: 860px) { .nav-links { display: none; } .nav { padding: 8px 8px 8px 14px; } }
+  @media (max-width: 560px) {
+    .tag, #ghLink { display: none; }
+    .nav { gap: 8px; padding: 7px 7px 7px 12px; width: 94vw; }
+    .brand { font-size: 14px; }
+    .nav .btn-sm { padding: 7px 12px; font-size: 12.5px; }
+  }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font-family: var(--font); font-size: 15px; font-weight: 500;
+    padding: 11px 20px; border-radius: 999px; border: 1px solid transparent;
+    cursor: pointer; transition: .16s ease; white-space: nowrap;
+  }
+  .btn-primary { background: #fff; color: #0a0a0a; }
+  .btn-primary:hover { background: #e8e8ea; }
+  .btn-ghost { background: rgba(255,255,255,.04); color: #fff; border-color: var(--line-2); }
+  .btn-ghost:hover { background: rgba(255,255,255,.09); }
+  .btn-blue { background: var(--blue); color: #fff; }
+  .btn-blue:hover { background: #5f79ff; }
+  .btn-sm { padding: 8px 14px; font-size: 13px; }
+  .btn-lg { padding: 14px 26px; font-size: 16px; }
+  .btn[disabled] { opacity: .5; cursor: not-allowed; }
+  .btn svg { width: 16px; height: 16px; }
+
+  /* ---------- Hero ---------- */
+  .hero { position: relative; padding: 168px 0 96px; overflow: hidden; }
+  .glow { position: absolute; inset: -10% -10% auto -10%; height: 780px; pointer-events: none; z-index: 0; }
+  .glow::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(700px 420px at 18% 12%, rgba(77,107,254,.55), transparent 62%),
+      radial-gradient(620px 380px at 72% 0%, rgba(115,163,210,.42), transparent 60%),
+      radial-gradient(900px 520px at 50% 42%, rgba(31,59,143,.34), transparent 70%);
+    filter: blur(38px);
+  }
+  .dots { position: absolute; inset: 0; z-index: 0; opacity: .5; pointer-events: none;
+    background-image: radial-gradient(rgba(255,255,255,.16) 1px, transparent 1px);
+    background-size: 22px 22px;
+    mask-image: radial-gradient(75% 60% at 50% 20%, #000 0%, transparent 78%);
+    -webkit-mask-image: radial-gradient(75% 60% at 50% 20%, #000 0%, transparent 78%);
+  }
+  .hero-grid { position: relative; z-index: 1; display: grid; grid-template-columns: 1.02fr .98fr; gap: 56px; align-items: center; }
+  .eyebrow { font-size: 13.5px; color: #c9d2e3; letter-spacing: .2px; }
+  h1 { margin-top: 14px; font-size: clamp(34px, 4.4vw, 46px); font-weight: 500; line-height: 1.2; letter-spacing: .2px; }
+  .lead { margin-top: 20px; font-size: 16px; color: var(--muted); max-width: 520px; }
+  .hero-cta { margin-top: 30px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .hero-meta { margin-top: 20px; font-size: 13px; color: var(--muted-2); display: flex; gap: 16px; flex-wrap: wrap; }
+  @media (max-width: 900px) {
+    .hero { padding: 128px 0 64px; }
+    .hero-grid { grid-template-columns: 1fr; gap: 40px; }
+  }
+
+  /* ---------- 卡片 / 安装卡 ---------- */
+  .card { background: linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.012)); border: 1px solid var(--line); border-radius: var(--radius); }
+  .install { padding: 14px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tab {
+    font-size: 13px; padding: 7px 14px; border-radius: 999px; cursor: pointer;
+    color: var(--muted); border: 1px solid transparent; background: transparent; font-family: var(--font);
+  }
+  .tab.active { color: #fff; background: rgba(255,255,255,.08); border-color: var(--line); }
+  .term { background: #0c0c0e; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .term-bar { display: flex; align-items: center; gap: 7px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
+  .copy { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); background: none; border: none; cursor: pointer; font-family: var(--font); }
+  .copy:hover { color: #fff; }
+  .term-body { padding: 16px 14px; font-family: var(--mono); font-size: 13px; line-height: 1.7; color: #e6e8ee; word-break: break-all; }
+  .term-body .p { color: var(--blue-2); }
+  .term-note { padding: 12px 4px 4px; font-size: 12px; color: var(--muted-2); line-height: 1.75; }
+  .term-note code { font-family: var(--mono); font-size: 11.5px; color: #cbd2e0; background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 5px; }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  .qr-pane { display: flex; gap: 18px; align-items: center; padding: 8px 6px; }
+  .qr-box { background: #fff; border-radius: 12px; padding: 10px; flex: none; }
+  .qr-box img, .qr-box canvas { display: block; border-radius: 3px; }
+  .qr-meta { font-size: 13px; color: var(--muted); }
+  .qr-meta b { color: #fff; font-weight: 500; display: block; font-size: 15px; margin-bottom: 6px; }
+  @media (max-width: 520px) { .qr-pane { flex-direction: column; align-items: flex-start; } }
+
+  /* ---------- 通用 section ---------- */
+  .sec { position: relative; padding: 104px 0; border-top: 1px solid var(--line); }
+  .sec-head { text-align: center; max-width: 760px; margin: 0 auto 52px; }
+  .chip {
+    display: inline-block; font-family: var(--mono); font-size: 11.5px; letter-spacing: .12em;
+    text-transform: uppercase; color: #c7cbd6; padding: 5px 12px; border: 1px solid var(--line-2); border-radius: 999px;
+  }
+  h2 { font-size: clamp(26px, 3vw, 36px); font-weight: 500; line-height: 1.4; margin-top: 18px; letter-spacing: .2px; }
+  h2 .hl { color: var(--blue-2); }
+  .sec-sub { margin-top: 14px; color: var(--muted); font-size: 15.5px; }
+  .reveal { opacity: 0; transform: translateY(18px); transition: opacity .7s ease, transform .7s ease; }
+  .reveal.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } html { scroll-behavior: auto; } }
+
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .fcard { padding: 30px 26px; text-align: center; transition: border-color .2s, transform .2s; }
+  .fcard:hover { border-color: var(--line-2); transform: translateY(-2px); }
+  .fcard .icon { width: 54px; height: 54px; margin: 0 auto 18px; border-radius: 50%; border: 1px solid var(--line-2); display: grid; place-items: center; color: var(--blue-2); }
+  .fcard h3 { font-size: 17px; font-weight: 500; }
+  .fcard .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .16em; color: var(--blue-dim); margin-top: 8px; text-transform: uppercase; }
+  .fcard p { margin-top: 14px; font-size: 13.5px; color: var(--muted); }
+  @media (max-width: 860px) { .grid3 { grid-template-columns: 1fr; } .sec { padding: 76px 0; } }
+
+  /* ---------- 截图区（三屏 3D 透视：左右内旋、中间前移） ---------- */
+  .phones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 36px; align-items: center; }
+  .phone { text-align: center; }
+  .device {
+    position: relative;
+    padding: 9px; border-radius: 30px;
+    background: linear-gradient(160deg, #26272d, #101114 62%);
+    border: 1px solid rgba(255,255,255,.16);
+    box-shadow: 0 36px 74px rgba(0,0,0,.72), 0 4px 14px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.10);
+    transition: transform .55s cubic-bezier(.2,.7,.3,1), box-shadow .55s ease;
+    will-change: transform;
+  }
+  .device img { width: 100%; height: auto; border-radius: 22px; display: block; }
+  /* 左右向内旋转，中间略前移放大 —— 形成参考图的立体扇形 */
+  .phone:nth-child(1) .device { transform: perspective(1500px) rotateY(-16deg) translateZ(-26px) translateX(12px); }
+  .phone:nth-child(2) .device { transform: perspective(1500px) translateZ(30px) scale(1.03); box-shadow: 0 46px 90px rgba(0,0,0,.8), 0 6px 18px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.12); }
+  .phone:nth-child(3) .device { transform: perspective(1500px) rotateY(16deg) translateZ(-26px) translateX(-12px); }
+  .phone:hover .device,
+  .phone:focus-within .device { transform: perspective(1500px) rotateY(0deg) translateZ(34px) scale(1.04); }
+  .phone figcaption { margin-top: 18px; font-size: 13px; color: var(--muted); }
+  .phone figcaption b { display: block; color: #fff; font-weight: 500; font-size: 14.5px; margin-bottom: 4px; }
+  .swipe-hint { display: none; text-align: center; font-size: 12px; color: var(--muted-2); margin-top: 4px; }
+  @media (prefers-reduced-motion: reduce) { .device { transition: none; } }
+  .case { margin-top: 64px; padding: 28px 34px; display: grid; grid-template-columns: 1fr 340px; gap: 44px; align-items: center; }
+  .case .k { font-family: var(--mono); font-size: 11px; letter-spacing: .16em; color: var(--blue-dim); text-transform: uppercase; }
+  .case h3 { margin-top: 12px; font-size: 22px; font-weight: 500; line-height: 1.45; }
+  .case p { margin-top: 14px; color: var(--muted); font-size: 14.5px; }
+  .case img { border-radius: 12px; border: 1px solid var(--line-2); max-height: 560px; width: auto; justify-self: center; }
+  .case .cap { margin-top: 12px; font-size: 12px; color: var(--muted-2); text-align: center; }
+  @media (max-width: 980px) {
+    /* 移动端：三屏横向滑动（避免竖向堆成几千像素高） */
+    .phones {
+      display: flex; gap: 14px; overflow-x: auto; scroll-snap-type: x mandatory;
+      padding: 2px 2px 12px; -webkit-overflow-scrolling: touch;
+    }
+    .phone { flex: 0 0 58%; scroll-snap-align: center; }
+    /* 移动端横向滚动时不做 3D（保证滑动中可读） */
+    .phone:nth-child(1) .device,
+    .phone:nth-child(2) .device,
+    .phone:nth-child(3) .device,
+    .phone:hover .device { transform: none; box-shadow: 0 28px 60px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.08); }
+    .phones::-webkit-scrollbar { height: 4px; }
+    .phones::-webkit-scrollbar-track { background: rgba(255,255,255,.06); border-radius: 4px; }
+    .phones::-webkit-scrollbar-thumb { background: rgba(255,255,255,.2); border-radius: 4px; }
+    .swipe-hint { display: block; }
+    .case { grid-template-columns: 1fr; padding: 22px; }
+    .case img { max-height: 420px; width: auto; max-width: 100%; }
+  }
+
+  /* ---------- 三步上手 ---------- */
+  .steps-wrap { display: grid; grid-template-columns: .8fr 1.2fr; gap: 56px; align-items: start; }
+  .steps-wrap h2 { margin-top: 14px; }
+  .steps-wrap .sec-sub { margin-top: 16px; }
+  .step { padding: 22px 24px; margin-bottom: 14px; }
+  .step-head { display: flex; align-items: center; gap: 12px; }
+  .num { width: 26px; height: 26px; border-radius: 50%; background: rgba(77,107,254,.16); border: 1px solid rgba(77,107,254,.5); color: var(--blue-2); font-size: 13px; display: grid; place-items: center; flex: none; }
+  .step-head h3 { font-size: 16px; font-weight: 500; }
+  .step p { margin-top: 10px; font-size: 13.5px; color: var(--muted); }
+  .mini-term { margin-top: 14px; background: #0c0c0e; border: 1px solid var(--line); border-radius: 10px; padding: 12px 70px 12px 14px; font-family: var(--mono); font-size: 12.5px; color: #e6e8ee; word-break: break-all; position: relative; }
+  @media (max-width: 900px) { .steps-wrap { grid-template-columns: 1fr; gap: 28px; } }
+
+  /* ---------- 下载区 ---------- */
+  .dl { display: grid; grid-template-columns: auto 1fr; gap: 48px; align-items: center; padding: 40px; }
+  .dl-list { list-style: none; font-size: 14px; color: var(--muted); margin: 18px 0 24px; }
+  .dl-list li { padding: 5px 0; }
+  .dl-list b { color: #fff; font-weight: 500; }
+  .wechat { display: none; margin-top: 16px; font-size: 13px; color: #f0b429; border: 1px solid rgba(240,180,41,.3); background: rgba(240,180,41,.07); border-radius: 12px; padding: 12px 16px; line-height: 1.7; }
+  @media (max-width: 780px) { .dl { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 26px; } .dl-list { text-align: left; display: inline-block; } }
+
+  /* ---------- 注册 ---------- */
+  .reg-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: start; }
+  .reg-points { list-style: none; margin-top: 22px; font-size: 14px; color: var(--muted); }
+  .reg-points li { display: flex; gap: 10px; padding: 6px 0; }
+  .reg-points li::before { content: "—"; color: var(--blue-2); }
+  .slots { margin-top: 22px; display: inline-flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 7px 16px; }
+  .slots .n { color: var(--blue-2); font-family: var(--mono); }
+  .slots.full .n { color: #ff8f8f; }
+  form.reg { padding: 30px; }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 7px; }
+  .field input {
+    width: 100%; padding: 13px 15px; font-size: 15px; font-family: var(--font); color: #fff;
+    background: #0c0c0e; border: 1px solid var(--line-2); border-radius: 10px; outline: none; transition: border-color .16s;
+  }
+  .field input:focus { border-color: var(--blue); }
+  .field .err { display: none; font-size: 12.5px; color: #ff8f8f; margin-top: 6px; }
+  .field.invalid input { border-color: #ff8f8f; }
+  .field.invalid .err { display: block; }
+  .msg { display: none; margin-top: 14px; font-size: 13px; border-radius: 10px; padding: 12px 14px; line-height: 1.7; }
+  .msg.show { display: block; }
+  .msg.err { color: #ffb0b0; background: rgba(255,90,90,.09); border: 1px solid rgba(255,90,90,.32); }
+  .msg.ok { color: #86e5b4; background: rgba(52,195,126,.09); border: 1px solid rgba(52,195,126,.32); }
+  .form-note { margin-top: 14px; font-size: 12px; color: var(--muted-2); line-height: 1.7; }
+  .success { display: none; padding: 32px; }
+  .success.show { display: block; }
+  .success .big { width: 48px; height: 48px; border-radius: 50%; background: rgba(52,195,126,.14); border: 1px solid #34c37e; color: #34c37e; display: grid; place-items: center; font-size: 24px; margin-bottom: 16px; }
+  .success h3 { font-size: 19px; font-weight: 500; margin-bottom: 10px; }
+  .success p { font-size: 13.5px; color: var(--muted); margin-bottom: 20px; }
+  .preview-note { display: none; font-size: 12px; color: #f0b429; border: 1px dashed rgba(240,180,41,.45); border-radius: 10px; padding: 9px 12px; margin-bottom: 16px; }
+  @media (max-width: 900px) { .reg-wrap { grid-template-columns: 1fr; gap: 30px; } }
+
+  /* ---------- FAQ ---------- */
+  .faq details { border: 1px solid var(--line); border-radius: 14px; padding: 18px 22px; margin-bottom: 12px; background: rgba(255,255,255,.02); }
+  .faq summary { cursor: pointer; font-size: 15.5px; list-style: none; display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary::after { content: "+"; color: var(--muted); font-size: 20px; font-weight: 300; }
+  .faq details[open] summary::after { content: "−"; }
+  .faq p { margin-top: 12px; font-size: 13.5px; color: var(--muted); }
+
+  /* ---------- 底部 CTA + 页脚 ---------- */
+  .cta-sec { position: relative; text-align: center; padding: 130px 0; border-top: 1px solid var(--line); overflow: hidden; }
+  .cta-sec .glow2 { position: absolute; inset: auto 0 -60% 0; height: 520px; background: radial-gradient(600px 300px at 50% 100%, rgba(77,107,254,.42), transparent 70%); filter: blur(30px); pointer-events: none; }
+  .cta-sec .wrap { position: relative; z-index: 1; }
+  .cta-btns { margin-top: 32px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  footer { border-top: 1px solid var(--line); padding: 30px 0; font-size: 12.5px; color: var(--muted-2); }
+  footer .wrap { display: flex; gap: 16px; justify-content: space-between; flex-wrap: wrap; align-items: center; }
+  footer a:hover { color: #fff; }
+</style>
+</head>
+<body>
+
+<!-- ① 悬浮胶囊导航 -->
+<nav class="nav">
+  <a class="brand" href="#top"><span class="mark">D</span>DSH Mobile <span class="tag">开发者预览版</span></a>
+  <div class="nav-links">
+    <a href="#about">产品简介</a>
+    <a href="#shots">客户端</a>
+    <a href="#start">安装</a>
+    <a href="#download">下载</a>
+    <a href="#faq">常见问题</a>
+  </div>
+  <div class="nav-right">
+    <a class="btn btn-ghost btn-sm" id="ghLink" target="_blank" rel="noopener">GitHub</a>
+    <a class="btn btn-primary btn-sm" href="#register">立即注册</a>
+  </div>
+</nav>
+
+<main id="top">
+  <!-- ② Hero -->
+  <section class="hero">
+    <div class="glow"></div>
+    <div class="dots"></div>
+    <div class="wrap hero-grid">
+      <div>
+        <p class="eyebrow">DeepSeek Harness 的 Android 远程客户端</p>
+        <h1>离开电脑，<br />继续你的 Agent 工作</h1>
+        <p class="lead">电脑上一条命令装好插件，手机扫码即连。会话、工具、子代理都在你自己的电脑上运行 —— 无需公网 IP、无需内网穿透、无需任何网络配置。</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary btn-lg" href="#download">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
+            下载 Android 客户端
+          </a>
+          <a class="btn btn-ghost btn-lg" href="#start">安装电脑端插件</a>
+        </div>
+        <div class="hero-meta">
+          <span>Android 8.0+ · 无 GMS 依赖</span>
+          <span>开源 · MIT</span>
+        </div>
+      </div>
+
+      <!-- 安装卡：终端 + 二维码 -->
+      <div class="card install">
+        <div class="tabs">
+          <button class="tab active" data-pane="pc">电脑端安装</button>
+          <button class="tab" data-pane="phone">手机端下载</button>
+        </div>
+
+        <div class="pane active" id="pane-pc">
+          <div class="term">
+            <div class="term-bar">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <button class="copy" id="copyHero">复制</button>
+            </div>
+            <div class="term-body"><span class="p">$</span> <span id="cmdHero">npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest</span></div>
+          </div>
+          <p class="term-note">需要本机已安装 <b>pnpm</b>（<code>corepack enable</code> 或 <code>npm i -g pnpm</code>）。安装后重启 dsh，Web 左侧栏底部出现 ▶ 箭头，点开即插件面板。</p>
+        </div>
+
+        <div class="pane" id="pane-phone">
+          <div class="qr-pane">
+            <div class="qr-box" id="qrHeroBox"><div id="qrHero"></div></div>
+            <div class="qr-meta">
+              <b>DSH Mobile <span data-ver>v0.2.14</span></b>
+              手机扫码直接下载 APK<br />Android 8.0+ · 约 13 MB<br /><a href="#download" style="color:var(--blue-2)">或查看下载页 →</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ③ 能力三列 -->
+  <section class="sec" id="about">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="chip">Phone &nbsp;⇄&nbsp; Relay &nbsp;⇄&nbsp; Desktop</span>
+        <h2>手机远程，<span class="hl">不需要任何网络配置</span></h2>
+        <p class="sec-sub">架构刻意做到「用户无需理解网络」：电脑主动连出，手机只管扫码登录。</p>
+      </div>
+      <div class="grid3">
+        <div class="card fcard reveal">
+          <div class="icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></div>
+          <h3>插件即桥接</h3>
+          <div class="k">Bridge as a Plugin</div>
+          <p>一条 <span style="font-family:var(--mono);font-size:12.5px">npx</span> 命令接入 DSH，无需本地补丁、跨平台、升级免疫；电脑主动连出，不暴露任何端口。</p>
+        </div>
+        <div class="card fcard reveal">
+          <div class="icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l7 4v5c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V7l7-4z"/><path d="M9.5 12.5l1.8 1.8 3.4-3.6"/></svg></div>
+          <h3>端到端加密</h3>
+          <div class="k">E2EE Channel</div>
+          <p>手机与电脑可建立独立加密通道；服务器只负责认证与转发，会话内容始终留在你自己的电脑上。</p>
+        </div>
+        <div class="card fcard reveal">
+          <div class="icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="14" y="4" width="7" height="7" rx="1.5"/><rect x="3" y="15" width="7" height="5" rx="1.5"/><rect x="14" y="15" width="7" height="5" rx="1.5"/></svg></div>
+          <h3>多设备管理</h3>
+          <div class="k">Multi-Device</div>
+          <p>一个账号多台电脑，统一设备列表与在线状态；会话树按父/子代理展开，长任务折叠浏览。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ④ 客户端实拍 -->
+  <section class="sec" id="shots">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="chip">Native App · Full Parity</span>
+        <h2>手机上的 DSH，<span class="hl">和桌面一致</span></h2>
+        <p class="sec-sub">同一份会话日志、同一个 Agent、同一套工具。电脑负责运行，手机负责指挥。</p>
+      </div>
+
+      <div class="phones">
+        <figure class="phone reveal">
+          <div class="device"><img src="shots/android-auth.webp" alt="DSH Mobile 登录与注册" loading="lazy" width="540" height="1170" /></div>
+          <figcaption><b>登录 / 注册</b>账号密码或扫码登录</figcaption>
+        </figure>
+        <figure class="phone reveal">
+          <div class="device"><img src="shots/android-list.webp" alt="DSH Mobile 设备与会话列表" loading="lazy" width="540" height="1170" /></div>
+          <figcaption><b>设备与会话</b>多机在线状态与会话树</figcaption>
+        </figure>
+        <figure class="phone reveal">
+          <div class="device"><img src="shots/android-conv.webp" alt="DSH Mobile 对话与工具调用" loading="lazy" width="540" height="1170" /></div>
+          <figcaption><b>对话与工具调用</b>流式回复与上下文统计</figcaption>
+        </figure>
+      </div>
+      <p class="swipe-hint">← 左右滑动查看三屏 →</p>
+
+      <div class="card case reveal">
+        <div>
+          <div class="k">Case · PC Plugin</div>
+          <h3>一条命令安装，侧边栏常驻二维码</h3>
+          <p>插件在 DSH Web 左侧栏底部提供常驻面板：桥状态、relay 账号、设备名一目了然；① 登录/授权二维码（手机控制本机）、② 加密配对二维码（端到端加密绑定）。与登录态无关，随时可扫。</p>
+        </div>
+        <img src="shots/pc-panel.webp" alt="DSH Mobile 插件面板（账号与二维码已脱敏）" loading="lazy" width="780" height="1558" />
+      </div>
+      <p class="cap" style="text-align:center;font-size:12px;color:var(--muted-2);margin-top:14px">面板截图中的账号名与二维码已做脱敏处理</p>
+    </div>
+  </section>
+
+  <!-- ⑤ 三步上手 -->
+  <section class="sec" id="start">
+    <div class="wrap steps-wrap">
+      <div class="reveal">
+        <span class="chip">Get Started</span>
+        <h2>三步开始</h2>
+        <p class="sec-sub">电脑装一次，手机扫一次。之后打开 App 就能看到你的所有会话。</p>
+      </div>
+      <div>
+        <div class="card step reveal">
+          <div class="step-head"><span class="num">1</span><h3>电脑端安装插件</h3></div>
+          <p>在装有 DSH 的电脑上执行下面这条命令，然后重启 dsh。</p>
+          <div class="mini-term"><span style="color:var(--blue-2)">$</span> npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest
+            <button class="copy" style="position:absolute;top:10px;right:12px" data-copy="cmd1">复制</button>
+          </div>
+        </div>
+        <div class="card step reveal">
+          <div class="step-head"><span class="num">2</span><h3>手机扫码下载 App</h3></div>
+          <p>用手机扫描<a href="#download" style="color:var(--blue-2)">下方二维码</a>下载 APK（Android 8.0+，无需应用市场）。</p>
+        </div>
+        <div class="card step reveal">
+          <div class="step-head"><span class="num">3</span><h3>登录并扫码配对</h3></div>
+          <p>在 App 内用本页注册的账号登录，扫描电脑插件面板的二维码完成配对；设备上线后即可进入任意会话。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑥ 下载 -->
+  <section class="sec" id="download">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="chip">Download</span>
+        <h2>扫描下载 <span class="hl">Android 客户端</span></h2>
+        <p class="sec-sub">扫码即下载，不经过应用市场。</p>
+      </div>
+      <div class="card dl reveal">
+        <div>
+          <div class="qr-box" id="qrDlBox"><div id="qrDl"></div></div>
+          <div class="wechat" id="wechatTip">微信内无法直接下载 APK：请点右上角「…」→ 在浏览器中打开，或用系统浏览器扫码。</div>
+        </div>
+        <div>
+          <h3 style="font-size:20px;font-weight:500">DSH Mobile <span data-ver>v0.2.14</span></h3>
+          <ul class="dl-list">
+            <li><b>版本：</b><span data-ver>v0.2.14</span>（最新）</li>
+            <li><b>包体：</b>约 13 MB · Android 8.0+ · 无需 Google 服务</li>
+            <li><b>更新：</b>2026-09-18</li>
+          </ul>
+          <a class="btn btn-blue btn-lg" id="dlBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
+            下载 APK
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑦ 注册（无登录） -->
+  <section class="sec" id="register">
+    <div class="wrap reg-wrap">
+      <div class="reveal">
+        <span class="chip">Register</span>
+        <h2>注册账号</h2>
+        <p class="sec-sub" style="text-align:left">本页只提供注册，不提供登录与密码找回。注册后用同一账号在 App 内登录即可 —— 密码只需要记住，不必在这里输入第二次。</p>
+        <ul class="reg-points">
+          <li>账号在手机 App 与电脑插件之间共用</li>
+          <li>服务器只做认证与转发，不保存会话内容</li>
+          <li>名额有限：注册满即关闭（<span id="slotInline">—</span>）</li>
+        </ul>
+        <div class="slots" id="slots"><span>注册名额</span><span class="n" id="slotText">查询中…</span></div>
+      </div>
+
+      <div>
+        <form class="card reg" id="regForm" novalidate>
+          <div class="field" id="fUser">
+            <label for="username">用户名</label>
+            <input id="username" name="username" type="text" autocomplete="username" placeholder="3-50 位字母 / 数字 / _ -" maxlength="50" />
+            <div class="err">用户名需为 3-50 位字母、数字、下划线或连字符</div>
+          </div>
+          <div class="field" id="fPass">
+            <label for="password">密码</label>
+            <input id="password" name="password" type="password" autocomplete="new-password" placeholder="至少 6 位" maxlength="128" />
+            <div class="err">密码至少需要 6 位</div>
+          </div>
+          <button class="btn btn-blue" style="width:100%" id="regBtn" type="submit">注 册</button>
+          <div class="msg" id="regMsg"></div>
+          <p class="form-note">注册即表示同意服务条款。账号仅用于 App 登录与设备管理；服务器不存储你的会话内容。</p>
+        </form>
+
+        <div class="card success" id="regSuccess">
+          <div class="big">✓</div>
+          <h3>注册成功</h3>
+          <p id="successText">账号已创建。下一步：扫描下方二维码下载 DSH Mobile，在 App 内用该账号登录，再扫电脑插件面板的二维码完成配对。</p>
+          <div class="preview-note" id="previewNote">本地预览模式：本次仅演示，未真正创建账号。</div>
+          <a class="btn btn-blue" href="#download">去下载 App →</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑧ FAQ -->
+  <section class="sec" id="faq">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="chip">FAQ</span>
+        <h2>常见问题</h2>
+      </div>
+      <div class="faq">
+        <details open>
+          <summary>安全吗？我的会话数据会经过服务器吗？</summary>
+          <p>会话内容始终存储在你自己的电脑上；服务器只负责账号认证与消息转发，不保存聊天记录。手机端不落盘会话数据，登录令牌仅保存在系统 Keystore 中；需要更高隐私时可在插件面板启用端到端加密配对。</p>
+        </details>
+        <details>
+          <summary>忘记密码怎么办？</summary>
+          <p>本页只提供注册、不提供登录与密码找回。密码请妥善保管；如需更换账号，可在 App 内退出后重新注册一个新账号（注意注册名额有限）。</p>
+        </details>
+        <details>
+          <summary>支持哪些手机？</summary>
+          <p>Android 8.0（API 26）及以上，无需 Google 服务框架，小米 / vivo / OPPO / 华为等国产机型均可安装使用。</p>
+        </details>
+        <details>
+          <summary>电脑端需要做什么准备？</summary>
+          <p>在电脑上执行一条 <span style="font-family:var(--mono);font-size:12.5px">npx</span> 命令安装插件并重启 dsh，插件会自动注册设备并保持在线；电脑无需公网 IP 或端口映射。</p>
+        </details>
+        <details>
+          <summary>手机流量消耗大吗？</summary>
+          <p>传输经过线框投影瘦身，实测单个会话历史从 4.3 MB 压缩到 153 KB，约 1 Mbps 带宽即可流畅使用，正常使用流量消耗很小。</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑨ 底部 CTA -->
+  <section class="cta-sec">
+    <div class="glow2"></div>
+    <div class="wrap">
+      <h2>现在就用手机接管你的 Agent</h2>
+      <div class="cta-btns">
+        <a class="btn btn-primary btn-lg" href="#download">下载 APK</a>
+        <a class="btn btn-ghost btn-lg" href="#start">安装插件</a>
+        <a class="btn btn-ghost btn-lg" href="#register">注册账号</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ⑩ 页脚 -->
+<footer>
+  <div class="wrap">
+    <span>DSH Mobile · <span data-ver>v0.2.14</span> · 开源 MIT</span>
+    <span>服务由 <a href="https://www.deepseek-claudex.cn" target="_blank" rel="noopener" style="color:var(--muted)">deepseek-claudex.cn</a> 提供</span>
+    <span>基于 DeepSeek Harness 构建 · 非官方项目</span>
+  </div>
+</footer>
+
+<script src="qrcode.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  /* ===== 常量 ===== */
+  // 版本号：线上以 ./latest.json 为准（发布 APK 时同步更新该文件）；此处的值是离线/预览兜底。
+  var APK_VERSION = "0.2.16";
+  var APK_FILE = "DSH-Mobile-" + APK_VERSION + ".apk";
+  var PROD_ORIGIN = "https://www.deepseek-claudex.cn";
+  var NPM_CMD = "npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest";
+  var GITHUB = "https://github.com/zdx8637-gitdog/dshmobile";
+  var params = new URLSearchParams(location.search);
+
+  // 预览模式：file:// 或 localhost 打开时注册走本地模拟，不碰生产数据
+  var IS_PREVIEW = location.protocol === "file:" ||
+    location.hostname === "localhost" || location.hostname === "127.0.0.1";
+
+  /* ===== 保护旧配对页：带配对参数一律跳 pair.html ===== */
+  if (params.has("mode") || params.has("code")) {
+    location.replace("pair.html" + location.search);
+    return;
+  }
+
+  /* ===== 版本号 / 链接 =====
+     二维码必须编码**绝对 URL**：二维码没有 base URL，相对路径扫出来只会显示字面文本
+     （历史 bug：曾用 "./" + 文件名，导致扫码后只出现 "./DSH-Mobile-x.y.z.apk" 而不下载）。 */
+  var apkUrl = "";
+
+  function versionDir() {
+    if (location.protocol === "file:") return PROD_ORIGIN + "/dshmobile/";
+    return location.origin + location.pathname.replace(/[^/]*$/, "");
+  }
+
+  function applyVersion(version, file) {
+    if (typeof version === "string" && /^[0-9]+(\.[0-9]+){1,3}$/.test(version)) APK_VERSION = version;
+    APK_FILE = (typeof file === "string" && /^[A-Za-z0-9._-]+\.apk$/.test(file))
+      ? file
+      : "DSH-Mobile-" + APK_VERSION + ".apk";
+    apkUrl = versionDir() + APK_FILE;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-ver]"), function (el) {
+      el.textContent = "v" + APK_VERSION;
+    });
+    var dlBtn = document.getElementById("dlBtn");
+    if (dlBtn) {
+      dlBtn.href = apkUrl;
+      dlBtn.setAttribute("download", APK_FILE);
+      dlBtn.setAttribute("data-apk-url", apkUrl); // 供验收脚本断言"绝对 URL"
+    }
+    return apkUrl;
+  }
+
+  applyVersion(APK_VERSION, APK_FILE);
+  document.getElementById("ghLink").href = GITHUB;
+
+  // 版本以服务器上的 latest.json 为准（发布新 APK 时由发布方更新）；1.5s 超时后回退内置值。
+  var versionReady = (function () {
+    try {
+      var load = fetch("latest.json", { cache: "no-store" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { if (d && d.version) applyVersion(d.version, d.file); })
+        .catch(function () { /* 预览/离线：用内置值 */ });
+      var timeout = new Promise(function (res) { setTimeout(res, 1500); });
+      return Promise.race([load, timeout]);
+    } catch (e) {
+      return Promise.resolve();
+    }
+  })();
+
+  /* ===== 二维码（APK 直链，扫即下载） ===== */
+  function makeQR(id) {
+    var host = document.getElementById(id);
+    if (!host || !window.QRCode) return;
+    new QRCode(host, { text: apkUrl, width: 168, height: 168, correctLevel: QRCode.CorrectLevel.M });
+  }
+
+  /* ===== 安装卡标签页（二维码懒生成） ===== */
+  var qrHeroDone = false;
+  Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
+    tab.addEventListener("click", function () {
+      Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (t) { t.classList.remove("active"); });
+      Array.prototype.forEach.call(document.querySelectorAll(".pane"), function (p) { p.classList.remove("active"); });
+      tab.classList.add("active");
+      document.getElementById("pane-" + tab.dataset.pane).classList.add("active");
+      // 二维码等版本号就绪后再生成，避免指向旧版本
+      if (tab.dataset.pane === "phone" && !qrHeroDone) {
+        qrHeroDone = true;
+        versionReady.then(function () { makeQR("qrHero"); });
+      }
+    });
+  });
+
+  /* ===== 复制命令 ===== */
+  function copyText(text, btn) {
+    var old = btn.textContent;
+    var done = function () {
+      btn.textContent = "已复制 ✓";
+      setTimeout(function () { btn.textContent = old; }, 1600);
+    };
+    var fallback = function () {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch (e) {}
+      document.body.removeChild(ta);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else { fallback(); }
+  }
+  var copyHero = document.getElementById("copyHero");
+  if (copyHero) copyHero.addEventListener("click", function () { copyText(NPM_CMD, copyHero); });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-copy]"), function (btn) {
+    btn.addEventListener("click", function () { copyText(NPM_CMD, btn); });
+  });
+
+  /* ===== 微信内提示 ===== */
+  if (/MicroMessenger/i.test(navigator.userAgent)) {
+    document.getElementById("wechatTip").style.display = "block";
+  }
+
+  /* ===== 滚动入场 ===== */
+  var els = document.querySelectorAll(".reveal");
+  if ("IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) { en.target.classList.add("in"); io.unobserve(en.target); }
+      });
+    }, { rootMargin: "0px 0px -12% 0px", threshold: .08 });
+    Array.prototype.forEach.call(els, function (el) { io.observe(el); });
+  } else {
+    Array.prototype.forEach.call(els, function (el) { el.classList.add("in"); });
+  }
+
+  /* ===== 注册表单元素 ===== */
+  var slots = document.getElementById("slots");
+  var slotText = document.getElementById("slotText");
+  var slotInline = document.getElementById("slotInline");
+  var form = document.getElementById("regForm");
+  var fUser = document.getElementById("fUser"), fPass = document.getElementById("fPass");
+  var userEl = document.getElementById("username"), passEl = document.getElementById("password");
+  var btn = document.getElementById("regBtn"), msg = document.getElementById("regMsg");
+  var success = document.getElementById("regSuccess");
+  var regOpen = true;
+
+  function showMsg(kind, text) {
+    msg.className = "msg show " + kind;
+    msg.innerHTML = text;
+  }
+
+  function paintSlots(open, remaining, limit) {
+    regOpen = open;
+    if (open) {
+      slots.classList.remove("full");
+      slotText.textContent = "剩余 " + remaining + " / " + limit;
+      slotInline.textContent = "剩余 " + remaining + " 个";
+    } else {
+      slots.classList.add("full");
+      slotText.textContent = "已满（" + limit + " / " + limit + "）";
+      slotInline.textContent = "名额已满";
+      btn.disabled = true;
+      btn.textContent = "注册已关闭";
+      showMsg("err", "注册名额已满（上限 " + limit + " 个账号）。请直接下载 App，用已有账号登录。");
+    }
+  }
+
+  /* ===== 名额状态 ===== */
+  if (!IS_PREVIEW) {
+    fetch(location.origin + "/auth/registration-status", { headers: { Accept: "application/json" } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.ok && d.data) paintSlots(d.data.open, d.data.remaining, d.data.limit);
+        else { slotText.textContent = "—"; slotInline.textContent = "名额有限"; }
+      })
+      .catch(function () { slotText.textContent = "—"; slotInline.textContent = "名额有限"; });
+  } else {
+    paintSlots(true, 12, 20);
+  }
+
+  /* ===== 下载区二维码（等版本号就绪，确保二维码内容是最新 APK 的绝对 URL） ===== */
+  versionReady.then(function () { makeQR("qrDl"); });
+
+  /* ===== 注册逻辑 ===== */
+  function validate() {
+    var okUser = /^[a-zA-Z0-9_-]{3,50}$/.test(userEl.value);
+    var okPass = passEl.value.length >= 6;
+    fUser.classList.toggle("invalid", !okUser);
+    fPass.classList.toggle("invalid", !okPass);
+    return okUser && okPass;
+  }
+  userEl.addEventListener("input", function () { fUser.classList.remove("invalid"); });
+  passEl.addEventListener("input", function () { fPass.classList.remove("invalid"); });
+
+  function showSuccess(username) {
+    form.style.display = "none";
+    success.classList.add("show");
+    document.getElementById("successText").innerHTML =
+      "账号 <b>" + username + "</b> 已创建。下一步：扫描下方二维码下载 DSH Mobile，在 App 内用该账号登录，再扫电脑插件面板的二维码完成配对。";
+    var box = document.getElementById("qrDlBox");
+    box.style.transition = "box-shadow .4s";
+    box.style.boxShadow = "0 0 0 3px rgba(77,107,254,.8)";
+    setTimeout(function () { box.style.boxShadow = "none"; }, 2200);
+  }
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    if (!regOpen) return;
+    if (!validate()) return;
+    var username = userEl.value.trim();
+    btn.disabled = true; btn.textContent = "注册中…";
+
+    if (IS_PREVIEW) {
+      setTimeout(function () {
+        btn.disabled = false; btn.textContent = "注 册";
+        document.getElementById("previewNote").style.display = "block";
+        showSuccess(username);
+      }, 600);
+      return;
+    }
+
+    fetch(location.origin + "/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: username, password: passEl.value })
+    }).then(function (r) {
+      return r.json().then(function (d) { return { status: r.status, body: d }; });
+    }).then(function (res) {
+      var code = res.body && res.body.error ? res.body.error.code : "";
+
+      if (res.status === 201) {
+        showSuccess(username);
+        fetch(location.origin + "/auth/registration-status")
+          .then(function (r) { return r.json(); })
+          .then(function (d) { if (d && d.ok && d.data) paintSlots(d.data.open, d.data.remaining, d.data.limit); })
+          .catch(function () {});
+        return;
+      }
+      btn.disabled = false; btn.textContent = "注 册";
+
+      if (res.status === 409) {
+        showMsg("err", "<b>该账号已经注册。</b>本页不提供登录，请直接下载 App 并在此登录；或换一个用户名重新注册。");
+        return;
+      }
+      if (res.status === 403 && code === "REGISTRATION_FULL") {
+        paintSlots(false, 0, 20);
+        return;
+      }
+      if (res.status === 400) {
+        // relay 的 400 文案来自 zod（英文），这里统一给中文规则提示
+        showMsg("err", "格式不正确：用户名需为 3-50 位字母、数字、下划线或连字符，密码至少 6 位。");
+        return;
+      }
+      if (res.status === 429) {
+        showMsg("err", "操作太频繁，请稍后再试。");
+        return;
+      }
+      showMsg("err", "注册失败（" + res.status + "），请稍后再试。");
+    }).catch(function () {
+      btn.disabled = false; btn.textContent = "注 册";
+      showMsg("err", "网络错误，无法连接服务器，请稍后再试。");
+    });
+  });
+
+  /* ===== 预览态钩子（仅本地）：index.html?state=registered 直接看成功态 ===== */
+  if (IS_PREVIEW && params.get("state") === "registered") {
+    document.getElementById("previewNote").style.display = "block";
+    showSuccess("demo_user");
+  }
+})();
+</script>
+</body>
+</html>
