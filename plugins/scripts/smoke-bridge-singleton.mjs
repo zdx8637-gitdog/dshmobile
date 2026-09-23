@@ -54,12 +54,12 @@ function makeStateDir(tag) {
   return { dir, configPath };
 }
 
-function startBridge({ configPath, tag, ipc = false, env = {} }) {
+function startBridge({ configPath, tag, ipc = false, env = {}, extraArgs = [] }) {
   const logPath = path.join(path.dirname(configPath), `${tag}.log`);
   const fd = openSync(logPath, "a");
   const stdio = ["ignore", fd, fd];
   if (ipc) stdio.push("ipc");
-  const child = spawn(process.execPath, [BRIDGE, `--state-dir=${path.dirname(configPath)}`], {
+  const child = spawn(process.execPath, [BRIDGE, `--state-dir=${path.dirname(configPath)}`, ...extraArgs], {
     env: { ...process.env, DSHMOBILE_BRIDGE_CONFIG: configPath, ...env },
     stdio,
   });
@@ -112,6 +112,17 @@ log(`桥入口：${BRIDGE}`);
   ok("占用者不让位 → C 以退出码 42 退出", cExited && C.exited?.code === EXIT_ANOTHER_INSTANCE, `code=${C.exited?.code}`);
   ok("C 日志给出明确原因", readLog(C).includes("另一个桥实例仍占用单例端口"));
   dumb.close();
+
+  // ③b 礼貌重试（--no-yield）：绝不请求对方让位，仍以 42 退出
+  let yieldHits = 0;
+  const holder = createServer((sock) => { yieldHits += 1; sock.destroy(); });
+  await new Promise((r) => holder.listen({ port, host: "127.0.0.1", exclusive: true }, r));
+  const C2 = startBridge({ configPath, tag: "C2", extraArgs: ["--no-yield"] });
+  const c2Exited = await waitFor(() => C2.exited !== null, { timeout: 8000 });
+  ok("礼貌重试：仍以退出码 42 退出", c2Exited && C2.exited?.code === EXIT_ANOTHER_INSTANCE, `code=${C2.exited?.code}`);
+  ok("礼貌重试：**没有**向占用者发让位请求", yieldHits === 0, `收到的连接数=${yieldHits}`);
+  ok("礼貌重试：日志写明不发让位", readLog(C2).includes("不请求对方让位"));
+  holder.close();
 }
 
 // ---------- ④ 父进程看门狗 ----------

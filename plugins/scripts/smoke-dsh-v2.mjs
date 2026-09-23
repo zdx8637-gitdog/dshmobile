@@ -234,6 +234,9 @@ const fakeRelay = {
   respond(requestId, type, payload) { relayResponses.push({ requestId, type, payload }); },
   forwardEvent(ev) { relayEvents.push(ev); },
 };
+// 手机侧视角：host/session-flags 是点状态实时帧（绿点/黄点变化时桥主动推）
+const flagsFrames = () => relayEvents.filter((e) => e.frame?.type === "host/session-flags");
+const lastFlags = () => flagsFrames().at(-1)?.frame ?? null;
 
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
 try {
@@ -265,11 +268,17 @@ try {
   adapter.attachMux(mux);
   await sleep(300); // 等 $events ready + 各流基线
 
+  const listT0 = Date.now();
   await adapter.handleRequest({ requestId: "r1", type: "sessions.list", payload: {} });
   const r1 = relayResponses.find((r) => r.requestId === "r1");
   check("sessions.list ok", r1?.payload?.ok === true, JSON.stringify(r1?.payload));
   check("标题投影 title=测试会话", r1?.payload?.data?.sessions?.[0]?.title === "测试会话");
   check("归档集合来自 workspace 基线", JSON.stringify(r1?.payload?.data?.archivedSessionIds) === JSON.stringify(["arch-1"]), JSON.stringify(r1?.payload?.data?.archivedSessionIds));
+  // 增量字段 servedAt：这份列表数据的生成时间（毫秒），不得早于本次请求发起时间
+  const servedAt = r1?.payload?.data?.servedAt;
+  check("data.servedAt 存在、是数字且 ≥ 请求发起时间", typeof servedAt === "number" && Number.isFinite(servedAt) && servedAt >= listT0 && servedAt <= Date.now(), `servedAt=${servedAt} t0=${listT0}`);
+  // 只增字段：既有字段一个都不少
+  check("sessions.list 既有字段未变（sessions/archived/completed/pending）", Array.isArray(r1?.payload?.data?.sessions) && Array.isArray(r1?.payload?.data?.archivedSessionIds) && Array.isArray(r1?.payload?.data?.completedSessionIds) && Array.isArray(r1?.payload?.data?.pendingSessionIds), JSON.stringify(Object.keys(r1?.payload?.data ?? {})));
 
   console.log("[5] sessions.history → session/page（throughSeq=follow cursor）");
   await adapter.handleRequest({ requestId: "r2", type: "sessions.history", payload: { sessionId: "sess-1" } });
@@ -301,6 +310,10 @@ try {
   const questionEvt = relayEvents.find((e) => e.rpcId === "evt-2");
   check("question/requested 转发（帧内 sessionId）", questionEvt?.frame?.type === "question/requested" && questionEvt.frame.questions?.[0]?.id === "q1" && questionEvt.frame.sessionId === "sess-1", JSON.stringify(questionEvt));
   check("host/session-added 广播", relayEvents.some((e) => e.frame?.type === "host/session-added" && e.frame.sessionId === "sess-9"));
+  // 黄点实时帧：审批/提问挂起 → pendingRequests 变化 → 桥主动推 host/session-flags
+  const flagPendingIds = lastFlags()?.pendingSessionIds ?? [];
+  check("黄点帧 host/session-flags 已推送（无需刷新列表）", Array.isArray(lastFlags()?.pendingSessionIds), JSON.stringify(flagsFrames().map((e) => e.frame)));
+  check("黄点帧 pendingSessionIds 含 sess-1 且与实际 pendingRequests 一致", flagPendingIds.includes("sess-1") && JSON.stringify([...flagPendingIds].sort()) === JSON.stringify([...adapter.pendingRequests.keys()].sort()), `frame=${JSON.stringify(flagPendingIds)} real=${JSON.stringify([...adapter.pendingRequests.keys()])}`);
 
   await adapter.handleRequest({ requestId: "r3", type: "approvals.respond", payload: { rpcId: "evt-1", outcome: "allowed-once", sessionId: "sess-1" } });
   check("approvals.respond ok", relayResponses.find((r) => r.requestId === "r3")?.payload?.ok === true);
@@ -310,16 +323,28 @@ try {
   await adapter.handleRequest({ requestId: "r4", type: "questions.respond", payload: { rpcId: "evt-2", cancel: true, sessionId: "sess-1" } });
   const qr = seen.eventResultArgs.find((a) => a.eventId === "evt-2");
   check("questions cancel → 全空答案", JSON.stringify(qr?.outcome?.value) === JSON.stringify({ answers: [{ id: "q1", selected: [] }] }), JSON.stringify(qr));
+  // 黄点消失帧：审批 + 提问都应答完 → 再推一帧（内容为空），App 的黄点立即消失
+  const flagAfterAnswer = lastFlags()?.pendingSessionIds ?? null;
+  check("审批/提问应答完 → 推「黄点消失」帧", Array.isArray(flagAfterAnswer) && flagAfterAnswer.length === 0 && adapter.pendingRequests.size === 0, `frame=${JSON.stringify(flagAfterAnswer)} real=${JSON.stringify([...adapter.pendingRequests.keys()])}`);
 
   console.log("[7] session/follow 事件 → session/event 转发 + 绿点 + 游标推进");
   await sleep(300);
   check("session/event 转发", relayEvents.some((e) => e.frame?.type === "session/event" && e.frame.sessionId === "sess-1" && e.frame.event?.type === "assistant/message"));
+  // 绿点实时帧：turn/end（本轮出过 assistant 消息）后桥立即推帧——此刻尚未调用 sessions.list
+  const flagsGreenBeforeList = flagsFrames().some((e) => e.frame.completedSessionIds?.includes("sess-1"));
+  check("绿点帧在列表刷新之前就已实时推送", flagsGreenBeforeList, JSON.stringify(flagsFrames().map((e) => e.frame)));
   await adapter.handleRequest({ requestId: "r5", type: "sessions.list", payload: {} });
   const r5 = relayResponses.find((r) => r.requestId === "r5");
   check("绿点 completedSessionIds 含 sess-1", r5?.payload?.data?.completedSessionIds?.includes("sess-1"), JSON.stringify(r5?.payload?.data?.completedSessionIds));
+  const flagGreenIds = lastFlags()?.completedSessionIds ?? [];
+  check("绿点帧 completedSessionIds 与实际 completedSessions 一致", flagGreenIds.includes("sess-1") && JSON.stringify([...flagGreenIds].sort()) === JSON.stringify([...adapter.completedSessions].sort()), `frame=${JSON.stringify(flagGreenIds)} real=${JSON.stringify([...adapter.completedSessions])}`);
   // 回归：live 事件后历史请求必须用最新游标（seq=8），否则手机刷新只能看到旧对话
   await adapter.handleRequest({ requestId: "r5b", type: "sessions.history", payload: { sessionId: "sess-1" } });
   check("live 事件推进游标 → history throughSeq=8", seen.pageArgs?.request?.throughSeq === 8, JSON.stringify(seen.pageArgs));
+  // markSeen（手机打开会话）→ 绿点消失 → 再推一帧（内容不含 sess-1）
+  await adapter.handleRequest({ requestId: "r5c", type: "sessions.markSeen", payload: { sessionId: "sess-1" } });
+  const flagSeenIds = lastFlags()?.completedSessionIds ?? null;
+  check("markSeen 后推「绿点清除」帧（内容不含 sess-1）", Array.isArray(flagSeenIds) && !flagSeenIds.includes("sess-1") && adapter.completedSessions.size === 0, `frame=${JSON.stringify(flagSeenIds)} real=${JSON.stringify([...adapter.completedSessions])}`);
 
   console.log("[8] session/control 队列 + workspace.list + 其余端点映射");
   check("session/queue 转发", relayEvents.some((e) => e.frame?.type === "session/queue" && e.frame.sessionId === "sess-1"));

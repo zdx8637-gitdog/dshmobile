@@ -75,15 +75,18 @@ function shutdown(code, why) {
 
 /**
  * 单实例保护：同一 stateDir 只允许一个桥在跑（否则同一个 relay 设备标识会被两条连接互相顶替）。
- * 抢不到 → 以退出码 42 退出（宿主据此不自动重启，避免两个宿主互相重启）。
+ * 抢不到 → 以退出码 42 退出（宿主据此改为延迟"礼貌重试"，不会两个宿主互相顶替）。
+ * `--no-yield`：本次只试着绑定、不请求对方让位（宿主延迟重试时带上）。
  */
 async function ensureSingleton() {
   if (!isSingletonEnabled()) {
     console.warn("[singleton] 单实例保护已按 DSHMOBILE_BRIDGE_SINGLETON 关闭（仅供临时第二桥/测试使用）");
     return;
   }
+  const noYield = process.argv.includes("--no-yield");
   const r = await claimSingleton({
     stateDir: config.stateDir,
+    askYield: !noYield,
     onYield: () => shutdown(EXIT_YIELDED, "已让位给新启动的桥实例"),
   });
   if (!r.ok) {

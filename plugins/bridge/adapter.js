@@ -184,6 +184,8 @@ export class Adapter {
     this.completedSessions = new Set();
     // 当前回合出过 assistant 消息的会话（用于区分 turn/end 是「完成」还是「等待审批/提问」）
     this.turnProducedResponse = new Set();
+    // 上次推给手机的 host/session-flags 快照（内容相同则不重复推帧）
+    this.lastSessionFlags = null;
 
     // ---- 新版 DSH（v0.1.5+）流层状态 ----
     this.mux = null;                 // /api/remote.mux 物理连接
@@ -340,6 +342,7 @@ export class Adapter {
         if (this.turnProducedResponse.has(sid)) {
           this.completedSessions.add(sid);
           this.turnProducedResponse.delete(sid);
+          this.#emitSessionFlags(); // 绿点出现：实时推帧
         }
       }
     }
@@ -554,6 +557,26 @@ export class Adapter {
     const idx = stash.findIndex((e) => e.rpcId === rpcId && e.payload.type === frame.type);
     if (idx >= 0) stash[idx] = entry; else stash.push(entry);
     this.pendingRequests.set(sessionId, stash);
+    this.#emitSessionFlags();
+  }
+
+  /**
+   * 绿点（completedSessions）/ 黄点（pendingRequests）状态变化 → 主动推一帧 host/session-flags，
+   * App 不必等下一次 sessions.list 刷新即可实时更新点状态。
+   * 与上次推送过的快照完全相同则不推（避免重复帧）；只增帧、不改动集合与既有响应字段。
+   */
+  #emitSessionFlags() {
+    const completedSessionIds = [...this.completedSessions];
+    const pendingSessionIds = [...this.pendingRequests.keys()];
+    const snapshot = JSON.stringify({
+      completedSessionIds: [...completedSessionIds].sort(),
+      pendingSessionIds: [...pendingSessionIds].sort(),
+    });
+    if (snapshot === this.lastSessionFlags) return;
+    this.lastSessionFlags = snapshot;
+    this.relay.forwardEvent({
+      frame: { type: "host/session-flags", completedSessionIds, pendingSessionIds },
+    });
   }
 
   /** relay 请求入口。envelope: canonical request。 */
@@ -921,6 +944,8 @@ export class Adapter {
             // App 内提醒：绿点（完成未查看）/ 黄点（等待审批或提问）
             completedSessionIds: [...this.completedSessions],
             pendingSessionIds: [...this.pendingRequests.keys()],
+            // 这份列表数据的生成时间（毫秒时间戳），供 App 显示「何时拉的」
+            servedAt: Date.now(),
           },
         });
       }
@@ -1090,7 +1115,10 @@ export class Adapter {
       case "sessions.markSeen": {
         // 清除「完成未查看」标记（绿点）：手机端打开会话后调用
         const { sessionId } = payload ?? {};
-        if (typeof sessionId === "string") this.completedSessions.delete(sessionId);
+        if (typeof sessionId === "string") {
+          this.completedSessions.delete(sessionId);
+          this.#emitSessionFlags(); // 绿点消失：实时推帧
+        }
         return this.relay.respond(requestId, type, { ok: true, data: { accepted: true } });
       }
       case "sessions.create": {
@@ -1320,6 +1348,7 @@ export class Adapter {
     const kept = stash.filter((e) => e.rpcId !== rpcId);
     if (kept.length) this.pendingRequests.set(sessionId, kept); else this.pendingRequests.delete(sessionId);
     this.waterfallStash.delete(rpcId);
+    this.#emitSessionFlags(); // 黄点消失：实时推帧
   }
 
   // 端点用点号名、payload 裸传；事件走 events.mux/host；审批/提问走 /api/respond。

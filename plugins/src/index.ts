@@ -32,6 +32,11 @@ const BRIDGE_STATE_MARKER = `--state-dir=${STATE_DIR}`;
 // 否则两个宿主会互相重启、互相顶替。
 const BRIDGE_EXIT_ANOTHER_INSTANCE = 42;
 const BRIDGE_EXIT_YIELDED = 43;
+// 桥"让位/被占用"后的礼貌重试：对方（可能是另一个 DSH 实例的桥）还活着就继续等，
+// 对方消失就自动接管。带上 --no-yield，绝不会反过来要求对方让位 → 不会形成宿主互踢。
+const YIELD_RETRY_MS = 60_000;
+const MAX_FAST_YIELD_RETRIES = 5;
+const SLOW_YIELD_RETRY_MS = 600_000;
 const CONFIG_FILE = path.join(STATE_DIR, "config.json");
 const KEY_FILE = path.join(STATE_DIR, "machine-key.txt");
 const SESSION_FILE = path.join(STATE_DIR, "session.json");
@@ -195,6 +200,7 @@ export function apply(ctx: any, _config: any = {}) {
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let lastConfig: PanelState | null = null;
   let lastRespawnAt = 0;
+  let yieldRetries = 0; // 让位/被占用后的礼貌重试次数（成功启动即清零）
   // 新版 DSH（v0.1.5+）鉴权：connection 服务提供的进程 launch token（每次 DSH 启动换新）。
   // 桥子进程用它做一次性 Cookie 换发。老版 DSH 无 connection 服务 → token 保持空，
   // 桥按无鉴权模式直连（向后兼容）。
@@ -315,7 +321,7 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
-  function startBridge(value: PanelState) {
+  function startBridge(value: PanelState, opts: { noYield?: boolean } = {}) {
     stopBridge();
     takeoverStaleBridges();
     try {
@@ -346,7 +352,10 @@ export function apply(ctx: any, _config: any = {}) {
         mkdirSync(STATE_DIR, { recursive: true });
         logFd = openSync(path.join(STATE_DIR, "bridge.log"), "a");
       } catch { /* 打不开日志则不落盘 */ }
-      const p = spawn(process.execPath, [BRIDGE_MAIN, BRIDGE_STATE_MARKER], {
+      const spawnArgs = [BRIDGE_MAIN, BRIDGE_STATE_MARKER];
+      // 礼貌重试（不让位）：对方还活着就安静退出，对方没了才接管 —— 避免两个宿主互相顶替
+      if (opts.noYield) spawnArgs.push("--no-yield");
+      const p = spawn(process.execPath, spawnArgs, {
         env: { ...process.env, DSHMOBILE_BRIDGE_CONFIG: CONFIG_FILE },
         // 第 4 位 "ipc"：给桥一条与宿主的通信通道，宿主消失时桥会收到 disconnect 并退出
         // （防"孤儿桥"：孤儿桥会与下次启动的桥共用设备标识，在 relay 侧互相顶替）。
@@ -357,11 +366,25 @@ export function apply(ctx: any, _config: any = {}) {
       p.on("exit", (code) => {
         // child !== p → 已被新桥替换或主动停止，忽略该退出事件
         if (stopped || child !== p) return;
+        // 子进程已死：**必须清空引用**，否则后续"配置变化触发重启"会以为桥还在（实测踩过：面板 save 无效）
+        child = null;
         if (code === BRIDGE_EXIT_ANOTHER_INSTANCE || code === BRIDGE_EXIT_YIELDED) {
-          // 桥侧单例锁判定"另一个桥实例在运行/已让位"：**不要自动重启**，否则两个宿主会互相重启顶替
+          // 桥侧单例锁判定"另一个桥实例在运行 / 本桥已让位"：先不抢（避免两个宿主互相顶替），
+          // 但也不能永久放弃 —— 若赢的那个进程后来消失（实测：它的 DSH 被关掉），本机就没人服务了。
+          // 因此延迟重试，且重试时带 --no-yield（只试着绑定，不再要求对方让位）：
+          // 对方还在 → 继续安静等待；对方没了 → 自动接管。
           const why = code === BRIDGE_EXIT_YIELDED ? "已让位给另一个桥实例" : "另一个桥实例正在运行";
-          hostLog(`bridge exited ${code}: ${why}（不自动重启）`);
-          patchState({ bridgeStatus: `${why}（未自动重启；在面板保存一次即可重新接管）` });
+          // 前几次每分钟重试一次（对方刚起来/刚关闭都能及时收敛），之后转为每 10 分钟一次、长期兜底：
+          // 既不会与活着的对方互踢，也不会在对方消失后让本机一直没桥服务。
+          yieldRetries += 1;
+          const delay = yieldRetries <= MAX_FAST_YIELD_RETRIES ? YIELD_RETRY_MS : SLOW_YIELD_RETRY_MS;
+          hostLog(`bridge exited ${code}: ${why}（第 ${yieldRetries} 次礼貌重试将在 ${delay / 1000}s 后）`);
+          patchState({ bridgeStatus: `${why}（${delay / 1000} 秒后自动重试）` });
+          setTimeout(() => {
+            if (stopped || !state.enabled) return;
+            if (session === null && !(state.username && state.password)) return;
+            startBridge(state, { noYield: true });
+          }, delay);
           return;
         }
         // 异常退出则 3 秒后自动拉起（60 秒内最多一次，防崩溃循环）
@@ -381,6 +404,8 @@ export function apply(ctx: any, _config: any = {}) {
       p.on("error", (err) => {
         patchState({ bridgeStatus: `error:${err.message}` });
       });
+      // 真正起来了（能连上 DSH 也由桥自己再确认）：重置让位重试计数
+      yieldRetries = 0;
       patchState({ bridgeStatus: "running" });
     } catch (err: any) {
       patchState({ bridgeStatus: `error:${err?.message ?? err}` });

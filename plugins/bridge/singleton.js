@@ -99,15 +99,30 @@ export function attachYieldHandler(server, onYield, log = console.log) {
 
 /**
  * 抢占单例。
+ * @param askYield 是否允许"请求对方让位"（默认 true）。宿主在**延迟重试**时传 false：
+ *   只要对方还活着就安静退出，绝不反过来要求对方让位，从而不会形成两个宿主互相顶替。
  * @returns {Promise<{ok:true,server:import('node:net').Server,port:number,tookOver:boolean}
  *                  |{ok:false,port:number,reason:string}>}
  */
-export async function claimSingleton({ stateDir, log = console.log, onYield = null, waitMs = 3000, retryMs = 150 } = {}) {
+export async function claimSingleton({ stateDir, log = console.log, onYield = null, askYield: mayAskYield = true, waitMs = 3000, retryMs = 150 } = {}) {
   const port = singletonPort(stateDir);
   const first = await tryBind(port);
   if (first.ok) {
     attachYieldHandler(first.server, onYield, log);
     return { ok: true, server: first.server, port, tookOver: false };
+  }
+  if (!mayAskYield) {
+    log(`[singleton] 回环端口 ${port} 已被占用（${first.code}）：本次为礼貌重试，不请求对方让位`);
+    const shortDeadline = Date.now() + 1200;
+    while (Date.now() < shortDeadline) {
+      await sleep(retryMs);
+      const again = await tryBind(port);
+      if (again.ok) {
+        attachYieldHandler(again.server, onYield, log);
+        return { ok: true, server: again.server, port, tookOver: true };
+      }
+    }
+    return { ok: false, port, reason: "另一个桥实例仍占用单例端口（礼貌重试未接管）" };
   }
   log(`[singleton] 回环端口 ${port} 已被另一个桥实例占用（${first.code}），发送让位请求…`);
   await askYield(port, log);
