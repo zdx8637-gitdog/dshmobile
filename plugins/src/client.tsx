@@ -598,36 +598,28 @@ function DshmobileCard(props: any) {
   );
 
   // ② 加密配对：本机登录后才可用
-  // 状态行：让"当前是加密还是明文、是否已与手机配对"在面板上一眼可见（PC 侧唯一的可见入口）
+  // 状态行：让"是否已与手机配对"在面板上一眼可见（PC 侧唯一的可见入口）。
+  // 2026-09-23 拍板：**删掉「允许明文 / 要求加密」切换按钮** —— 明文只能"按次"（手机侧临时放行，桥重启即恢复），
+  // 任何地方都不再提供"永久关掉加密"的 UI 出口。桥/宿主的 require 能力与 /state 字段保留（additive，只读展示）。
   const e2eeRequire = value.e2eeRequire !== false;   // 缺字段（老桥）→ 按"要求加密"显示
   const e2eePinned = value.e2eePinned === true;
-  // 文案只放结论（配对状态 + 政策）；对端 keyId 挪到 title，避免把这行撑到换行
-  const e2eeStatusText = `${e2eePinned ? "已配对" : "未配对"} · ${e2eeRequire ? "要求加密" : "允许明文"}`;
+  const e2eeStatusText = `${e2eePinned ? "已配对" : "未配对"} · ${e2eeRequire ? "要求加密" : "允许明文（策略被外部改写）"}`;
   const e2eeStatusTitle = e2eePinned && value.e2eePeerKeyId
     ? `已与本机配对的手机密钥 ${value.e2eePeerKeyId}…（${e2eeRequire ? "要求加密" : "允许明文"}）`
-    : (e2eeRequire ? "这台电脑要求端到端加密：手机需扫码配对后才能连接" : "这台电脑允许明文：手机可不配对直接连接");
+    : (e2eeRequire
+      ? "这台电脑要求端到端加密：手机需扫码配对后才能连接；在外地够不到电脑时可在手机上按次使用明文"
+      : "这台电脑当前允许明文（策略文件被外部改写为 require=false）");
   const e2eeStatusColor = !e2eeRequire ? T.warn : e2eePinned ? T.ok : T.caption;
-  // 状态点 + 文案 + 切换按钮。放在**二维码下方**，避免占掉二维码上方的高度（会破坏"两码同顶边"对齐）
+  // 状态点 + 文案，放在**二维码下方**（避免占掉二维码上方的高度 → 破坏"两码同顶边"对齐）
   const e2eeChip = (
     <span title={e2eeStatusTitle} style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, maxWidth: "100%" }}>
       <span style={{ width: 6, height: 6, borderRadius: "50%", background: e2eeStatusColor, flex: "none" }} />
       <span style={{ color: e2eeStatusColor, fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e2eeStatusText}</span>
     </span>
   );
-  const e2eeToggle = (
-    <button
-      type="button"
-      className={`dsm-btn dsm-btn--xs ${e2eeRequire ? "dsm-btn--warn" : "dsm-btn--ok"}`}
-      title={e2eeRequire ? "改为允许明文：手机可不配对直接连接" : "改回要求端到端加密"}
-      onClick={() => actions.e2eePolicy?.({ require: !e2eeRequire, clearPin: e2eeRequire })}
-    >
-      {e2eeRequire ? "允许明文" : "要求加密"}
-    </button>
-  );
   const e2eeInlineRow = (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
       {e2eeChip}
-      {e2eeToggle}
     </div>
   );
   const e2eeCard = (
