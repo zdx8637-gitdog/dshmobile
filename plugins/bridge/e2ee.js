@@ -3,6 +3,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as c from "./crypto.js";
+import { E2eePolicy } from "./e2ee-policy.js";
 
 const PAIRING_TTL_MS = 120_000;
 
@@ -17,6 +18,11 @@ export class E2eeSession {
     this.state = this.pinnedPeer ? "pinned" : "legacy";
     this.pairingFile = join(stateDir, "pairing.json");
     this.conn = null; // { cNonce(b64url), keys:{p2b,b2p}, sendSeq:{p2b,b2p}, recvSeq:{p2b,b2p} }
+    // 明文策略（e2ee-policy.json，stateDir 下）：require 默认 true = 本机要求 E2EE；
+    // require=false 只有用户明确选择「永久非加密」才会出现（e2ee.allowPlaintext permanent / e2ee.clear）。
+    this.policy = new E2eePolicy({ stateDir });
+    // pin/策略发生变化的通知钩子（由 Adapter 挂上：变化时推 host/e2ee-state 帧）。未挂 = 不通知。
+    this.onStateChange = null;
   }
 
   #load() {
@@ -66,6 +72,27 @@ export class E2eeSession {
     return this.conn?.keys != null;
   }
 
+  /** 本机是否要求端到端加密（e2ee-policy.json；文件不存在即 true）。 */
+  get require() {
+    return this.policy?.require !== false;
+  }
+
+  /** 改写明文策略并持久化。"用户明确选择永久非加密" 的唯一落盘点（返回落定后的布尔值）。 */
+  setRequire(value) {
+    const next = this.policy ? this.policy.setRequire(value === true) : value === true;
+    this.#notifyStateChange();
+    return next;
+  }
+
+  /** pin/策略变化的通知（钩子内部出错绝不影响 E2EE 主流程）。 */
+  #notifyStateChange() {
+    try {
+      this.onStateChange?.();
+    } catch (err) {
+      console.warn(`[dshmobile] e2ee state change hook failed: ${err?.message ?? err}`);
+    }
+  }
+
   /** 供诊断/上报：pin 与身份现状（adapter 在 hello 失败时据此给出可自愈的错误码）。 */
   get pinState() {
     return {
@@ -112,6 +139,8 @@ export class E2eeSession {
     this.pinnedPeer = { pubKey: phonePubB64url, keyId: c.keyIdOf(phonePubRaw) };
     this.state = "pinned";
     this.#save({ identity: this.identity, pinnedPeer: this.pinnedPeer });
+    // 配对成功 = 重新回到「要求 E2EE」（用户此前若选过永久非加密，这里把它翻回 true 并落盘）。
+    this.setRequire(true);
     return { ok: true, data: { peerKeyId: this.pinnedPeer.keyId } };
   }
 
@@ -163,11 +192,12 @@ export class E2eeSession {
     return JSON.parse(plain);
   }
 
-  /** 清除 pin（解除绑定/设备吊销）。 */
+  /** 清除 pin（解除绑定/设备吊销）。策略不在这里改：由调用方决定（e2ee.clear / permanent 会同时 setRequire(false)）。 */
   clearPin() {
     this.pinnedPeer = null;
     this.state = "legacy";
     this.conn = null;
     this.#save({ identity: this.identity, pinnedPeer: null });
+    this.#notifyStateChange();
   }
 }

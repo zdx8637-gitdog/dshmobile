@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 /** E2EE 下仍需明文（relay 亲自处理/握手）的消息类型。 */
 // transfer.deliver：relay→桥 控制面指令（relay 非 E2EE 端点，只能明文投递；桥的响应也必须明文回去）。
 // 加解密双向豁免；adapter 侧另校验 actor.role==="relay"（手机从不发此类型）。
-const PLAINTEXT_TYPES = new Set(["heartbeat.ping", "heartbeat.pong", "e2ee.hello", "key.exchange", "device.register", "e2ee.clear", "transfer.deliver"]);
+// e2ee.state / e2ee.allowPlaintext：E2EE 策略的控制面——手机必须在**明文**下就能问「本机是否要求加密」
+// 并明确选择降级（否则被拒后连"怎么自救"都问不出来，人在外地也点不到电脑面板）。这两个类型永远放行。
+const PLAINTEXT_TYPES = new Set(["heartbeat.ping", "heartbeat.pong", "e2ee.hello", "key.exchange", "device.register", "e2ee.clear", "transfer.deliver", "e2ee.state", "e2ee.allowPlaintext"]);
 
 /** 从信封提取 AAD 所需的稳定字段（两端一致：target 缺失回退 actor.deviceId；requestId 缺失回退 envelopeId）。 */
 function envelopeAadContext(env) {
@@ -36,6 +38,31 @@ export class RelayBridge {
     this.onEnvelope = null; // (envelope) => void
     this.onDuplicateKick = null; // () => void：本连接被 relay 按 "duplicate connection"(4000) 顶替时回调
     this.e2ee = e2ee; // 可选 E2eeSession：加解密透传（未建立则原样）
+    // 明文业务请求是否放行（由 Adapter 构造时自注册；relay 不 import adapter，避免循环依赖）。
+    // 未注册 → 恒定放行：保持"没有 adapter 的裸 RelayBridge / 既有测试"的原语义。
+    this.plaintextGuard = null;
+  }
+
+  /**
+   * 注入明文强制拒绝的判定：fn(env) === false → 回 E2EE_REQUIRED（判定为 true/未注入 → 放行）。
+   * 传非函数即清除（等价于关闭强制）。
+   */
+  setPlaintextGuard(fn) {
+    this.plaintextGuard = typeof fn === "function" ? fn : null;
+  }
+
+  /**
+   * 明文业务请求是否放行。未注入判定或判定抛错都按**放行**处理（fail-open）：
+   * 内部的判定错误绝不能让用户既连不上、又看不到任何提示。
+   */
+  isPlaintextAllowed(env) {
+    if (typeof this.plaintextGuard !== "function") return true;
+    try {
+      return this.plaintextGuard(env) !== false;
+    } catch (err) {
+      console.warn("[relay] plaintextGuard failed, allowing plaintext:", err?.message ?? err);
+      return true;
+    }
   }
 
   /** 关闭码是否表示"凭证失效"（设备被吊销/删除/令牌无效）→ 需要重新 provision 自愈。 */
@@ -185,9 +212,25 @@ export class RelayBridge {
     const established = this.e2ee.isConnectionEstablished === true;
     if (!established) {
       // 桥刚重启：本端每连接密钥已随进程丢失。收到加密信封 → 回 E2EE_RESTARTED，
-      // 让手机丢弃旧连接密钥并重新 e2ee.hello（明文请求仍按未配对/legacy 原样放行）。
+      // 让手机丢弃旧连接密钥并重新 e2ee.hello。
       if (env.kind === "request" && typeof env.requestId === "string" && (env.crypto || env.payload?.ct)) {
         this.#rejectEnvelope(env, "E2EE_RESTARTED", "bridge restarted; E2EE connection keys were reset, please re-handshake");
+        return null;
+      }
+      // 明文业务请求（PLAINTEXT_TYPES 已在上方提前放行）：
+      // 默认策略（e2ee-policy.json require=true）下必须走 E2EE —— 只有同时满足
+      //   ① 策略要求加密；② 该客户端被确认支持新协议（appVersion ≥ 0.2.21，未知版本 fail-open）；
+      //   ③ 该 clientId 本次进程内没有临时明文放行（e2ee.allowPlaintext mode=session）
+      // 才拒绝（判定在 adapter.isPlaintextAllowed，条件 ③ 亦来自它）。
+      // 目的：PC 已配对时不再静默放行"没有本地 pin 的手机（重装 App 后）"，让 App 能明确提示
+      // 重新配对或降级；同时老 App（不上报版本）一律放行、控制类永远放行，不会被卡死。
+      if (env.kind === "request" && typeof env.requestId === "string" && !this.isPlaintextAllowed(env)) {
+        this.#rejectEnvelope(
+          env,
+          "E2EE_REQUIRED",
+          "该设备已启用端到端加密，请重新扫码配对 E2EE，或确认回退到非加密模式",
+          this.#e2eeRequiredData(),
+        );
         return null;
       }
       return env;
@@ -195,7 +238,12 @@ export class RelayBridge {
     if (!env.crypto || !env.payload?.ct) {
       // 已配对却收到明文（手机重装后新身份未配对）→ 回 E2EE_REQUIRED，让手机提示重新配对/确认回退。
       if (env.kind === "request" && typeof env.requestId === "string") {
-        this.#rejectEnvelope(env, "E2EE_REQUIRED", "该设备已启用端到端加密，请重新扫码配对 E2EE，或确认回退到非加密模式");
+        this.#rejectEnvelope(
+          env,
+          "E2EE_REQUIRED",
+          "该设备已启用端到端加密，请重新扫码配对 E2EE，或确认回退到非加密模式",
+          this.#e2eeRequiredData(),
+        );
       }
       return null;
     }
@@ -212,9 +260,21 @@ export class RelayBridge {
     }
   }
 
+  /** E2EE_REQUIRED 的补充状态（只增字段）：手机据此显示「PC 要求加密 / 是否已配对」并决定自救路径。 */
+  #e2eeRequiredData() {
+    const pin = this.e2ee?.pinState ?? {};
+    return {
+      reason: "require-e2ee",
+      require: true,
+      pinned: pin.pinned === true,
+      bridgeKeyId: typeof pin.bridgeKeyId === "string" ? pin.bridgeKeyId : "",
+    };
+  }
+
   /** 对一条请求回显式错误响应（E2EE_RESTARTED / E2EE_REQUIRED）。
-   *  control 标记：桥在密钥失效时只能用明文发控制错误，客户端据此与"降级攻击"区分。 */
-  #rejectEnvelope(env, code, message) {
+   *  control 标记：桥在密钥失效时只能用明文发控制错误，客户端据此与"降级攻击"区分。
+   *  data 可选：附加状态（只增字段，老客户端忽略）。 */
+  #rejectEnvelope(env, code, message, data) {
     const plain = JSON.stringify({
       schemaVersion: 1,
       envelopeId: randomUUID(),
@@ -223,7 +283,7 @@ export class RelayBridge {
       sentAt: new Date().toISOString(),
       actor: { role: "bridge", deviceId: this.deviceId },
       requestId: env.requestId,
-      payload: { ok: false, error: { code, message }, control: true },
+      payload: { ok: false, error: { code, message, ...(data ? { data } : {}) }, control: true },
     });
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(plain);
   }

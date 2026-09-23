@@ -4,6 +4,7 @@ import { appendFileSync, createWriteStream } from "node:fs";
 import { mkdir, opendir, open, readFile, rename, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { supportsRequireE2ee } from "./e2ee-policy.js";
 
 /** E2EE 握手诊断日志（bridge stdio=ignore，故落盘；仅打点握手/降级关键事件，不含密钥）。 */
 const E2EE_DEBUG_LOG = join(homedir(), ".dsh-mobile", "e2ee-debug.log");
@@ -186,6 +187,16 @@ export class Adapter {
     this.turnProducedResponse = new Set();
     // 上次推给手机的 host/session-flags 快照（内容相同则不重复推帧）
     this.lastSessionFlags = null;
+
+    // ---- E2EE 默认强制 + 显式降级（全部只在内存，桥重启即回到"要求加密"）----
+    this.clientAppVersions = new Map();       // clientId -> 最近上报的 appVersion（§5 版本闸门）
+    this.plaintextSessionAllowed = new Set(); // clientId 本次进程内被临时放行明文（e2ee.allowPlaintext mode=session）
+    this.lastE2eeState = null;                // 上次推过的 host/e2ee-state 快照（内容相同则不重复推帧）
+    // pin/策略变化（配对成功、e2ee.allowPlaintext、e2ee.clear、策略被外部改写）→ 主动推 host/e2ee-state 帧
+    if (this.e2ee) this.e2ee.onStateChange = () => this.#emitE2eeState();
+    // 明文强制拒绝的判定权在本类（策略 + 版本闸门 + 临时放行）；自注册给 relay，
+    // 避免 relay 反向 import adapter 造成循环依赖。未注册 → relay 一律放行（裸用/旧测试语义不变）。
+    this.relay?.setPlaintextGuard?.((env) => this.isPlaintextAllowed(env));
 
     // ---- 新版 DSH（v0.1.5+）流层状态 ----
     this.mux = null;                 // /api/remote.mux 物理连接
@@ -579,11 +590,113 @@ export class Adapter {
     });
   }
 
+  // ---- E2EE 明文策略（默认强制 + 用户显式降级）----
+
+  /** 本机 E2EE 状态快照：响应（e2ee.state / sessions.list）与帧（host/e2ee-state）共用同一口径。 */
+  #e2eeState() {
+    const pin = this.e2ee?.pinState ?? {};
+    return {
+      require: this.e2ee?.require === true,
+      pinned: pin.pinned === true,
+      bridgeKeyId: typeof pin.bridgeKeyId === "string" ? pin.bridgeKeyId : "",
+    };
+  }
+
+  /** pin/策略变化 → 推一帧 host/e2ee-state（与上次推过的快照相同则不推）。只加帧，不改任何既有帧。 */
+  #emitE2eeState() {
+    const state = this.#e2eeState();
+    const snapshot = JSON.stringify(state);
+    if (snapshot === this.lastE2eeState) return;
+    this.lastE2eeState = snapshot;
+    this.relay?.forwardEvent?.({ frame: { type: "host/e2ee-state", ...state } });
+  }
+
+  /**
+   * §2 明文强制拒绝的判定入口（relay.decryptEnvelope 在「未建立 E2EE + 收到明文业务请求」时回调）。
+   * 返回 false = 拒绝（relay 回 E2EE_REQUIRED）；true = 放行。三个条件必须**同时**满足才拒绝，
+   * 任一不满足都 fail-open（宁可放明文也不把用户卡死）：
+   *   ① 本机策略要求加密（e2ee-policy.json 的 require，默认 true）；
+   *   ② 该客户端被确认支持新协议：上报过 appVersion 且 ≥ 0.2.21（**未知版本的老 App 一律放行**）；
+   *   ③ 该 clientId 本次进程内没有被临时放行（e2ee.allowPlaintext mode=session）。
+   * 控制类类型（心跳/握手/配对/e2ee.clear/e2ee.state/e2ee.allowPlaintext/transfer.deliver）
+   * 在 relay 的 PLAINTEXT_TYPES 里已提前放行，根本不会走到这里。
+   */
+  isPlaintextAllowed(env) {
+    if (!this.e2ee) return true; // 没启用 E2EE：无从要求
+    // 明文判定发生在 handleRequest 之前，版本只能从当前信封读（只记在 handleRequest 会让客户端**第一条**
+    // 带 appVersion 的明文请求因"版本未知"被放行）。handleRequest 入口同样会记一次（§5 契约）。
+    this.#noteAppVersion(env);
+    if (this.e2ee.require !== true) return true; // 用户已明确选择永久非加密（或本机不要求）
+    const clientId = typeof env?.actor?.clientId === "string" ? env.actor.clientId : "";
+    if (this.plaintextSessionAllowed.has(clientId)) return true;
+    const version = this.clientAppVersions.get(clientId);
+    if (!supportsRequireE2ee(version)) return true; // 未上报/过低/解析不出 → 老 App，放行
+    return false; // 三条件全满足：拒绝明文，让 App 提示"重新配对 或 明确选择降级"
+  }
+
+  /**
+   * 记住客户端上报的 appVersion（§5 版本闸门的数据来源；仅内存，桥重启即清空）。
+   * 首次看到某 clientId 的版本（或版本变化）时顺手推一帧 host/e2ee-state，让 App 立刻知道本机状态。
+   */
+  #noteAppVersion(env) {
+    const clientId = typeof env?.actor?.clientId === "string" ? env.actor.clientId : "";
+    const version = env?.appVersion;
+    if (!clientId || typeof version !== "string" || version === "") return;
+    const prev = this.clientAppVersions.get(clientId);
+    this.clientAppVersions.set(clientId, version);
+    if (prev === version) return;
+    this.#emitE2eeState();
+  }
+
+  /**
+   * e2ee.state（明文控制面）：手机一上线就问「这台 PC 是否要求加密 / 是否已配对」。
+   * 会话列表可能已被 E2EE_REQUIRED 拒掉，所以这个入口必须永远可用。
+   */
+  #e2eeStateRequest(payload, requestId) {
+    return this.relay.respond(requestId, "e2ee.state", { ok: true, data: this.#e2eeState() });
+  }
+
+  /**
+   * e2ee.allowPlaintext（明文控制面）：用户**明确选择**降级到明文。
+   *  - mode="session"：只在桥内存里对该 clientId 放行明文业务请求（桥重启即失效），不清 pin、不改策略；
+   *  - mode="permanent"：清 pin + setRequire(false)（落盘）——与老的 e2ee.clear 等价。
+   * 人在外地（碰不到电脑面板）也能靠它自救；没有这一步，"默认强制"会变成"永久卡死"。
+   */
+  #e2eeAllowPlaintext(payload, requestId, env) {
+    const mode = payload?.mode;
+    if (mode !== "session" && mode !== "permanent") {
+      return this.relay.respond(requestId, "e2ee.allowPlaintext", {
+        ok: false,
+        error: { code: "bad-request", message: "mode must be session | permanent" },
+      });
+    }
+    if (!this.e2ee) {
+      return this.relay.respond(requestId, "e2ee.allowPlaintext", {
+        ok: false,
+        error: { code: "disabled", message: "e2ee not available" },
+      });
+    }
+    if (mode === "session") {
+      const clientId = typeof env?.actor?.clientId === "string" ? env.actor.clientId : "";
+      this.plaintextSessionAllowed.add(clientId);
+      e2eeDebug(`e2ee.allowPlaintext session -> clientId=${clientId || "(none)"} 临时放行明文（不持久化）`);
+      this.#emitE2eeState(); // 状态未变时会被去重掉（不改策略/不清 pin）
+      return this.relay.respond(requestId, "e2ee.allowPlaintext", { ok: true, data: { mode, ...this.#e2eeState() } });
+    }
+    this.e2ee.clearPin();
+    this.e2ee.setRequire(false);
+    e2eeDebug("e2ee.allowPlaintext permanent -> pin cleared + policy require=false (persisted)");
+    this.#emitE2eeState();
+    return this.relay.respond(requestId, "e2ee.allowPlaintext", { ok: true, data: { mode, ...this.#e2eeState() } });
+  }
+
   /** relay 请求入口。envelope: canonical request。 */
   async handleRequest(env) {
     const { requestId, type, payload = {} } = env;
     if (typeof requestId !== "string") return;
     console.log("[adapter] request:", type, "from", env.actor?.clientId ?? "?", "payload:", JSON.stringify(payload).slice(0, 400));
+    // §5 版本闸门的数据来源：记住该 clientId 上报的 appVersion（决定它是否会被"明文强制拒绝"）。
+    this.#noteAppVersion(env);
 
     if (type === "transfer.deliver") {
       // 投递指令只接受 relay 发起（relay→桥 控制面）；手机从不发此类型，拒绝伪装明文。
@@ -595,9 +708,11 @@ export class Adapter {
     if (type === "upload.commit") return this.#commitUpload(payload, requestId);
     if (type === "toolResult.full") return this.#toolResultFull(payload, requestId);
     if (type === "attachment.resolve") return this.#resolveAttachment(payload, requestId);
-    if (type === "key.exchange") return this.#keyExchange(payload, requestId);
+    if (type === "key.exchange") return this.#keyExchange(payload, requestId, env);
     if (type === "e2ee.hello") return this.#e2eeHello(payload, requestId);
     if (type === "e2ee.clear") return this.#e2eeClear(payload, requestId);
+    if (type === "e2ee.state") return this.#e2eeStateRequest(payload, requestId);
+    if (type === "e2ee.allowPlaintext") return this.#e2eeAllowPlaintext(payload, requestId, env);
 
     if (READ_ONLY_TYPES.has(type)) return this.#read(type, payload, requestId);
     if (WRITE_TYPES.has(type)) return this.#write(type, payload, requestId);
@@ -608,16 +723,18 @@ export class Adapter {
     });
   }
 
-  /** 取消 E2EE 配对：清 pin，回到明文 legacy（钥匙图标消失）。 */
+  /** 取消 E2EE 配对：清 pin + setRequire(false)（等价于老的"永久非加密"入口，语义与 allowPlaintext permanent 一致）。 */
   #e2eeClear(payload, requestId) {
     if (!this.e2ee) return this.relay.respond(requestId, "e2ee.clear", { ok: false, error: { code: "disabled", message: "e2ee not available" } });
     this.e2ee.clearPin();
-    e2eeDebug("e2ee.clear -> pin cleared, back to legacy plaintext");
+    this.e2ee.setRequire(false); // 用户明确取消加密 = 永久非加密（否则一重启又变成"要求加密"）
+    e2eeDebug("e2ee.clear -> pin cleared + policy require=false, back to legacy plaintext");
+    this.#emitE2eeState();
     return this.relay.respond(requestId, "e2ee.clear", { ok: true, data: { cleared: true } });
   }
 
   /** E2EE 配对握手：按 pairingId 查 secret，校验 phone auth，pin 其身份公钥。 */
-  #keyExchange(payload, requestId) {
+  #keyExchange(payload, requestId, env) {
     const { pairingId, deviceId, pub, auth } = payload ?? {};
     const fail = (code, message) =>
       this.relay.respond(requestId, "key.exchange", { ok: false, error: { code, message } });
@@ -628,6 +745,15 @@ export class Adapter {
     const r = this.e2ee.completePairing({ pairingId, deviceId, phonePubB64url: pub, authB64url: auth });
     e2eeDebug(`key.exchange pairingId=${pairingId} deviceId=${deviceId} result=${r.ok ? "ok(pinned keyId=" + r.data?.peerKeyId + ")" : "fail(" + r.error?.code + ")"}`);
     if (!r.ok) return this.relay.respond(requestId, "key.exchange", { ok: false, error: r.error });
+    // 配对成功 = 端到端加密回来了：撤销该 clientId 本次进程内的「临时明文放行」。
+    // 否则刚配完对的客户端仍能继续静默走明文——正是本轮要消除的行为（用户不知道自己在明文）。
+    const clientId = typeof env?.actor?.clientId === "string" ? env.actor.clientId : "";
+    if (this.plaintextSessionAllowed.delete(clientId)) {
+      e2eeDebug(`key.exchange -> 撤销 clientId=${clientId} 的临时明文放行（配对成功）`);
+    }
+    // 配对成功 = 重新要求 E2EE（completePairing 内部已 setRequire(true) 并经状态钩子推帧；
+    // 这里再显式推一次兜底，快照相同会被去重）。
+    this.#emitE2eeState();
     return this.relay.respond(requestId, "key.exchange", { ok: true, data: r.data });
   }
 
@@ -946,6 +1072,8 @@ export class Adapter {
             pendingSessionIds: [...this.pendingRequests.keys()],
             // 这份列表数据的生成时间（毫秒时间戳），供 App 显示「何时拉的」
             servedAt: Date.now(),
+            // E2EE 状态（只增字段）：本机是否要求加密 / 是否已配对 / 本端身份 keyId
+            e2ee: this.#e2eeState(),
           },
         });
       }
