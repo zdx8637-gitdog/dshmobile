@@ -12,7 +12,7 @@
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -42,6 +42,8 @@ const KEY_FILE = path.join(STATE_DIR, "machine-key.txt");
 const SESSION_FILE = path.join(STATE_DIR, "session.json");
 const PANEL_FILE = path.join(STATE_DIR, "panel.json");
 const DEVICE_KEY_FILE = path.join(STATE_DIR, "device-key.json");
+// E2EE 策略（与桥同一份文件）：{"require":bool}，缺失/坏文件 = 要求加密（与桥侧默认一致）
+const E2EE_POLICY_FILE = path.join(STATE_DIR, "e2ee-policy.json");
 const PAIRING_FILE = path.join(STATE_DIR, "pairing.json");
 const HTTP_PORT = parseInt(process.env.DSHMOBILE_HTTP_PORT ?? "17653", 10);
 // 加密配对码（第二个码）TTL：独立于登录码，15 分钟足够完成「扫码→连设备→握手」。
@@ -412,6 +414,54 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
+  /**
+   * E2EE 运行时状态（供面板显示）：策略 `require` + 是否已与手机配对。
+   * 每次 /state 都重新读文件 → 手机端扫码配对/改用明文后，面板刷新即可看到（最多一个轮询周期）。
+   */
+  function readE2eeRuntime(): { require: boolean; pinned: boolean; peerKeyId: string } {
+    let require = true;
+    try {
+      const p = JSON.parse(readFileSync(E2EE_POLICY_FILE, "utf8"));
+      if (typeof p?.require === "boolean") require = p.require;
+    } catch { /* 缺失/坏文件 → 与桥一致：要求加密 */ }
+    let pinned = false;
+    let peerKeyId = "";
+    try {
+      const d = JSON.parse(readFileSync(DEVICE_KEY_FILE, "utf8"));
+      if (typeof d?.pinnedPeer?.keyId === "string" && d.pinnedPeer.keyId) {
+        pinned = true;
+        peerKeyId = d.pinnedPeer.keyId;
+      }
+    } catch { /* 读不出 → 视为未配对 */ }
+    return { require, pinned, peerKeyId };
+  }
+
+  /** 写 E2EE 策略（原子写，格式与桥侧一致）。 */
+  function writeE2eeRequire(require: boolean): void {
+    try {
+      mkdirSync(STATE_DIR, { recursive: true });
+      const tmp = `${E2EE_POLICY_FILE}.tmp-${process.pid}`;
+      writeFileSync(tmp, JSON.stringify({ require }, null, 2), { mode: 0o600 });
+      renameSync(tmp, E2EE_POLICY_FILE);
+      hostLog(`e2eePolicy: require=${require}（面板操作）`);
+    } catch (err: any) {
+      hostLog(`e2eePolicy: 写入失败：${err?.message ?? err}`);
+    }
+  }
+
+  /** 解除 E2EE 配对（清 pinnedPeer，保留本机身份；桥重启后生效）。 */
+  function clearPinnedPeer(): void {
+    try {
+      const d = JSON.parse(readFileSync(DEVICE_KEY_FILE, "utf8"));
+      if (d?.pubKey && d?.privKey && d?.keyId) {
+        writeFileSync(DEVICE_KEY_FILE, JSON.stringify({ ...d, pinnedPeer: null }, null, 2), { mode: 0o600 });
+        hostLog("e2eePolicy: 已清除 pinnedPeer（解除配对）");
+      }
+    } catch (err: any) {
+      hostLog(`e2eePolicy: 清除 pin 失败：${err?.message ?? err}`);
+    }
+  }
+
   async function restJson(base: string, pathname: string, options: any = {}): Promise<any> {
     const res = await fetch(`${base}${pathname}`, {
       ...options,
@@ -763,6 +813,16 @@ export function apply(ctx: any, _config: any = {}) {
         await handleLogout();
         break;
       }
+      case "e2eePolicy": {
+        // 面板侧切换 E2EE 策略（与手机端"永久改用非加密"等价）：
+        //  require=false → 记策略 + 解除配对（清 pinnedPeer）；require=true → 恢复要求加密（保留身份）。
+        // 桥只在启动时读策略与身份文件 ⇒ 写完重启桥（几秒中断），保证内存态与磁盘一致。
+        const require = payload?.require === true;
+        writeE2eeRequire(require);
+        if (!require && payload?.clearPin !== false) clearPinnedPeer();
+        startBridge(state);
+        break;
+      }
       case "refreshPairing": {
         patchState({ pairingCode: "", pairingExpiresAt: "" });
         scheduleConfig();
@@ -797,7 +857,17 @@ export function apply(ctx: any, _config: any = {}) {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       if (req.method === "GET" && url.pathname === "/state") {
         ensureE2eeCode();
-        send(200, { ok: true, data: state });
+        // E2EE 运行时状态随每次 /state 现读（策略文件 + device-key.json），面板刷新即可反映手机端操作
+        const rt = readE2eeRuntime();
+        send(200, {
+          ok: true,
+          data: {
+            ...state,
+            e2eeRequire: rt.require,
+            e2eePinned: rt.pinned,
+            e2eePeerKeyId: rt.peerKeyId ? rt.peerKeyId.slice(0, 12) : "",
+          },
+        });
         return;
       }
       if (req.method === "POST" && url.pathname === "/action") {

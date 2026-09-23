@@ -36,6 +36,10 @@ interface CardSnapshot {
     e2eePairingId?: string;
     e2eePairingExpiresAt?: string;
     e2eeDeviceId?: string;
+    // E2EE 运行时状态（宿主每次 /state 现读策略文件与 device-key.json）
+    e2eeRequire?: boolean;
+    e2eePinned?: boolean;
+    e2eePeerKeyId?: string;
     bridgeVersion?: string;
   } | null;
   actions: Record<string, (...args: any[]) => Promise<any>>;
@@ -274,6 +278,8 @@ function bridgeState(snap: CardSnapshot | null): { kind: DotKind; text: string }
     return /connecting/.test(String(snap?.status ?? "")) ? { kind: "warn", text: "连接中…" } : { kind: "off", text: "未连接" };
   }
   if (v.bridgeStatus === "running" && v.username) return { kind: "ok", text: "已连接" };
+  // 桥让位/被顶替：本机还有另一个桥实例在跑（旧版本孤儿或另一个 DSH 实例），本桥已主动退出
+  if (/另一个桥实例|已让位/.test(String(v.bridgeStatus ?? ""))) return { kind: "warn", text: "另一个桥实例在运行" };
   if (v.username) return { kind: "warn", text: "连接中…" };
   return { kind: "off", text: "未连接" };
 }
@@ -527,6 +533,35 @@ function DshmobileCard(props: any) {
   );
 
   // ② 加密配对：本机登录后才可用
+  // 状态行：让"当前是加密还是明文、是否已与手机配对"在面板上一眼可见（PC 侧唯一的可见入口）
+  const e2eeRequire = value.e2eeRequire !== false;   // 缺字段（老桥）→ 按"要求加密"显示
+  const e2eePinned = value.e2eePinned === true;
+  const e2eeStatusText = `${e2eePinned ? "已配对" : "未配对"} · ${e2eeRequire ? "要求加密" : "允许明文"}${
+    e2eePinned && value.e2eePeerKeyId ? `（${value.e2eePeerKeyId}…）` : ""
+  }`;
+  const e2eeStatusColor = !e2eeRequire ? "#f0b429" : e2eePinned ? "#34c37e" : T.caption;
+  // 状态点 + 文案 + 切换按钮。放在**二维码下方**，避免占掉二维码上方的高度（会破坏"两码同顶边"对齐）
+  const e2eeChip = (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: e2eeStatusColor, flex: "none" }} />
+      <span style={{ color: e2eeStatusColor, fontSize: 11.5 }}>{e2eeStatusText}</span>
+    </span>
+  );
+  const e2eeToggle = (
+    <button
+      className="dsm-btn dsm-btn--ghost"
+      style={{ height: 22, padding: "0 8px", fontSize: 11 }}
+      onClick={() => actions.e2eePolicy?.({ require: !e2eeRequire, clearPin: e2eeRequire })}
+    >
+      {e2eeRequire ? "允许明文" : "要求加密"}
+    </button>
+  );
+  const e2eeInlineRow = (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginTop: 10 }}>
+      {e2eeChip}
+      {e2eeToggle}
+    </div>
+  );
   const e2eeCard = (
     <div className="dsm-qr-card">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -540,12 +575,16 @@ function DshmobileCard(props: any) {
               <canvas ref={qr2Ref} />
             </span>
           </div>
+          {e2eeInlineRow}
           <p className="dsm-note" style={{ marginTop: 10, marginBottom: 0 }}>
             手机登录后扫此码，把本机与手机做成端到端加密绑定，设备列表会出现钥匙图标。
           </p>
         </>
       ) : (
-        <p className="dsm-note" style={{ margin: 0 }}>加密配对 · 本机登录后可用</p>
+        <>
+          <p className="dsm-note" style={{ margin: 0 }}>加密配对 · 本机登录后可用</p>
+          {e2eeInlineRow}
+        </>
       )}
     </div>
   );
@@ -635,6 +674,7 @@ function DshmobileCard(props: any) {
                       <canvas ref={qr2Ref} />
                     </span>
                   </div>
+                  {e2eeInlineRow}
                   <p className="dsm-note" style={{ marginTop: 12, textAlign: "center" }}>
                     手机登录后扫此码，把本机与手机做成端到端加密绑定。
                   </p>
@@ -707,6 +747,9 @@ export function apply(ctx: any) {
     register: (req: { username: string; password: string }) =>
       post("/action", { action: "register", payload: req }),
     logout: () => post("/action", { action: "logout" }),
+    // E2EE 策略切换：require=false 时一并解除配对（clearPin），与手机端"永久改用非加密"等价
+    e2eePolicy: (payload: { require: boolean; clearPin?: boolean }) =>
+      post("/action", { action: "e2eePolicy", payload }),
   };
 
   const store = createSnapshotStore<CardSnapshot>({
