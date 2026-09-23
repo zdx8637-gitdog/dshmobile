@@ -56,6 +56,8 @@ for (const k of [...]) if (payload && payload[k] !== undefined) state[k] = paylo
 
 **修正**：不自己判断主题，一律 `var(--dsw-alias-*, 兜底字面量)` —— 令牌随 DSH 主题翻转，浅/暗自动成立。harness 用"浅色默认 + `body[data-ds-dark-theme]`"两套真实令牌值各渲染一遍，断言面板底色分别取自令牌、二维码瓦片恒为纯白。
 
+> ⚠️ **2026-09-23 更正**：这条"一律用 `--dsw-alias-*`"对**正文/按钮**是错的 —— 那些别名令牌偏淡到不可读（浅色下白底白字）。面板现在用自有 `--dsm-*` 调色板，见 §4。
+
 ## 2. 本次实现（`plugins/src/client.tsx`）
 
 - **入口按钮**：鲸鱼瓦片（内联 SVG，path 由 `pw-check/inject-whale-path.mjs` 从 App 图标注入，避免手抄 6 KB 出错）+ 名称 + 状态点 + 箭头；窄轨 36×36 + 角标状态点；hover/focus/展开态按规格（样式在注入的 `<style>` 里，因为内联 style 表达不了 `:hover`）。
@@ -102,7 +104,49 @@ cd D:\p\pw-check ; node check-client-bundle.mjs
 ```
 
 > **未覆盖**：DSH GUI 需要 `dsh web` 打印的带 token URL（我这边访问 127.0.0.1:3080 得 401），因此"在真实 GUI 里的最终观感"由用户刷新页面确认；harness 已把令牌值与 280px 侧栏宽度按真实情况还原。
+>
+> **2026-09-23 更正**：真实 GUI 现在也能自动化 —— `D:\p\tools\pwt\real-panel.mjs` 按 DSH 自己的规则用 `~/.dsh/.credentials.yaml` 里的 browser-session 密钥签一个 cookie（启动 token 只在进程内存里，拿不到），直接打开 3080 并截面板 + 量按钮。见 §4。
 
-## 4. 业务不变量（本次未改，验收脚本会断言）
+## 4. 第三轮修正（2026-09-23 用户反馈「按钮和底色一样」「允许明文文字溢出边框」）
+
+用户原话：**"pc界面几个按钮的效果不太明显，都是和底色一样，需要给他们更醒目的按钮颜色，然后允许明文这个按钮，他的字超出了按钮边框"**。多模态自查（浅/暗 × 宽/窄 × harness + 真实 GUI）后定位到三件事：
+
+### 4.1 ⚠️ 根因：拿 DSH 的"极淡令牌"当按钮文字色
+
+§1.3 的结论（一律用 `--dsw-alias-*`）**是错的**：那些别名令牌不是给"按钮文字/边框"用的，实测真实值（`sync-dsh-tokens.mjs` 从 `@deepseek-ai/dsh-client-ui-theme` 抽出）——
+
+| 令牌 | 浅色 | 暗色 | 当按钮文字时的后果 |
+|---|---|---|---|
+| `--dsw-alias-label-dimmed` | `#e1e5ee` | `#43454a` | 白底 **1.26:1** ／ 深底 **1.45:1** → 看不见 |
+| `--dsw-alias-label-caption` | `#adb2b8` | `#81858c` | 说明文字也偏淡 |
+| `--dsw-alias-border-l3` | `#0000001f` | `#ffffff29` | 白底上边框几乎不可见 |
+
+而 ghost 按钮恰好是"极淡文字 + 透明底 + 极淡边"三件套叠加，于是**浅色下白底白字、暗色下深底深字**，用户看到的"和底色一样"完全成立。harness 早期手抄过一份"看起来合理"的令牌值（把 dimmed 当成正常正文色），所以这条一直测不出来 —— 这是**harness 保真度**问题，不是偶发。
+
+### 4.2 修正
+
+- 新增自有调色板 `--dsm-*`（`body{}` 浅色 / `body[data-ds-dark-theme]{}` 暗色，只挂在 body 上，不碰 `--dsw-*`），取值按"压在背景上能读"选：文字 ≥ 4.5:1、按钮底色与卡片可分辨。
+- 按钮改为**实心**样式：`--brand`（蓝，白字）/ `--ghost`＝中性灰实心 / `--warn`（琥珀，用于「允许明文」）/ `--ok`（绿，用于「要求加密」）/ `--danger`（红）；`.dsm-btn` 统一 `box-sizing:border-box; white-space:nowrap; min-height` 而**不是固定 height**。
+- 溢出根因：E2EE 状态行的按钮写死 `height:22px` + 行内 `gap/flex` 挤压 → 文字换行后**溢出边框**。现在按钮 `nowrap` + `min-height`，状态文案去掉 keyId 前缀（挪到 `title`），行容器 `flex-wrap:wrap`，chip 可省略号收缩。
+
+### 4.3 顺带查出的致命缺陷：拖窗口跨过 1000px 阈值后二维码全白
+
+横版↔竖排切换时 React 换掉 canvas 节点（新节点是默认 300×150 空白画布），而绘制 effect 只依赖 `[url1, url2]` → **码不再绘制，用户扫不了码**（面板刚打开时正常，拖一下窗口就白）。修正：effect 依赖补上 `wide`；回归探针 `pw-check/panel-harness/qr-layout-probe.mjs`，并进 harness §12。
+
+### 4.4 新增的验收工具（都不需要重启 DSH）
+
+```powershell
+cd D:\p\pw-check\panel-harness
+node sync-dsh-tokens.mjs   # 从本机 DSH 抽真实令牌 → tokens.css（harness 保真度靠它；换 DSH 版本重跑）
+node bundle.mjs            # 用真源码 src/client.tsx 重新打包
+node run-panel-tests.mjs   # 13 组断言（新增 §11 按钮可读性/不溢出、§12 布局切换后码不丢）
+node shots.mjs after       # 浅/暗 × 宽/窄 截图 + 按钮对比度打印（人工多模态复核用）
+node qr-layout-probe.mjs   # 单点探针：拖窗口跨阈值后二维码是否还在
+cd D:\p\tools\pwt ; node real-panel.mjs <前缀>   # 真实 GUI 截图 + 按钮实测（自带 cookie 签发）
+```
+
+**热更新**：面板是插件 client 半，宿主按请求读 `lib/client.js`（插件目录是 junction，`D:\p\dshmobile-plugin` → `~/.dsh/profiles/web/node_modules/@zdx8637/dshmobile-bridge`）。实测 `node scripts/build.mjs` 后 **F5 刷新即可**，无需重启 DSH（真实 GUI 截图前后对比确认）。
+
+## 5. 业务不变量（本次未改，验收脚本会断言）
 
 槽位 `name: "sidebar.footer.action"` / `id: "dshmobile"` / `order: 10`；本地通道 `http://127.0.0.1:17653` 的 `/state` 与 `/action`；动作名 `refreshPairing` / `save` / `register` / `logout`；`/state` 全部字段名；三种二维码 URL 的拼装逻辑（`pair` / `grant` / `e2ee`）。

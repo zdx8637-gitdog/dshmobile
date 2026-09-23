@@ -46,33 +46,51 @@ interface CardSnapshot {
 }
 
 /* ============================ 设计令牌 ============================
-   优先用 DSH 自身的 CSS 变量（浅/深主题自动适配；DSH 的主题靠 body[data-ds-dark-theme] 切换，
-   不要自己判断主题）；变量缺失时退回字面量。 */
+   教训（2026-09-23 用户反馈「按钮和底色一样、字还溢出边框」）：
+   不能拿 DSH 的 label/border 半透明令牌当**按钮文字/边框**用 —— 从用户本机正在运行的 DSH
+   （@deepseek-ai/dsh-client-ui-theme，抽取脚本 pw-check/panel-harness/sync-dsh-tokens.mjs）实测：
+     --dsw-alias-label-dimmed  浅色 #e1e5ee（白底 1.26:1 ≈ 隐形）／暗色 #43454a（#232324 上 1.45:1）
+     --dsw-alias-border-l3     浅色 #0000001f（白底几乎看不到边）
+   于是"极淡文字 + 透明底 + 极淡边"的 ghost 按钮在两种主题下都糊进底色。
+   现在改为自有调色板 `--dsm-*`（CSS 顶部按 body / body[data-ds-dark-theme] 给出两套值，
+   都按压在背景上的可读性选定；只有品牌蓝沿用 DSH 的 deepseek-450，两主题同值）。
+   主题仍然只认 body[data-ds-dark-theme]（DSH 的机制），不自己判断 prefers-color-scheme。 */
 const T = {
-  bg1: "var(--dsw-alias-bg-layer-1, #232324)",
-  bg2: "var(--dsw-alias-bg-layer-2, #2c2c2e)",
-  bg3: "var(--dsw-alias-bg-layer-3, #353638)",
-  bgBase: "var(--dsw-alias-bg-base, #151517)",
-  elev: "var(--dsw-static-neutral-bluish-750, #43454a)",
-  line1: "var(--dsw-alias-border-l1, rgba(255,255,255,.06))",
-  line2: "var(--dsw-alias-border-l2, rgba(255,255,255,.12))",
-  line3: "var(--dsw-alias-border-l3, rgba(255,255,255,.16))",
-  text: "var(--dsw-alias-label-primary, #f9fafb)",
-  dim: "var(--dsw-alias-label-dimmed, #ebeef2)",
-  caption: "var(--dsw-alias-label-caption, #81858c)",
-  muted: "var(--dsw-static-neutral-bluish-700, #61666b)",
-  brand: "var(--dsw-static-deepseek-450, #5686fe)",
-  brandSoft: "var(--dsw-static-deepseek-300, #b7c8fe)",
-  brandWash: "rgba(86,134,254,.16)",
-  hover: "var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.08))",
-  active: "var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.14))",
-  ok: "#34c37e",
-  warn: "#f0b429",
-  off: "#61666b",
-  danger: "#f25a5a",
-  dangerText: "var(--dsw-alias-label-error, #ff9d9d)",
-  dangerWash: "var(--dsw-alias-interactive-bg-hover-danger, rgba(242,90,90,.12))",
-  dangerLine: "rgba(242,90,90,.35)",
+  bg1: "var(--dsm-bg1)",
+  bg2: "var(--dsm-bg2)",
+  bg3: "var(--dsm-bg3)",
+  bgBase: "var(--dsm-bg-base)",
+  elev: "var(--dsm-elev)",
+  line1: "var(--dsm-line1)",
+  line2: "var(--dsm-line2)",
+  line3: "var(--dsm-line3)",
+  text: "var(--dsm-text)",
+  dim: "var(--dsm-text2)",
+  caption: "var(--dsm-caption)",
+  muted: "var(--dsm-muted)",
+  brand: "var(--dsm-brand)",
+  brandFill: "var(--dsm-brand-fill)",
+  brandFillHover: "var(--dsm-brand-fill-hover)",
+  brandSoft: "var(--dsm-brand-soft)",
+  brandWash: "var(--dsm-brand-wash)",
+  hover: "var(--dsm-hover)",
+  active: "var(--dsm-active)",
+  soft: "var(--dsm-soft)",
+  softHover: "var(--dsm-soft-hover)",
+  ok: "var(--dsm-ok)",
+  okBg: "var(--dsm-ok-bg)",
+  okLine: "var(--dsm-ok-line)",
+  okHover: "var(--dsm-ok-hover)",
+  warn: "var(--dsm-warn)",
+  warnBg: "var(--dsm-warn-bg)",
+  warnLine: "var(--dsm-warn-line)",
+  warnHover: "var(--dsm-warn-hover)",
+  off: "var(--dsm-off)",
+  danger: "var(--dsm-danger)",
+  dangerText: "var(--dsm-danger-text)",
+  dangerWash: "var(--dsm-danger-bg)",
+  dangerHover: "var(--dsm-danger-hover)",
+  dangerLine: "var(--dsm-danger-line)",
   panelW: 360,
   pad: 16,
   labelW: 52,
@@ -150,7 +168,39 @@ function paintQr(canvas: HTMLCanvasElement | null, qr: any | null, plan: QrPlan 
 
 /* ============================ 样式（hover/focus 只能靠 CSS） ============================ */
 const STYLE_ID = "dshmobile-panel-style";
+// 调色板：浅色默认 = body{}，暗色 = body[data-ds-dark-theme]{}（与 DSH 的切换机制一致）。
+// 只往 body 上挂 --dsm-* 命名空间，不碰 DSH 自己的 --dsw-*。
 const CSS = `
+body {
+  --dsm-bg1:#ffffff; --dsm-bg2:#f5f6f8; --dsm-bg3:#eceef2; --dsm-bg-base:#ffffff;
+  --dsm-elev:#e6e9ee;
+  --dsm-line1:#e3e6ec; --dsm-line2:#d3d8e0; --dsm-line3:#c3cad4;
+  --dsm-text:#14161a; --dsm-text2:#3d434b; --dsm-caption:#666d76; --dsm-muted:#8a9199;
+  --dsm-brand:#2f6ae8; --dsm-brand-fill:#2f6ae8; --dsm-brand-fill-hover:#2759cd;
+  --dsm-brand-soft:#b7c8fe; --dsm-brand-wash:rgba(86,134,254,.14);
+  --dsm-hover:rgba(20,22,26,.06); --dsm-active:rgba(20,22,26,.10);
+  --dsm-soft:#eef0f4; --dsm-soft-hover:#e2e6ec;
+  --dsm-ok:#0f7a48; --dsm-ok-bg:#e4f7ec; --dsm-ok-line:#9ed9bb; --dsm-ok-hover:#d5f1e1;
+  --dsm-warn:#8a5a00; --dsm-warn-bg:#fdf0d2; --dsm-warn-line:#e8c56b; --dsm-warn-hover:#fbe7bb;
+  --dsm-off:#8a9199;
+  --dsm-danger:#d92d20; --dsm-danger-text:#b3261e; --dsm-danger-bg:#fdecea;
+  --dsm-danger-hover:#fbdad6; --dsm-danger-line:#f0b3ae;
+}
+body[data-ds-dark-theme] {
+  --dsm-bg1:#232324; --dsm-bg2:#2c2c2e; --dsm-bg3:#353638; --dsm-bg-base:#17171a;
+  --dsm-elev:#3a3d42;
+  --dsm-line1:#3a3d42; --dsm-line2:#474b51; --dsm-line3:#5c6169;
+  --dsm-text:#f4f6f8; --dsm-text2:#c9ced6; --dsm-caption:#9aa1aa; --dsm-muted:#767d86;
+  --dsm-brand:#5686fe; --dsm-brand-fill:#3a6ce0; --dsm-brand-fill-hover:#4a7ceb;
+  --dsm-brand-soft:#b7c8fe; --dsm-brand-wash:rgba(86,134,254,.18);
+  --dsm-hover:rgba(255,255,255,.08); --dsm-active:rgba(255,255,255,.14);
+  --dsm-soft:#35383d; --dsm-soft-hover:#41454b;
+  --dsm-ok:#5fd99e; --dsm-ok-bg:#24382e; --dsm-ok-line:#3f6b55; --dsm-ok-hover:#2b4538;
+  --dsm-warn:#f5c453; --dsm-warn-bg:#3d3318; --dsm-warn-line:#6f5c26; --dsm-warn-hover:#4b3f1d;
+  --dsm-off:#767d86;
+  --dsm-danger:#f2555a; --dsm-danger-text:#ff9d9d; --dsm-danger-bg:#3a2426;
+  --dsm-danger-hover:#482b2d; --dsm-danger-line:#6d4143;
+}
 .dsm-entry { display:flex; align-items:center; gap:9px; height:36px; padding:0 10px; width:calc(100% - 24px);
   margin:0 12px; border:1px solid transparent; border-radius:10px; background:transparent; color:${T.text};
   font-size:13.5px; font-weight:500; cursor:pointer; text-align:left; transition:background .16s, border-color .16s; }
@@ -189,16 +239,28 @@ const CSS = `
   transition:border-color .16s, box-shadow .16s; }
 .dsm-input::placeholder { color:${T.muted}; }
 .dsm-input:focus { border-color:${T.brand}; box-shadow:0 0 0 3px ${T.brandWash}; }
-.dsm-btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; height:${T.btnH}px;
-  padding:0 14px; border-radius:${T.rSm}px; font-size:13px; font-weight:500; cursor:pointer;
-  border:1px solid transparent; background:transparent; color:${T.text}; transition:background .16s, border-color .16s; }
-.dsm-btn--brand { background:${T.brand}; color:#fff; }
-.dsm-btn--brand:hover { background:#4176e6; }
-.dsm-btn--ghost { border-color:${T.line3}; color:${T.dim}; }
-.dsm-btn--ghost:hover { background:${T.hover}; color:${T.text}; }
-.dsm-btn--danger { border-color:${T.dangerLine}; color:${T.dangerText}; }
-.dsm-btn--danger:hover { background:${T.dangerWash}; }
-.dsm-btn:disabled { opacity:.45; cursor:not-allowed; }
+.dsm-btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; box-sizing:border-box;
+  min-height:${T.btnH}px; padding:0 14px; border-radius:${T.rSm}px; font-size:13px; font-weight:600;
+  line-height:1.2; white-space:nowrap; flex:none; cursor:pointer;
+  border:1px solid ${T.line3}; background:${T.soft}; color:${T.text};
+  transition:background .16s, border-color .16s, color .16s; }
+.dsm-btn:hover { background:${T.softHover}; }
+.dsm-btn--brand { background:${T.brandFill}; border-color:${T.brandFill}; color:#fff; }
+.dsm-btn--brand:hover { background:${T.brandFillHover}; border-color:${T.brandFillHover}; }
+/* ghost = 中性实心按钮（保留历史类名，避免调用点漏改） */
+.dsm-btn--ghost { background:${T.soft}; border-color:${T.line3}; color:${T.text}; }
+.dsm-btn--ghost:hover { background:${T.softHover}; color:${T.text}; }
+/* 状态色按钮：允许明文（琥珀）/ 要求加密（绿），一眼看出当前政策 */
+.dsm-btn--warn { background:${T.warnBg}; border-color:${T.warnLine}; color:${T.warn}; }
+.dsm-btn--warn:hover { background:${T.warnHover}; }
+.dsm-btn--ok { background:${T.okBg}; border-color:${T.okLine}; color:${T.ok}; }
+.dsm-btn--ok:hover { background:${T.okHover}; }
+.dsm-btn--danger { background:${T.dangerWash}; border-color:${T.dangerLine}; color:${T.dangerText}; }
+.dsm-btn--danger:hover { background:${T.dangerHover}; }
+/* 小号：二维码卡片里的行内按钮。用 min-height 而不是固定 height ——
+   固定高度 + 文字换行 = 文字溢出边框（用户反馈的「允许明文」就是这样） */
+.dsm-btn--xs { min-height:24px; padding:0 10px; font-size:11.5px; border-radius:6px; font-weight:500; }
+.dsm-btn:disabled { opacity:.5; cursor:not-allowed; }
 .dsm-qr-card { background:${T.bg2}; border:1px solid ${T.line1}; border-radius:${T.rMd}px; padding:12px; }
 .dsm-qr-card + .dsm-qr-card { margin-top:10px; }
 .dsm-tile { display:inline-block; background:#fff; border-radius:${T.rSm}px; padding:0; line-height:0;
@@ -338,11 +400,14 @@ function DshmobileCard(props: any) {
     : "";
 
   // 两张码用同一套绘制参数（同尺寸 + 静区 ≥4 模块）
+  // ⚠ deps 必须带 wide：横版↔竖排切换时 React 会换掉 canvas 节点（新节点是默认 300×150 的空白画布），
+  //   只依赖 [url1, url2] 就会出现"拖窗口跨过 1000px 后二维码全白"（用户扫不了码）。
+  //   回归探针：node pw-check/panel-harness/qr-layout-probe.mjs
   React.useEffect(() => {
     const plan = qrPlan([url1, url2]);
     paintQr(qr1Ref.current, plan ? plan.qrs[0] : null, plan);
     paintQr(qr2Ref.current, plan ? plan.qrs[1] : null, plan);
-  }, [url1, url2]);
+  }, [url1, url2, wide]);
 
   // 配对码 / 加密配对倒计时
   React.useEffect(() => {
@@ -516,7 +581,7 @@ function DshmobileCard(props: any) {
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
         <span className="dsm-code">{value.pairingCode || "------"}</span>
-        <button className="dsm-btn dsm-btn--ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+        <button className="dsm-btn dsm-btn--ghost dsm-btn--xs"
           onClick={() => copy(String(value.pairingCode ?? ""), "code")} disabled={!value.pairingCode}>
           {copied === "code" ? "已复制" : "复制"}
         </button>
@@ -536,28 +601,31 @@ function DshmobileCard(props: any) {
   // 状态行：让"当前是加密还是明文、是否已与手机配对"在面板上一眼可见（PC 侧唯一的可见入口）
   const e2eeRequire = value.e2eeRequire !== false;   // 缺字段（老桥）→ 按"要求加密"显示
   const e2eePinned = value.e2eePinned === true;
-  const e2eeStatusText = `${e2eePinned ? "已配对" : "未配对"} · ${e2eeRequire ? "要求加密" : "允许明文"}${
-    e2eePinned && value.e2eePeerKeyId ? `（${value.e2eePeerKeyId}…）` : ""
-  }`;
-  const e2eeStatusColor = !e2eeRequire ? "#f0b429" : e2eePinned ? "#34c37e" : T.caption;
+  // 文案只放结论（配对状态 + 政策）；对端 keyId 挪到 title，避免把这行撑到换行
+  const e2eeStatusText = `${e2eePinned ? "已配对" : "未配对"} · ${e2eeRequire ? "要求加密" : "允许明文"}`;
+  const e2eeStatusTitle = e2eePinned && value.e2eePeerKeyId
+    ? `已与本机配对的手机密钥 ${value.e2eePeerKeyId}…（${e2eeRequire ? "要求加密" : "允许明文"}）`
+    : (e2eeRequire ? "这台电脑要求端到端加密：手机需扫码配对后才能连接" : "这台电脑允许明文：手机可不配对直接连接");
+  const e2eeStatusColor = !e2eeRequire ? T.warn : e2eePinned ? T.ok : T.caption;
   // 状态点 + 文案 + 切换按钮。放在**二维码下方**，避免占掉二维码上方的高度（会破坏"两码同顶边"对齐）
   const e2eeChip = (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+    <span title={e2eeStatusTitle} style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, maxWidth: "100%" }}>
       <span style={{ width: 6, height: 6, borderRadius: "50%", background: e2eeStatusColor, flex: "none" }} />
-      <span style={{ color: e2eeStatusColor, fontSize: 11.5 }}>{e2eeStatusText}</span>
+      <span style={{ color: e2eeStatusColor, fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e2eeStatusText}</span>
     </span>
   );
   const e2eeToggle = (
     <button
-      className="dsm-btn dsm-btn--ghost"
-      style={{ height: 22, padding: "0 8px", fontSize: 11 }}
+      type="button"
+      className={`dsm-btn dsm-btn--xs ${e2eeRequire ? "dsm-btn--warn" : "dsm-btn--ok"}`}
+      title={e2eeRequire ? "改为允许明文：手机可不配对直接连接" : "改回要求端到端加密"}
       onClick={() => actions.e2eePolicy?.({ require: !e2eeRequire, clearPin: e2eeRequire })}
     >
       {e2eeRequire ? "允许明文" : "要求加密"}
     </button>
   );
   const e2eeInlineRow = (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginTop: 10 }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
       {e2eeChip}
       {e2eeToggle}
     </div>
@@ -644,7 +712,7 @@ function DshmobileCard(props: any) {
               </div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 12 }}>
                 <span className="dsm-code">{value.pairingCode || "------"}</span>
-                <button className="dsm-btn dsm-btn--ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+                <button className="dsm-btn dsm-btn--ghost dsm-btn--xs"
                   onClick={() => copy(String(value.pairingCode ?? ""), "code")} disabled={!value.pairingCode}>
                   {copied === "code" ? "已复制" : "复制"}
                 </button>
@@ -704,7 +772,7 @@ function DshmobileCard(props: any) {
         </div>
         {statusRows}
         <div style={{ marginTop: 12 }}>
-          <a className="dsm-btn dsm-btn--ghost" style={{ textDecoration: "none", height: 26, padding: "0 10px", fontSize: 12 }} href="https://github.com/zdx8637-gitdog/dshmobile#readme" target="_blank" rel="noreferrer">帮助文档</a>
+          <a className="dsm-btn dsm-btn--ghost dsm-btn--xs" style={{ textDecoration: "none" }} href="https://github.com/zdx8637-gitdog/dshmobile#readme" target="_blank" rel="noreferrer">帮助文档</a>
         </div>
       </div>
       <div className="dsm-sec">
