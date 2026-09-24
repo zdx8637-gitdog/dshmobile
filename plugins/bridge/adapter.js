@@ -543,9 +543,12 @@ export class Adapter {
       const idx = base.items.findIndex((w) => w.workspaceId === value.workspace.workspaceId);
       if (idx >= 0) base.items[idx] = value.workspace; else base.items.push(value.workspace);
       this.workspaceBaseline = base;
+      // 转推给手机：会话列表按工作区分组用（新增帧类型，不改既有响应字段）
+      this.relay.forwardEvent({ frame: { type: "host/workspace-changed", workspace: value.workspace } });
     } else if (value.type === "remove") {
       base.items = base.items.filter((w) => w.workspaceId !== value.workspaceId);
       this.workspaceBaseline = base;
+      this.relay.forwardEvent({ frame: { type: "host/workspace-changed", removedWorkspaceId: value.workspaceId } });
     } else if (value.type === "order" && Array.isArray(value.workspaceIds)) {
       base.items.sort((a, b) => {
         const ai = value.workspaceIds.indexOf(a.workspaceId);
@@ -553,6 +556,7 @@ export class Adapter {
         return (ai < 0 ? 1e9 : ai) - (bi < 0 ? 1e9 : bi);
       });
       this.workspaceBaseline = base;
+      this.relay.forwardEvent({ frame: { type: "host/workspace-order", workspaceIds: value.workspaceIds } });
     } else if (value.type === "archived" && Array.isArray(value.archivedSessionIds)) {
       base.archivedSessionIds = value.archivedSessionIds;
       this.workspaceBaseline = base;
