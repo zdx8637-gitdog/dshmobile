@@ -237,7 +237,17 @@ export class RelayBridge {
     }
     if (!env.crypto || !env.payload?.ct) {
       // 已配对却收到明文（手机重装后新身份未配对）→ 回 E2EE_REQUIRED，让手机提示重新配对/确认回退。
-      if (env.kind === "request" && typeof env.requestId === "string") {
+      //
+      // ⚠ 2026-09-24 修：「临时明文」这条自救路径在这条分支上**永远走不通**。
+      //   第一段（!established）会先问 `isPlaintextAllowed()`，放行就过；
+      //   但这一段的判据只有"本端密钥是否建立"，**完全没看用户是否已经明确选择降级** ——
+      //   于是"桥侧已配对（isConnectionEstablished=true）+ 手机侧没 pin（重装后发的是明文）"这个组合下，
+      //   用户在手机上点多少次「本次先用明文」都会被这里原样拒掉，且桥根本收不到请求
+      //   （用户看到的就是"临时明文没用 / 刷不出会话"）。
+      //   `isConnectionEstablished` 只说明**桥端**有连接密钥，推不出"手机端也有" ——
+      //   pin 丢失的手机正是拿不到密钥、只能发明文的那一类。
+      //   放行口径与第一段保持一致：控制类照旧提前放行，这里补上"用户显式降级"这一条。
+      if (env.kind === "request" && typeof env.requestId === "string" && !this.isPlaintextAllowed(env)) {
         this.#rejectEnvelope(
           env,
           "E2EE_REQUIRED",
