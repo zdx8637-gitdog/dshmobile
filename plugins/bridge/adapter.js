@@ -202,6 +202,10 @@ export class Adapter {
     this.mux = null;                 // /api/remote.mux 物理连接
     this.eventsClientId = "";        // $events 流 ready 帧下发的 clientId（$events/result 应答用）
     this.sessionFollows = new Map(); // sessionId -> { handle, cursor, projections, snapshot }
+    // 每个会话的**最新投影值**（control 流权威）：sessionId -> { asOfSeq, values: {key: rawValue} }
+    // ⚠ 为什么要单独存：投影更新走 `session/control` 流，而 `session/follow` 只在订阅那一刻给一份
+    //   snapshot 投影 —— 目标从 active 变 complete 这种**订阅之后的变更**在 follow 流上根本不出现。
+    this.sessionProjections = new Map();
     this.workspaceBaseline = null;   // workspace/follow 基线 { items, archivedSessionIds }
     this.workspaceWaiter = null;     // 等待首个 workspace 基线的 promise
     // eventId（$events waterfall rpcId）-> { sessionId, frame, request }，供 cancel 应答与重放
@@ -221,6 +225,7 @@ export class Adapter {
     this.eventsClientId = "";
     this.workspaceBaseline = null;
     this.workspaceWaiter = null;
+    this.sessionProjections = new Map();   // 物理连接重建 → 投影基线会重来一份
     const log = (what) => (err) => console.warn(`[dsh] stream ${what}:`, err?.message ?? err);
     mux.openStream("$events", {}, {
       onItem: (v) => this.handleRemoteEvent(v),
@@ -336,6 +341,17 @@ export class Adapter {
       const entry = this.sessionFollows.get(sessionId);
       if (entry && Number.isInteger(value.event?.seq) && value.event.seq > (entry.cursor ?? -1)) {
         entry.cursor = value.event.seq;
+      }
+      // ⚠ 2026-09-26（目标条不显示的真因）：snapshot 的 projections 是**订阅开始那一刻**的，
+      //   而 `ensureSessionFollow` 复用旧订阅就不再刷新 → 历史响应里发的是旧快照。
+      //   例：会话里后来 create_goal，但订阅是建目标之前开的 → 一律发 goal:null，App 永远看不到目标条。
+      //   修法：把 live 的 session/projection 合并进 entry.projections，让历史响应用最新值。
+      const ev = value.event;
+      if (entry && ev?.type === "session/projection" && typeof ev.key === "string" && ev.value !== undefined) {
+        const p = entry.projections ?? (entry.projections = { asOfSeq: 0, values: {} });
+        if (!p.values || typeof p.values !== "object") p.values = {};
+        p.values[ev.key] = ev.value;
+        if (Number.isInteger(ev.seq)) p.asOfSeq = ev.seq;
       }
       this.#forwardSessionEvent(sessionId, value.event);
     }
@@ -510,14 +526,76 @@ export class Adapter {
     this.relay.forwardEvent({ sessionId, frame, rpcId: eventId });
   }
 
-  /** session/control 流：队列快照/增量 → session/queue 帧（重放缓存）。 */
+  /**
+   * session/control 流：队列快照/增量 → session/queue 帧（重放缓存）；
+   * **投影快照/增量 → 缓存 + session/projection 帧**。
+   *
+   * ⚠ 2026-09-26 真因（用户报"电脑上目标已经没了，手机还看得见"）：
+   *   投影更新是 **control 流**的 `projection` 帧（`{sessionId, key, value, seq}`，
+   *   见 `dsh-api-session-controller/lib/types/types.d.ts` 的 `SessionControlFrame`），
+   *   而这里原来只处理 `queue`，**projection 帧被直接丢掉**。
+   *   于是：follow 流的 snapshot 表示"订阅那一刻"的投影（本项目里 = goal 刚建、phase=active），
+   *   之后 goal 变 complete / 被清掉，手机永远收不到 → 目标条一直显示"进行中的目标"。
+   *   副证：桥日志里 `live goal merged` 计数为 0（那处合并挂在 follow 流上，永远不会命中）。
+   */
   handleControlFrame(value) {
     if (!value || typeof value.type !== "string") return;
     if (value.type === "baseline") {
       for (const [sid, items] of Object.entries(value.value?.queues ?? {})) this.#forwardQueue(sid, items);
+      // 基线里带了**每个会话**的完整投影快照：全部登记（后面 sessions.history 就直接发新鲜值）
+      for (const [sid, proj] of Object.entries(value.value?.projections ?? {})) {
+        if (!proj || typeof proj !== "object") continue;
+        this.sessionProjections.set(sid, {
+          asOfSeq: Number.isInteger(proj.asOfSeq) ? proj.asOfSeq : 0,
+          values: { ...(proj.values ?? {}) },
+        });
+      }
+      console.log("[adapter] control baseline: projections for", this.sessionProjections.size, "sessions");
       return;
     }
-    if (value.type === "queue" && typeof value.sessionId === "string") this.#forwardQueue(value.sessionId, value.items);
+    if (value.type === "queue" && typeof value.sessionId === "string") {
+      this.#forwardQueue(value.sessionId, value.items);
+      return;
+    }
+    if (value.type === "projection" && typeof value.sessionId === "string" && typeof value.key === "string") {
+      this.#applyProjection(value.sessionId, value.key, value.value, value.seq, /* forward */ true);
+    }
+  }
+
+  /**
+   * 登记一条投影增量（并可选转推给手机）。
+   *
+   * `values[key]` 存**裸值**（与 follow snapshot 的 `projections.values[key]` 同形状，
+   * 因为 `sessions.history` 直接把这份快照透传给 App）；
+   * 转推给 App 时套上宿主那层的 `{ver, seq, val}` 信封 —— App 的 `goalNodeOf` 就是按信封解析的。
+   */
+  #applyProjection(sid, key, value, seq, forward) {
+    const cur = this.sessionProjections.get(sid) ?? { asOfSeq: 0, values: {} };
+    // 只接受更新的帧（基线可能与 follow snapshot 交错到达）
+    if (Number.isInteger(seq) && cur.asOfSeq > seq) return;
+    cur.values[key] = value;
+    if (Number.isInteger(seq)) cur.asOfSeq = seq;
+    this.sessionProjections.set(sid, cur);
+
+    // follow 缓存里那份快照也同步一份：history 读的是它（保留原有"snapshot 优先"的语义）
+    const entry = this.sessionFollows.get(sid);
+    if (entry && entry.projections) {
+      if (!entry.projections.values || typeof entry.projections.values !== "object") entry.projections.values = {};
+      entry.projections.values[key] = value;
+      if (Number.isInteger(seq) && seq > (entry.projections.asOfSeq ?? -1)) entry.projections.asOfSeq = seq;
+    }
+
+    if (!forward) return;
+    this.relay.forwardEvent({
+      sessionId: sid,
+      frame: {
+        type: "session/projection",
+        sessionId: sid,
+        key,
+        seq,
+        value: { ver: 1, seq, val: value },
+      },
+    });
   }
 
   #forwardQueue(sid, items) {
@@ -1066,6 +1144,10 @@ export class Adapter {
             this.sessionFollows.delete(sid);
           }
         }
+        // 投影缓存同样修剪（control 基线只覆盖存活会话，但会话被释放后这份缓存会一直留着）
+        for (const sid of [...this.sessionProjections.keys()]) {
+          if (!live.has(sid)) this.sessionProjections.delete(sid);
+        }
         return this.relay.respond(requestId, type, {
           ok: true,
           data: {
@@ -1095,6 +1177,12 @@ export class Adapter {
           projections = entry.projections ?? null;
         } catch (err) {
           console.warn("[adapter] session/follow for history failed:", err?.message ?? err);
+        }
+        // ⚠ 投影以 **control 流**为准（follow 的 snapshot 只代表订阅那一刻；见 #applyProjection 的说明）。
+        //   两边都有时取 asOfSeq 更大的那份，避免"control 先到、follow 快照后到"把新鲜值盖回旧的。
+        const liveProj = this.sessionProjections.get(sessionId);
+        if (liveProj && (!projections || (liveProj.asOfSeq ?? 0) > (projections.asOfSeq ?? -1))) {
+          projections = liveProj;
         }
         const t0 = Date.now();
         const r = await this.dsh.unary("session/page", {
