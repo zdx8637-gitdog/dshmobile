@@ -203,7 +203,33 @@ server.on("upgrade", (req, socket) => {
             socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "waterfall", event: "user-questions/request", eventId: "evt-2", agentId: "sess-1", request: { questions: [{ id: "q1", question: "怎么做?", options: [{ label: "A" }, { label: "B" }] }] } } })));
             socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "emit", event: "api-session/added", args: [{ sessionId: "sess-9", cwd: "D:\\p", updatedAt: 1, running: false, blank: false }] } })));
           } else if (msg.endpoint === "session/control") {
+            // ① 旧协议基线（DSH < 0.1.7）：baseline 直接带 `queues` 字典 —— 保留，测**向后兼容**
             socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "baseline", value: { queues: { "sess-1": [{ id: "q1", placement: "queued", message: { id: "q1", content: [{ type: "text", text: "hi" }] } }] }, jobs: {}, projections: {} } } })));
+            // ② 新协议（DSH 0.1.7-rc.2 起）：排队搬进 `inbox` 投影，`queue` 帧类型已删除。
+            //    ⚠ 这一段是本轮补的 —— 原来只喂 ①，所以**上游把 queue 换成 inbox 时测试照样全绿**，
+            //    白白掩盖了一次真实断链（手机端队列坞整条不显示）。
+            socket.write(encodeFrame(JSON.stringify({
+              type: "item",
+              streamId: msg.streamId,
+              value: {
+                type: "baseline",
+                value: {
+                  projections: {
+                    "sess-1": {
+                      // ⚠ asOfSeq 必须**小于** follow 快照的 5，否则这里会顶掉快照里的 title，
+                      //   把 "projections 透传" 那条断言带崩（队列帧的转发与 seq 无关，不受影响）。
+                      asOfSeq: 4,
+                      values: {
+                        inbox: {
+                          "next-turn": [{ id: "q2", content: [{ type: "text", text: "排队消息" }], source: { kind: "user", rpcId: "r2" } }],
+                          "next-step": [{ id: "q3", content: [{ type: "text", text: "引导消息" }], source: { kind: "user" } }],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            })));
           } else if (msg.endpoint === "workspace/follow") {
             socket.write(encodeFrame(JSON.stringify({ type: "item", streamId: msg.streamId, value: { type: "baseline", value: { items: [{ workspaceId: "ws-1", path: "D:\\p", title: "p", sessionIds: ["sess-1"], createdAt: "", updatedAt: "" }], archivedSessionIds: ["arch-1"] } } })));
           } else if (msg.endpoint === "session/follow") {
@@ -347,7 +373,15 @@ try {
   check("markSeen 后推「绿点清除」帧（内容不含 sess-1）", Array.isArray(flagSeenIds) && !flagSeenIds.includes("sess-1") && adapter.completedSessions.size === 0, `frame=${JSON.stringify(flagSeenIds)} real=${JSON.stringify([...adapter.completedSessions])}`);
 
   console.log("[8] session/control 队列 + workspace.list + 其余端点映射");
-  check("session/queue 转发", relayEvents.some((e) => e.frame?.type === "session/queue" && e.frame.sessionId === "sess-1"));
+  check("session/queue 转发（旧协议 queues 基线）", relayEvents.some((e) => e.frame?.type === "session/queue" && e.frame.sessionId === "sess-1" && e.frame.items?.some((it) => it.id === "q1")));
+  // ⚠ **新协议（inbox 投影）必须也能出队列帧** —— 这是本轮修的那条断链，别再让它退化。
+  const qFrames = relayEvents.filter((e) => e.frame?.type === "session/queue" && e.frame.sessionId === "sess-1");
+  const qItems = qFrames.flatMap((e) => e.frame.items ?? []);
+  const queuedItem = qItems.find((it) => it.id === "q2");
+  const steeringItem = qItems.find((it) => it.id === "q3");
+  check("inbox 投影 → session/queue 帧（next-turn → queued）", !!queuedItem && queuedItem.placement === "queued", JSON.stringify(qItems.map((i) => [i.id, i.placement])));
+  check("inbox 投影 → session/queue 帧（next-step → steering）", !!steeringItem && steeringItem.placement === "steering", JSON.stringify(qItems.map((i) => [i.id, i.placement])));
+  check("inbox → 队列项保留 message.content 数组（手机端 textOf 吃这个形状）", Array.isArray(queuedItem?.message?.content) && queuedItem.message.content[0]?.text === "排队消息", JSON.stringify(queuedItem));
   await adapter.handleRequest({ requestId: "r6", type: "workspace.list", payload: {} });
   const r6 = relayResponses.find((r) => r.requestId === "r6");
   check("workspace.list 基线", r6?.payload?.ok === true && r6.payload.data.items?.[0]?.workspaceId === "ws-1", JSON.stringify(r6?.payload));

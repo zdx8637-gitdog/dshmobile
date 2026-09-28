@@ -19,6 +19,40 @@ function e2eeDebug(msg) {
 const READ_ONLY_TYPES = new Set(["sessions.list", "sessions.history", "session.models", "commands.list", "events.subscribe", "events.unsubscribe", "workspace.list", "host.listDirectory", "host.listDrives"]);
 const WRITE_TYPES = new Set(["sessions.create", "sessions.run", "sessions.interrupt", "sessions.steer", "session.selectModel", "commands.execute", "approvals.respond", "questions.respond", "sessions.rename", "sessions.fork", "sessions.archive", "sessions.updateQueue", "host.createDirectory", "sessions.markSeen"]);
 
+/**
+ * `inbox` 投影 → 手机端**队列帧的 items（旧形状）**。
+ *
+ * **为什么需要**：DSH `0.1.7-rc.2` 把「排队」从独立帧搬进了 `inbox` 投影 ——
+ * `SessionControlFrame` 现在**只剩 `baseline` / `projection` 两种**，原来的 `queue` 帧类型没了。
+ * 而手机端（`ConversationScreen.kt` 的 `session/queue` 分支）读的是旧形状
+ * `{ id, placement: queued|steering|context, message: { content } }`。
+ * 这里做一对一适配，**帧名与 item 形状都不变** ⇒ 手机端一行都不用改。
+ *
+ * 依据：
+ * - `@deepseek-ai/dsh-agent` `lib/types/types.d.ts`：
+ *   `InboxState = { 'next-turn': UserMessage[]; 'next-step': UserMessage[] }`
+ * - `@deepseek-ai/dsh-agent-loop` `lib/index.js`：`inboxProjectionDefinition` 带
+ *   `wire: { viewSchema, view }` ⇒ 该投影**会对客户端下发**（实测桥确实收到 `key=inbox` 的帧）
+ * - **语义映射的依据**：官方客户端自己的"队列"**只读 `next-turn`**
+ *   （`@deepseek-ai/dsh-client-ui-conversation/lib/client.js` 的 14125 / 14285 / 15303 三处）
+ *   ⇒ `next-turn` = 排队；`next-step` = 当轮内注入 = 引导。
+ *
+ * ⚠ `content` **原样透传、不拍平成字符串** —— 手机端 `textOf()` 吃的就是**内容块数组**。
+ * ⚠ 旧的 `context` 这个 placement 在新协议里没有对应物；手机端**两边都不渲染它**，故省略。
+ */
+function inboxToQueueItems(inbox) {
+  if (!inbox || typeof inbox !== "object") return [];
+  const out = [];
+  for (const [target, placement] of [["next-turn", "queued"], ["next-step", "steering"]]) {
+    const rows = Array.isArray(inbox[target]) ? inbox[target] : [];
+    for (const row of rows) {
+      if (!row || typeof row.id !== "string") continue;
+      out.push({ id: row.id, placement, message: { content: row.content ?? [] } });
+    }
+  }
+  return out;
+}
+
 /** 读取文件头部若干字节用于魔数嗅探（避免为非图片的大文件整体读入内存）。 */
 async function readFileHeader(path, len = 16) {
   const fh = await open(path, "r");
@@ -181,6 +215,8 @@ export class Adapter {
     this.archivedSessionIds = [];
     // sessionId -> 最近一次 session/queue 帧（客户端订阅时重放，保证 QueueDock 状态不丢）
     this.queueFrames = new Map();
+    // control 流里出现过的**未识别帧类型**（每种只警告一次，见 handleControlFrame 末尾）
+    this.warnedControlTypes = new Set();
     // App 内提醒：sessionId -> 有「已完成但未查看」的对话（绿点）
     this.completedSessions = new Set();
     // 当前回合出过 assistant 消息的会话（用于区分 turn/end 是「完成」还是「等待审批/提问」）
@@ -541,6 +577,7 @@ export class Adapter {
   handleControlFrame(value) {
     if (!value || typeof value.type !== "string") return;
     if (value.type === "baseline") {
+      // 旧协议（DSH < 0.1.7）的 baseline 直接带 queues 字典；新版已删，留着兼容旧 DSH
       for (const [sid, items] of Object.entries(value.value?.queues ?? {})) this.#forwardQueue(sid, items);
       // 基线里带了**每个会话**的完整投影快照：全部登记（后面 sessions.history 就直接发新鲜值）
       for (const [sid, proj] of Object.entries(value.value?.projections ?? {})) {
@@ -549,16 +586,32 @@ export class Adapter {
           asOfSeq: Number.isInteger(proj.asOfSeq) ? proj.asOfSeq : 0,
           values: { ...(proj.values ?? {}) },
         });
+        // ⚠ 新协议：排队数据在 `inbox` 投影里 —— 基线里也有一份，立刻补发队列帧，
+        //   否则"订阅那一刻已经在排队"的消息要等下一次 inbox 变更才显示。
+        if (proj.values?.inbox) this.#forwardQueue(sid, inboxToQueueItems(proj.values.inbox));
       }
       console.log("[adapter] control baseline: projections for", this.sessionProjections.size, "sessions");
       return;
     }
     if (value.type === "queue" && typeof value.sessionId === "string") {
+      // 旧协议的独立队列帧（新版已无此类型；留着兼容旧 DSH）
       this.#forwardQueue(value.sessionId, value.items);
       return;
     }
     if (value.type === "projection" && typeof value.sessionId === "string" && typeof value.key === "string") {
       this.#applyProjection(value.sessionId, value.key, value.value, value.seq, /* forward */ true);
+      // ⚠ **2026-09-28 断链修复**：DSH `0.1.7-rc.2` 起「排队」不再是独立帧，而是 `inbox` 投影。
+      //   不在这里翻译，`session/queue` 帧就**永远不会发**（`#forwardQueue` 成为死代码），
+      //   手机端队列坞（`DshQueueBar`）整条不显示。
+      //   实测依据：桥日志里 `session/queue` 转发恒为 0；App 侧 logcat 有 `projection key=inbox`。
+      if (value.key === "inbox") this.#forwardQueue(value.sessionId, inboxToQueueItems(value.value));
+      return;
+    }
+    // ⚠ 上游每搬一次协议，这里就会**静默漏掉一条路**（2026-09-26 的 projection、2026-09-28 的 queue
+    //   都是这么发现的）。未知帧类型必须留痕，且**每种只报一次**，否则会把日志刷爆。
+    if (!this.warnedControlTypes.has(value.type)) {
+      this.warnedControlTypes.add(value.type);
+      console.warn("[adapter] control frame: 未识别的类型（已忽略，只报一次）:", value.type);
     }
   }
 
@@ -600,6 +653,9 @@ export class Adapter {
 
   #forwardQueue(sid, items) {
     const frame = { type: "session/queue", sessionId: sid, items: Array.isArray(items) ? items : [] };
+    // 诊断：**只报条数、不打内容**。上游每把"排队"搬一次家（2026-09-28 从独立帧搬进 `inbox` 投影），
+    // 这里就会静默变成死代码 —— 这条日志是判断"帧到底有没有发出去"的唯一现场。
+    console.log("[adapter] queue frame:", sid, "items=", frame.items.length);
     this.queueFrames.set(sid, frame);
     this.relay.forwardEvent({ sessionId: sid, frame });
   }
