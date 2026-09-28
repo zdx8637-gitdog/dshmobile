@@ -52,25 +52,28 @@ npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@lates
 ```
 
 > Requires `pnpm`. After restarting DSH, a ▶ panel appears at the bottom of the web sidebar:
-> ① login / grant code, ② encrypted pairing code. Current plugin version: **0.1.0-beta.20**.
+> ① login / grant code, ② encrypted pairing code. Current plugin version: **1.0.0**.
 
 ### Phone (Android App)
 
 Scan the QR code on the PC panel → download the signed APK from the landing page (current version
-**v0.2.12**). Then scan in the App: ① first to log in, ② then for E2EE pairing — once paired, a
-key icon appears in the device list (E2EE is active).
+**v1.0.0**). Then scan in the App: ① first to log in, ② then for E2EE pairing — once paired, a
+**shield badge** appears in the device list (E2EE is active). A shield with a slash means plaintext;
+both are grey — the difference is the shape, not the colour.
 
-## DSH Version Compatibility (dual-protocol auto-detection)
+## DSH Version Requirement
 
-Since 0.1.0-beta.18 the plugin **auto-detects the DSH generation** — upgrade order doesn't matter:
+The plugin **supports the v2 protocol only, i.e. DSH v0.1.5 or newer**. The legacy protocol for
+older DSH builds was **removed entirely** in `0.1.0-beta.23`.
 
 | DSH version | Plugin behavior |
 | :-- | :-- |
-| **v0.1.5 or newer** | Full new-protocol support: `/api` session auth (launch token → session Cookie), Typert endpoints (`session/*` etc.), `/api/remote.mux` stream multiplexing, `$events` approval/question waterfalls |
-| **v0.1.0-rc.6 or older** | Falls back to the legacy protocol (dot endpoints, `events.mux`/`events.host`, `respond` replies, no auth), matching beta.16 behavior |
+| **v0.1.5 or newer** | Full support: `/api` session auth (launch token → session Cookie), Typert endpoints (`session/*` etc.), `/api/remote.mux` stream multiplexing, `$events` approval/question waterfalls |
+| **v0.1.0-rc.6 or older** | **Not supported** — upgrade DSH first, then install this plugin |
 
-So you can upgrade the plugin first, DSH first, or either way — or leave an old DSH untouched;
-everything keeps working.
+> This is a deliberate narrowing: the dual-protocol branch was a long-standing defect hotspot, since
+> every change had to be verified on both paths. If you are still on a pre-v2 DSH, stay on
+> `0.1.0-beta.22`, or upgrade DSH first.
 
 ## Directory
 
