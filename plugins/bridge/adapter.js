@@ -776,7 +776,10 @@ export class Adapter {
   async handleRequest(env) {
     const { requestId, type, payload = {} } = env;
     if (typeof requestId !== "string") return;
-    console.log("[adapter] request:", type, "from", env.actor?.clientId ?? "?", "payload:", JSON.stringify(payload).slice(0, 400));
+    // 只记「谁发什么类型」用于多设备路由诊断；**故意不打 payload** ——
+    // relay 是先解密再进这里（relay.js:262），打 payload 等于把明文正文
+    // （sessions.run 的消息文本、questions.respond 的选择）追写进 <stateDir>/bridge.log。
+    console.log("[adapter] request:", type, "from", env.actor?.clientId ?? "?");
     // §5 版本闸门的数据来源：记住该 clientId 上报的 appVersion（决定它是否会被"明文强制拒绝"）。
     this.#noteAppVersion(env);
 
