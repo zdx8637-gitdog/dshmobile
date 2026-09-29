@@ -47,7 +47,15 @@ function inboxToQueueItems(inbox) {
     const rows = Array.isArray(inbox[target]) ? inbox[target] : [];
     for (const row of rows) {
       if (!row || typeof row.id !== "string") continue;
-      out.push({ id: row.id, placement, message: { content: row.content ?? [] } });
+      // ★ 2026-09-29：把 `source.rpcId` 一并带给 App —— 它是 DSH 为这条提交铸的**身份**，
+      //   与 `sessions.run` 回传的 `promptId` 同源 ⇒ App 可以**按身份**撤乐观气泡，不再靠文本。
+      //   ⚠ 缺失时给 null（老 DSH / 非 user 来源），App 退回旧的文本匹配。
+      out.push({
+        id: row.id,
+        placement,
+        message: { content: row.content ?? [] },
+        rpcId: row.source && typeof row.source.rpcId === "string" ? row.source.rpcId : null,
+      });
     }
   }
   return out;
@@ -1467,11 +1475,22 @@ export class Adapter {
         if (typeof sessionId !== "string" || !Array.isArray(content) || content.length === 0) {
           return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and content are required" } });
         }
-        // 斜杠命令路由：恰好一个 text 块且以 / 开头 → commands/execute（实测 session.prompt 不会自动执行）
+        // ⚠ 斜杠命令路由：恰好一个 text 块且以 / 开头 → commands/execute（实测 session.prompt 不会自动执行）
         const isSlash = content.length === 1 && content[0]?.type === "text" && typeof content[0].text === "string" && content[0].text.trim().startsWith("/");
+        // ★★ 2026-09-29：**requestId 只 mint 一次**（原来写在 `run()` 里），并**随响应回传给 App**。
+        //
+        //   两个原因：
+        //   ① **重试会换 id**：`session/not-found` 时会再调一次 `run()`，原来的写法等于把同一条消息
+        //      变成两条不同身份的消息（DSH 侧的 `source.rpcId` 也跟着变）。
+        //   ② **更要紧**：这个 id **从来不回传** ⇒ App 手里没有身份 ⇒ 只能按**文本**做去重，
+        //      用户连发 "3"/"1"/"2" 这类短文本时必然失配 ⇒ **排队消息被渲染两次**。
+        //      DSH 会把这个 id 作为 `source.rpcId` 写进**持久的 `user/message`** ⇒ 精确配对是可行的。
+        //   官方同构：`beginSubmission()` 铸造身份 → `prompt(..., requestId)`（见 dsh-api-session-controller）。
+        //   ⚠ 斜杠命令走 `commands/execute`，**没有 prompt 回声** ⇒ 回传 null（App 退回旧行为）。
+        const promptId = randomUUID();
         const run = () => isSlash
           ? this.dsh.unary("commands/execute", { agentId: sessionId, line: content[0].text.trim(), submittedAttachments: [] }, { timeoutMs: 30000 })
-          : this.dsh.unary("session/prompt", { request: { requestId: randomUUID(), sessionId, mode: "queue", content } }, { timeoutMs: 30000 });
+          : this.dsh.unary("session/prompt", { request: { requestId: promptId, sessionId, mode: "queue", content } }, { timeoutMs: 30000 });
         let r = await run();
         if (!r.ok && r.error?.code === "session/not-found") {
           // DSH 释放了该会话（空白会话被清理或 host 重启）：用原 id + 原 cwd 原位重建/恢复后重试一次
@@ -1484,7 +1503,12 @@ export class Adapter {
           r = await run();
         }
         if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
-        return this.relay.respond(requestId, type, { ok: true, data: r.value });
+        // ★ 2026-09-29：把 `promptId` 一并回传（App 用它把"乐观气泡"与 DSH 回声的 `source.rpcId` 精确配对）。
+        //   ⚠ 纯增量：App 原来完全不读 `data`（只判 `ok`）⇒ 老 App 收到也不会变，无兼容问题。
+        //   ⚠ `r.value` 若不是对象（有的端点回原始值），退化成 `{ promptId }`，别把非对象展开炸掉。
+        //   ⚠ 斜杠命令没有 prompt 回声 ⇒ 回 null，App 退回旧的文本去重。
+        const runValue = r.value && typeof r.value === "object" && !Array.isArray(r.value) ? r.value : {};
+        return this.relay.respond(requestId, type, { ok: true, data: { ...runValue, promptId: isSlash ? null : promptId } });
       }
       case "sessions.rename": {
         const { sessionId, title } = payload ?? {};
