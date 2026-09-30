@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="description" content="DSH Mobile — DeepSeek Harness 的 Android 远程客户端。电脑一条命令安装插件，手机扫码即连；无需公网 IP、无需内网穿透。" />
+<meta name="description" content="DSH Mobile — DeepSeek Harness 的 Android 远程客户端。电脑在插件管理器里装一次插件，手机扫码即连；无需公网 IP、无需内网穿透。" />
 <title>DSH Mobile · 离开电脑，继续你的 Agent 工作</title>
 <link rel="icon" href="icon/favicon.ico" sizes="any" />
 <link rel="icon" type="image/svg+xml" href="icon/dsh-mobile-app.svg" />
@@ -326,7 +326,7 @@
       <div>
         <p class="eyebrow">DeepSeek Harness 的 Android 远程客户端</p>
         <h1>离开电脑，<br />继续你的 Agent 工作</h1>
-        <p class="lead">电脑上一条命令装好插件，手机扫码即连。会话、工具、子代理都在你自己的电脑上运行 —— 无需公网 IP、无需内网穿透、无需任何网络配置。</p>
+        <p class="lead">电脑上装一次插件，手机扫码即连。会话、工具、子代理都在你自己的电脑上运行 —— 无需公网 IP、无需内网穿透、无需任何网络配置。</p>
         <div class="hero-cta">
           <a class="btn btn-primary btn-lg" href="#download">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
@@ -351,11 +351,11 @@
           <div class="term">
             <div class="term-bar">
               <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-              <button class="copy" id="copyHero">复制</button>
+              <button class="copy" id="copyHero">复制包名</button>
             </div>
-            <div class="term-body"><span class="p">$</span> <span id="cmdHero">npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest</span></div>
+            <div class="term-body"><span class="p">▸</span> <span id="cmdHero">@zdx8637/dshmobile-bridge@1.0.3</span></div>
           </div>
-          <p class="term-note">需要本机已安装 <b>pnpm</b>（<code>corepack enable</code> 或 <code>npm i -g pnpm</code>）。安装后重启 dsh，Web 左侧栏底部出现 ▶ 箭头，点开即插件面板。</p>
+          <p class="term-note">安装方式（<b>DSH 桌面版 0.2.0+</b>）：打开 DSH → 插件管理器 → <b>「添加插件」</b> → 粘贴上面的包名（带版本号）→ 选「安装源」→ 安装 → <b>重启 DSH</b>，Web 左侧栏底部出现 ▶ 箭头，点开即插件面板。<br />旧版 <code>dsh web</code>（0.1.7）：<code>npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest</code>，需本机已装 <b>pnpm</b>。</p>
         </div>
 
         <div class="pane" id="pane-phone">
@@ -416,7 +416,7 @@
           <div class="icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></div>
           <h3>插件即桥接</h3>
           <div class="k">Bridge as a Plugin</div>
-          <p>一条 <span style="font-family:var(--mono);font-size:12.5px">npx</span> 命令接入 DSH，无需本地补丁、跨平台、升级免疫；电脑主动连出，不暴露任何端口。</p>
+          <p>在 DSH 插件管理器里粘贴一个包名即接入，无需本地补丁、跨平台、升级免疫；电脑主动连出，不暴露任何端口。</p>
         </div>
         <div class="card fcard reveal">
           <div class="icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l7 4v5c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V7l7-4z"/><path d="M9.5 12.5l1.8 1.8 3.4-3.6"/></svg></div>
@@ -482,10 +482,11 @@
       <div>
         <div class="card step reveal">
           <div class="step-head"><span class="num">1</span><h3>电脑端安装插件</h3></div>
-          <p>在装有 DSH 的电脑上执行下面这条命令，然后重启 dsh。</p>
-          <div class="mini-term"><span style="color:var(--blue-2)">$</span> npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest
+          <p><b>DSH 桌面版（0.2.0+）</b>：打开 DSH → 插件管理器 → 「添加插件」→ 粘贴下面的包名 → 选「安装源」→ 安装，然后<b>重启 DSH</b>。</p>
+          <div class="mini-term"><span style="color:var(--blue-2)">▸</span> @zdx8637/dshmobile-bridge@1.0.3
             <button class="copy" style="position:absolute;top:10px;right:12px" data-copy="cmd1">复制</button>
           </div>
+          <p style="margin-top:10px">旧版 <code>dsh web</code>（0.1.7）：<code>npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest</code>，需本机已装 pnpm。</p>
         </div>
         <div class="card step reveal">
           <div class="step-head"><span class="num">2</span><h3>手机扫码下载 App</h3></div>
@@ -564,7 +565,7 @@
         </details>
         <details>
           <summary>电脑端需要做什么准备？</summary>
-          <p>在电脑上执行一条 <span style="font-family:var(--mono);font-size:12.5px">npx</span> 命令安装插件并重启 dsh，插件会自动注册设备并保持在线；电脑无需公网 IP 或端口映射。</p>
+          <p>在电脑上装一次插件并重启 dsh（桌面版：插件管理器 →「添加插件」→ 粘贴包名；旧版 <code>dsh web</code>：用 npx 命令），插件会自动注册设备并保持在线；电脑无需公网 IP 或端口映射。</p>
         </details>
         <details>
           <summary>手机流量消耗大吗？</summary>
@@ -607,7 +608,7 @@
   var APK_VERSION = "1.0.0";
   var APK_FILE = "DSH-Mobile-" + APK_VERSION + ".apk";
   var PROD_ORIGIN = "https://www.deepseek-claudex.cn";
-  var NPM_CMD = "npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest";
+  var NPM_CMD = "@zdx8637/dshmobile-bridge@1.0.3";
   var GITHUB = "https://github.com/zdx8637-gitdog/dshmobile";
   var params = new URLSearchParams(location.search);
 

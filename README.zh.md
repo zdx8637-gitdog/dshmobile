@@ -4,7 +4,7 @@
 
 <p align="center"><img src="docs/images/banner.png" width="760" alt="dshmobile banner"/></p>
 
-**开箱即用**：一条命令装插件 → 扫码 → 手机接着干。为 DSH 建立一个真正的 Remote Client——
+**开箱即用**：装一次插件 → 扫码 → 手机接着干。为 DSH 建立一个真正的 Remote Client——
 不需要懂 Tailscale、隧道、端口、NAT 或任何网络概念，不修改 DSH，跨平台。
 
 在手机上远程控制本机 DeepSeek Harness（DSH）：扫码配对 → 设备 → 会话树 → 对话、审批、
@@ -42,14 +42,42 @@
 
 ## 安装
 
-### 电脑端（PC Bridge）
+**先选方式**：DSH **桌面版 0.2.0 及以上** → 用 §A（GUI，推荐）；旧版 `dsh web`（**0.1.7**）→ 用 §B（CLI）。
+两种方式装的是同一个包：`@zdx8637/dshmobile-bridge`（当前插件版本 **1.0.3**）。
+
+### A. 电脑端 —— DSH 0.2.0 桌面版：GUI 安装（推荐）
+
+1. 打开 DSH 桌面版 → 插件管理器 → 点 **「添加插件」**；
+2. 在输入框里粘贴**带精确版本号**的包名（输入框提示原文是「输入插件的包名、GitHub 仓库地址或
+   本地目录路径。」，GitHub 仓库地址与本地目录路径它同样接受）：
+
+   ```
+   @zdx8637/dshmobile-bridge@1.0.3
+   ```
+
+3. 右侧 **「安装源」** 按网络情况选 `npm 官方源` 或 `中国大陆镜像源`；
+4. 点安装；
+5. **重启 DSH**（宿主需要重新加载插件才会生效）；
+6. 打开面板：Web 左侧栏底部出现 ▶ 箭头，点开即配置面板
+   （① 登录 / 授权码，② 加密配对码）。
+
+> ⚠️ **务必带上精确版本号**（如 `@zdx8637/dshmobile-bridge@1.0.3`）。
+> profile 目录里有 `pnpm-lock.yaml`，只写包名重装时锁文件可能把版本钉回旧的
+> （实测：线上已经发到 1.0.2，重装后却仍然是 1.0.0）。
+
+> ⚠️ **没有自动更新。** 弹窗原文：「插件安装后，暂不支持自动更新。若需升级，请先卸载再安装新版」。
+> 升级 = 先在插件管理器里**卸载**，再按上面的步骤装上带新版本号的包名。
+
+### B. 电脑端 —— DSH 0.1.7（旧版：`dsh web` + CLI）：CLI 安装
 
 ```sh
 npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest
+# 重启 dsh 后，Web 左侧栏底部出现 ▶ 箭头，点开即配置面板
 ```
 
-> 前置 `pnpm`。重启 DSH 后，Web 左侧栏底部出现 ▶ 面板：① 登录 / 授权码，② 加密配对码。
-> 当前插件版本 **1.0.0**。
+> 前置 `pnpm`（`dsh plugin` 子命令依赖它；`corepack enable` 或 `npm i -g pnpm`）。
+> 仅限旧版：`@deepseek-ai/dsh` 的 npm `latest` 指向 0.1.7 的 CLI，所以这条命令拿到的是
+> 0.1.7 的 `dsh plugin`。**0.2.0 及以上请改用上面的 §A（GUI）**，CLI 不是 0.2.0 的安装路径。
 
 ### 手机端（Android App）
 

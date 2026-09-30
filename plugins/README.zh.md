@@ -2,7 +2,7 @@
 
 [English version](./README.md)
 
-**开箱即用的手机远程桥接**：一条命令安装，无需任何网络配置、无需本地补丁，
+**开箱即用的手机远程桥接**：装一次即用，无需任何网络配置、无需本地补丁，
 重启 dsh 后左侧栏即出现常驻二维码面板（跨平台，DSH 升级免疫）。
 
 - **常驻二维码**（Web 左侧栏底部箭头弹窗）：与登录态无关，永远可扫——
@@ -15,6 +15,33 @@
 
 ## 安装
 
+**先选方式**：DSH **桌面版 0.2.0 及以上** → 用 §A（GUI，推荐）；旧版 `dsh web`（**0.1.7**）→ 用 §B（CLI）。
+两种方式装的是同一个包：`@zdx8637/dshmobile-bridge`（当前版本 **1.0.3**）。
+
+### A. DSH 0.2.0 桌面版：GUI 安装（推荐）
+
+1. 打开 DSH 桌面版 → 插件管理器 → 点 **「添加插件」**；
+2. 在输入框里粘贴**带精确版本号**的包名（输入框提示原文是「输入插件的包名、GitHub 仓库地址或
+   本地目录路径。」，GitHub 仓库地址与本地目录路径它同样接受）：
+
+   ```
+   @zdx8637/dshmobile-bridge@1.0.3
+   ```
+
+3. 右侧 **「安装源」** 按网络情况选 `npm 官方源` 或 `中国大陆镜像源`；
+4. 点安装；
+5. **重启 DSH**（宿主需要重新加载插件才会生效）；
+6. 打开面板：Web 左侧栏底部出现 ▶ 箭头，点开即配置面板。
+
+> ⚠️ **务必带上精确版本号**（如 `@zdx8637/dshmobile-bridge@1.0.3`）。
+> profile 目录里有 `pnpm-lock.yaml`，只写包名重装时锁文件可能把版本钉回旧的
+> （实测：线上已经发到 1.0.2，重装后却仍然是 1.0.0）。
+
+> ⚠️ **没有自动更新。** 弹窗原文：「插件安装后，暂不支持自动更新。若需升级，请先卸载再安装新版」。
+> 升级 = 先在插件管理器里**卸载**，再按上面的步骤装上带新版本号的包名。
+
+### B. DSH 0.1.7（旧版：`dsh web` + CLI）：CLI 安装
+
 ```sh
 npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@latest
 # 重启 dsh 后，Web 左侧栏底部出现 ▶ 箭头，点开即配置面板
@@ -23,17 +50,23 @@ npx -y @deepseek-ai/dsh plugin --profile web add @zdx8637/dshmobile-bridge@lates
 前置：本机需要 `pnpm`（`dsh plugin` 子命令依赖它；`corepack enable` 或
 `npm i -g pnpm`）。
 
+> 仅限旧版：`@deepseek-ai/dsh` 的 npm `latest` 指向 0.1.7 的 CLI，所以这条命令拿到的是
+> 0.1.7 的 `dsh plugin`。**0.2.0 及以上请改用上面的 §A（GUI）**，CLI 不是 0.2.0 的安装路径。
+
 手机 App：扫描面板二维码 → 落地页下载 APK（或从
 [发布页](https://github.com/zdx8637-gitdog/dshmobile/releases)获取）。
 
-## 免补丁：面板走本地通道
+## 免补丁：面板走官方通道，旧 HTTP 通道保留兜底
 
 DSH 0.1.0-rc.6 默认不向浏览器暴露第三方 settings 命名空间（上游标注为
-deferred work）。本插件**不依赖该通道**：面板与宿主通过 `127.0.0.1:17653`
-的本地 HTTP 通信（轮询状态 + 下发动作，CORS 仅放行本机来源），因此
+deferred work）。本插件**不依赖该通道**：面板与宿主优先走**官方连接服务的 RPC 通道**
+（`ctx.connection.rpc`，通道名 `/dshmobile`，同源相对路径，不依赖页面 origin），
+探测不到该服务时自动退回 `127.0.0.1:17653` 的本地 HTTP（轮询状态 + 下发动作，
+CORS 回显请求方 origin）。两条通道共用同一份数据与同一批动作，因此
 
-- 一条命令安装即用，**无需任何本地补丁**；
+- 装一次即用，**无需任何本地补丁**；
 - Windows/macOS/Linux 通用；
+- 桌面版（窗口 origin 为 `dsh-app://app`）与 `dsh web` 都能工作；
 - DSH 升级不受影响（历史版本 0.1.0-beta.3 及更早需要 `scripts/expose-settings-namespace.ps1` 补丁，已废弃）。
 
 ## DSH 版本要求（只支持 v0.1.5+）

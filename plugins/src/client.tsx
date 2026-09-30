@@ -1,22 +1,134 @@
 // @zdx8637/dshmobile-bridge 的 client 半壳
 // 更名记录：@liustack/dshmobile-bridge → @zdx8637/dshmobile-bridge（改用自有 scope 以便发布 npm 社区）
 // 左侧栏弹窗卡片：桥状态、连接配置（可编辑保存）、扫码配对（二维码 + 6 位码 + 倒计时 + 刷新）。
-// 数据面：不再走 settings 命名空间（rc.6 不暴露第三方命名空间），改为
-// 轮询宿主 127.0.0.1:17653 的 GET /state + POST /action —— 免补丁、跨平台、跨 DSH 版本。
+// 数据面（两条通道，运行时能力探测决定用哪条 —— 不看 DSH 版本号）：
+//   ★ 首选：官方连接服务 `ctx.connection.rpc.call("/dshmobile", endpoint, payload)`
+//     —— 同源相对路径，由载体（桌面版壳 / Host 的 web 服务）转发并代持鉴权，**不受页面 origin 影响**；
+//   ☆ 兜底：1.0.x 起的本地 HTTP（宿主 127.0.0.1:17653 的 GET /state + POST /action）
+//     —— 只在探测失败时使用（例如没有该服务的老版 DSH）。
 // UI v3（2026-09-20）：入口按钮换成 App 图标 + 状态点；面板改为「状态 / 登录 / 二维码」三块结构；
 // 二维码自绘加固（整数模块 + 内建 4 模块静区 + 两码同尺寸 + DPR 感知）。
+// UI v3.1（2026-09-29）：面板加「通道」指示 + 失败提示带通道/页面来源；版本号取不到时显示「版本未知」。
 import * as React from "react";
 import { createSnapshotStore } from "@deepseek-ai/dsh-client-store";
 // qrcode-generator 会被构建进本 bundle（非 external）；CJS 库用默认导入 + 兜底
 import qrcodeDefault from "qrcode-generator";
 const qrcode: any = (qrcodeDefault as any)?.default ?? qrcodeDefault;
 
-const PANEL_HTTP = "http://127.0.0.1:17653";
+/* ============================ 数据通道 ============================
+   ★ 首选：官方连接服务（Cordis 服务名 "connection"，包 @deepseek-ai/dsh-client-connection）。
+     能力探测（唯一判据，不看版本号）：`typeof ctx.connection?.rpc?.call === "function"`。
+     探测通过 ⇒ `rpc.call("/dshmobile", "state" | "action", payload)`，拿到官方信封
+       { ok: true, value } | { ok: false, error: { code, message, details } }。
+     为什么它是"对的那条路"：它走**同源相对路径**（Web 版是 /dshmobile/...，桌面版是
+     dsh-app://app/dshmobile/...，由 main 进程转发给 Host 并代持 cookie），没有 CORS、没有预检、
+     不依赖 origin —— 官方桌面版 0.2.0 的窗口 origin 是自定义 scheme `dsh-app://app`，
+     旧的跨源 fetch 在那里会被浏览器直接拦掉（面板只看到 `TypeError: Failed to fetch`）。
+   ☆ 兜底：本地 HTTP（宿主 127.0.0.1:17653 的 GET /state + POST /action）。
+     探测失败、或 rpc 调用在**传输层**失败（通道没注册 ⇒ 404 / 连接层未就绪 / 网络中断）时使用；
+     失败后进入静默期（RPC_RETRY_MS），静默期内只走 HTTP，过期后自动再试一次 rpc。
+     ⚠ 业务错误（信封 {ok:false}）**不回退**：那说明请求已经到达宿主 handler，回退只会掩盖真实原因。 */
+type Channel = "rpc" | "http";
 
-export const inject = ["slots"];
+/** 官方 RPC 通道名。⚠ 必须带前导斜杠（官方 assertChannel 正则 `^\/[A-Za-z0-9._~-]+$`）；
+ *  "/api" 是官方保留通道，不能用；客户端内部会 slice(1) 变成相对路径。 */
+const RPC_CHANNEL = "/dshmobile";
+/** 传输层失败后的静默期：这段时间内直接用 HTTP 兜底，过期后自动再探测一次 rpc。 */
+const RPC_RETRY_MS = 30_000;
+
+/**
+ * 旧兜底通道（本地 HTTP）的基址。
+ *
+ * ★ 2026-09-29：**不再写死 `127.0.0.1`**，改成跟随当前页面的 hostname。
+ *
+ * 起因：官方**桌面版 DSH（0.2.0）**里登录直接报 `TypeError: Failed to fetch` ✗ ——
+ * 而同一个插件在 `dsh web`（浏览器访问 `http://127.0.0.1:3080`）里一切正常。
+ * 两者的差别就是**渲染进程的 origin** ✗：写死 `127.0.0.1` 时，只要宿主页面不是从
+ * `127.0.0.1` 打开的（`localhost` / 自定义 scheme / 别的回环地址），请求就会失败，
+ * 而且浏览器出于安全**故意不告诉你原因** ✗（只给一句 `Failed to fetch`）。
+ *
+ * 现在：同源推导；推导不出来时退回 127.0.0.1（行为与旧版一致）。
+ * ⚠ 端口仍固定 17653（与宿主 `DSHMOBILE_HTTP_PORT` 默认值一致）；
+ *   面板与宿主同机，hostname 只是回环写法的差异。
+ * ⚠ 这条只是**兜底**了：首选已经是官方 rpc 通道（不受 origin 影响）。
+ */
+const PANEL_PORT = 17653;
+const PANEL_HTTP = (() => {
+  try {
+    const h = globalThis.location?.hostname;
+    // 只接受回环写法；其他情况（自定义 scheme、file://）一律退回 127.0.0.1
+    if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") {
+      return `http://${h}:${PANEL_PORT}`;
+    }
+  } catch {
+    /* 取不到 location（非浏览器环境）→ 退回默认 */
+  }
+  return `http://127.0.0.1:${PANEL_PORT}`;
+})();
+
+/** 诊断用：把"面板当前看到的页面来源"暴露给错误提示（Failed to fetch 时唯一能自证的信息）。 */
+function pageOrigin(): string {
+  try {
+    return globalThis.location?.origin ?? "(取不到 location)";
+  } catch {
+    return "(取不到 location)";
+  }
+}
+
+/**
+ * 能力探测：官方 connection 服务是否真的提供了 rpc.call（**不看 DSH 版本号**）。
+ * @returns 调用器（endpoint, payload）→ Promise<信封>；探测不通过返回 null（调用方转 HTTP 兜底）。
+ */
+function rpcCaller(ctx: any): ((endpoint: string, payload: any) => Promise<any>) | null {
+  let conn: any;
+  // ① 声明式注入（本插件 inject 里已声明 connection）；服务缺失/未激活时 cordis 会抛 → 吞掉再试 ②
+  try { conn = ctx?.connection; } catch { conn = undefined; }
+  // ② 不依赖 inject 的读取（兜底：作用域/时序导致 ① 拿不到时）
+  if (!conn) {
+    try { conn = ctx?.get?.("connection") ?? ctx?.root?.get?.("connection"); } catch { conn = undefined; }
+  }
+  const rpc = conn?.rpc;
+  if (!rpc || typeof rpc.call !== "function") return null;
+  return (endpoint: string, payload: any) => rpc.call.call(rpc, RPC_CHANNEL, endpoint, payload);
+}
+
+/** 面板上的通道标签（配合"一眼看出是哪条通道在跑"）。 */
+function channelText(ch: Channel | null | undefined): string {
+  if (ch === "rpc") return "rpc（官方）";
+  if (ch === "http") return "http（本地兜底）";
+  return "探测中…";
+}
+
+/* 【兜底自检】万一本插件被 cordis 挂起（inject 的服务没到齐 ⇒ apply 根本不会执行），
+   面板会**完全不出现**，而"没装上"和"被挂起"从界面上分不出来。
+   模块副作用在 bundle 物化时就会跑，所以这里留一个一次性自检：3 秒后若 apply 还没执行，
+   就往控制台打一条能自证的线索（F12 可见）。
+   ⚠ 这只在异常环境下才会打印（0.1.7-rc.2 与 0.2.0 都提供 connection 服务）。 */
+let pluginApplied = false;
+try {
+  if (typeof setTimeout === "function") {
+    setTimeout(() => {
+      if (pluginApplied) return;
+      console.warn(
+        "[dshmobile] 面板未挂载：插件仍在等待注入的服务（slots / connection）。\n" +
+        "  说明宿主没有提供 connection 服务（0.1.7-rc.2 与 0.2.0 都提供；更老的版本可能没有）。\n" +
+        "  宿主侧的本地 HTTP 兜底仍在运行（127.0.0.1:17653），但它只在面板挂载后才会被使用。",
+      );
+    }, 3000);
+  }
+} catch { /* 自检失败不影响任何功能 */ }
+
+/** 客户端插件声明的服务依赖（**服务名**，不是 package.json 里的包名）：
+ *  - "slots"：官方槽位服务，面板注册点（必需）；
+ *  - "connection"：官方连接服务，提供 rpc.call —— 与官方 in-tree 客户端插件（如
+ *    dsh-client-ui-settings-general）同形；服务缺席时 cordis 会挂起本插件（面板不出现）。 */
+export const inject = ["slots", "connection"];
+
 
 interface CardSnapshot {
   status: string;
+  /** 当前实际使用的数据通道（rpc = 官方；http = 本地兜底；null/缺省 = 还没探测）。 */
+  channel?: Channel | null;
   value: {
     enabled?: boolean;
     relayUrl?: string;
@@ -508,6 +620,13 @@ function DshmobileCard(props: any) {
           <span className="dsm-v dsm-v--mono">{value.relayUrl}</span>
         </div>
       ) : null}
+      {/* 通道指示：一眼看出面板现在走的是官方 rpc 还是本地 HTTP 兜底（排查"面板连不上"的第一问） */}
+      <div className="dsm-row">
+        <span className="dsm-k">通道</span>
+        <span className="dsm-v" title="面板 ↔ 宿主的数据通道：rpc = 官方 connection 同源通道；http = 本地 17653 兜底">
+          {channelText(snap?.channel)}
+        </span>
+      </div>
     </>
   );
 
@@ -659,7 +778,20 @@ function DshmobileCard(props: any) {
       <span className="dsm-bar__item">账号 {value.username || "未登录"}</span>
       {value.deviceLabel ? <span className="dsm-bar__item">设备 {value.deviceLabel}</span> : null}
       {/* relay 地址不放状态栏（登录栏输入框里可读），避免挤掉账号/设备的显示 */}
-      <span className="dsm-bar__ver">{value.bridgeVersion ? `bridge v${value.bridgeVersion}` : ""}</span>
+      {/*
+        ★ 2026-09-29：版本号改成**永远显示**。
+        起因：用户要拿"版本号对不对"当**安装是否成功**的判据，但这里原来是
+        `value.bridgeVersion ? … : ""` —— 取不到版本时**整段不渲染**，于是"没显示"既可能是
+        "版本为空"也可能是"没装上"，两种完全不同的情况长得一模一样，没法排查。
+        现在取不到就写「版本未知」：**空白 = 没装上；「版本未知」= 装上了但读不到版本** ✓
+        版本来自宿主 `readPackageVersion()`（读插件自己的 package.json）→ `/state.bridgeVersion`，
+        所以**显示的一定是真实落盘的那一份**，不会骗人。
+      */}
+      <span className="dsm-bar__ver">{value.bridgeVersion ? `v${value.bridgeVersion}` : "版本未知"}</span>
+      {/* 通道指示（横版）：官方 rpc / 本地 http 兜底，一眼可辨 */}
+      <span className="dsm-bar__item" title="面板 ↔ 宿主的数据通道：rpc = 官方 connection 同源通道；http = 本地 17653 兜底">
+        通道 {channelText(snap?.channel)}
+      </span>
       <a className="dsm-bar__link" style={{ textDecoration: "none" }} href="https://github.com/zdx8637-gitdog/dshmobile#readme" target="_blank" rel="noreferrer">帮助文档</a>
       {props.onClose ? (
         <button type="button" className="dsm-bar__close" onClick={props.onClose} title="关闭">✕</button>
@@ -760,7 +892,7 @@ function DshmobileCard(props: any) {
       <div className="dsm-sec">
         <div className="dsm-h">
           <span>状态</span>
-          <span className="dsm-h__meta">{value.bridgeVersion ? `bridge v${value.bridgeVersion}` : ""}</span>
+          <span className="dsm-h__meta">{value.bridgeVersion ? `bridge v${value.bridgeVersion}` : "bridge 版本未知"}</span>
         </div>
         {statusRows}
         <div style={{ marginTop: 12 }}>
@@ -788,50 +920,127 @@ function DshmobileCard(props: any) {
 
 export function apply(ctx: any) {
   ensureStyle();
-  const post = async (path: string, body: any): Promise<void> => {
-    const res = await fetch(PANEL_HTTP + path, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok || j.ok === false) {
-      throw new Error(j?.error?.message ?? `HTTP ${res.status}`);
-    }
+  pluginApplied = true; // 自检用：apply 跑到了（没被 cordis 挂起）
+
+  /* ---- 通道状态：探测是**每次调用现探**（服务可能后到、也可能中途消失） ---- */
+  let channel: Channel | null = null; // 最近一次实际使用的通道（面板上显示它）
+  let rpcRetryAt = 0;                 // rpc 传输层失败后的静默期截止时间戳
+  let warnedRpcFallback = false;      // 回退原因只往控制台打一次，避免 1s 一条刷屏
+
+  /** 通道标签（错误提示里自证用）。 */
+  const channelLabel = () =>
+    channel === "rpc" ? `官方 rpc（${RPC_CHANNEL}）`
+      : channel === "http" ? `本地 HTTP（${PANEL_HTTP}）`
+        : "未探测";
+
+  /** 失败提示必须能自证：报出"在调什么" + "当前通道" + "页面来源"（Failed to fetch 时唯一线索）。 */
+  const transportError = (e: any, target: string) =>
+    new Error(`${e?.message ?? String(e)}\n调用: ${target}\n通道: ${channelLabel()}\n页面来源: ${pageOrigin()}`);
+
+  /** 业务错误标记：信封 {ok:false} / HTTP 200 但 ok:false —— 说明请求**已经到达宿主**，不该回退通道。 */
+  const businessError = (msg: string) => {
+    const e: any = new Error(msg);
+    e.dsmBusiness = true;
+    return e;
   };
 
-  // 动作一律走本地 HTTP 通道（宿主 127.0.0.1:17653）；错误上抛给卡片显示
+  /** 兜底路径：本地 HTTP（宿主 127.0.0.1:17653；行为与 1.0.x 一致，一字未删）。 */
+  async function httpRequest(endpoint: "state" | "action", payload: any): Promise<any> {
+    if (endpoint === "state") {
+      const url = `${PANEL_HTTP}/state`;
+      let res: Response;
+      try {
+        res = await fetch(url, { cache: "no-store" });
+      } catch (e: any) {
+        // ★ fetch 抛错时浏览器**故意不给细节**（只说 "Failed to fetch"）→ 把 URL/通道/页面来源一起报出来
+        throw transportError(e, `fetch(${url})`);
+      }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body.ok !== true) throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
+      return body?.data ?? null;
+    }
+    const url = `${PANEL_HTTP}/action`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (e: any) {
+      throw transportError(e, `fetch(${url})`);
+    }
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.ok === false) throw new Error(j?.error?.message ?? `HTTP ${res.status}`);
+    return null;
+  }
+
+  /**
+   * 统一出口：★首选官方 rpc → 传输层失败静默期内退 ☆本地 HTTP。
+   * @param endpoint "state" | "action"（与宿主 handler 的 endpoint 同名）
+   * @returns state → 面板快照；action → null
+   */
+  async function request(endpoint: "state" | "action", payload: any): Promise<any> {
+    const caller = Date.now() >= rpcRetryAt ? rpcCaller(ctx) : null;
+    if (caller) {
+      channel = "rpc";
+      try {
+        const res = await caller(endpoint, payload);
+        if (res && res.ok === true) return res.value ?? null;
+        // 信封失败 ⇒ 已经到宿主 handler：业务错误，直接上抛（回退只会掩盖真实原因）
+        throw businessError(`rpc ${RPC_CHANNEL}/${endpoint} 失败: ${res?.error?.message ?? "unknown"}`);
+      } catch (err: any) {
+        if (err?.dsmBusiness) throw err;
+        // 传输层失败（通道未注册 ⇒ 404 "transport failure" / 连接层未就绪 / 网络中断）⇒ 回退 HTTP
+        rpcRetryAt = Date.now() + RPC_RETRY_MS;
+        channel = "http";
+        if (!warnedRpcFallback) {
+          warnedRpcFallback = true;
+          console.warn(
+            `[dshmobile] 官方 rpc 通道调用失败，已回退本地 HTTP（${RPC_RETRY_MS / 1000}s 后自动重试官方通道）\n` +
+            `调用: rpc ${RPC_CHANNEL}/${endpoint}\n原因: ${err?.message ?? err}\n页面来源: ${pageOrigin()}`,
+          );
+        }
+      }
+    } else {
+      // 探测不通过（没有 connection.rpc.call）或在静默期内 ⇒ 直接用兜底
+      channel = "http";
+    }
+    return httpRequest(endpoint, payload);
+  }
+
+  // 动作：两条通道共用同一个 request()，所以业务代码与旧版完全一致（宿主 endpoint 也没变）
   const actions = {
-    refreshPairing: () => post("/action", { action: "refreshPairing" }),
-    save: (patch: Record<string, unknown>) => post("/action", { action: "save", payload: patch }),
-    register: (req: { username: string; password: string }) =>
-      post("/action", { action: "register", payload: req }),
-    logout: () => post("/action", { action: "logout" }),
+    refreshPairing: async () => { await request("action", { action: "refreshPairing" }); },
+    save: async (patch: Record<string, unknown>) => { await request("action", { action: "save", payload: patch }); },
+    register: async (req: { username: string; password: string }) => {
+      await request("action", { action: "register", payload: req });
+    },
+    logout: async () => { await request("action", { action: "logout" }); },
     // E2EE 策略切换：require=false 时一并解除配对（clearPin），与手机端"永久改用非加密"等价
-    e2eePolicy: (payload: { require: boolean; clearPin?: boolean }) =>
-      post("/action", { action: "e2eePolicy", payload }),
+    e2eePolicy: async (payload: { require: boolean; clearPin?: boolean }) => {
+      await request("action", { action: "e2eePolicy", payload });
+    },
   };
 
   const store = createSnapshotStore<CardSnapshot>({
     status: "connecting",
+    channel: null,
     value: null,
     actions,
   });
 
-  // 轮询宿主状态（1s）；失败保留上次快照并显示原因
+  // 轮询宿主状态（1s）；失败保留上次快照并显示原因（含"在调什么 + 当前通道 + 页面来源"）
   let alive = true;
   let lastValue: CardSnapshot["value"] = null;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
     while (alive) {
       try {
-        const res = await fetch(`${PANEL_HTTP}/state`, { cache: "no-store" });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok || body.ok !== true) throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
-        lastValue = (body?.data ?? null) as CardSnapshot["value"];
-        store.set({ status: "ok", value: lastValue, actions });
+        lastValue = (await request("state", undefined)) as CardSnapshot["value"];
+        store.set({ status: "ok", channel, value: lastValue, actions });
       } catch (e: any) {
-        store.set({ status: `unavailable: ${e?.message ?? e}`, value: lastValue, actions });
+        store.set({ status: `unavailable: ${e?.message ?? e}`, channel, value: lastValue, actions });
       }
       await sleep(1000);
     }

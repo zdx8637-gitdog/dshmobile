@@ -6,8 +6,14 @@
 //      · 无任何凭据 → mode=grant（匿名出码 + 轮询，手机授权后本机登录，方向二）；
 //   2. bridge 子进程守护：账号密码模式或手机授权 token 模式（包内 bridge 支持两种）；
 //   3. 注册新账号。
-// 数据通道：不再走 DSH settings 命名空间（rc.6 不对浏览器暴露第三方命名空间），
-// 改为 127.0.0.1 本地 HTTP：Web 面板 GET /state 轮询 + POST /action 下发动作。
+// 数据通道（两条，运行时能力探测决定用哪条 —— 不看 DSH 版本号）：
+//   ★ 首选：**官方连接服务** `ctx.connection.rpc` 的 RPC 通道 `"/dshmobile"`
+//     （endpoint = state / action）。它是同源相对路径，由载体（桌面壳 / Host web 服务）转发并代持鉴权，
+//     因此**不受页面 origin 影响** —— 官方桌面版 0.2.0 的窗口 origin 是自定义 scheme `dsh-app://app`，
+//     旧的跨源 fetch 会被浏览器当作跨 scheme CORS 拦掉（`TypeError: Failed to fetch`），这条不会。
+//   ☆ 兜底：1.0.x 起的 127.0.0.1 本地 HTTP（Web 面板 GET /state 轮询 + POST /action 下发动作）。
+//     仅在**能力探测失败**时被面板使用（`typeof ctx.connection?.rpc?.handle === "function"` 为假，
+//     例如更老/没有该服务的 DSH）；宿主这边**永远**照旧监听，两条通道可以同时存在。
 // 收益：一条命令安装即用、跨平台、DSH 升级不受影响、无需任何本地补丁。
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
@@ -45,7 +51,19 @@ const DEVICE_KEY_FILE = path.join(STATE_DIR, "device-key.json");
 // E2EE 策略（与桥同一份文件）：{"require":bool}，缺失/坏文件 = 要求加密（与桥侧默认一致）
 const E2EE_POLICY_FILE = path.join(STATE_DIR, "e2ee-policy.json");
 const PAIRING_FILE = path.join(STATE_DIR, "pairing.json");
+// 兜底通道：本地 HTTP 服务端口（面板侧同值；可用环境变量改，仅影响兜底路径）。
 const HTTP_PORT = parseInt(process.env.DSHMOBILE_HTTP_PORT ?? "17653", 10);
+// 首选通道：官方连接服务上的 RPC 通道名。
+// ⚠ 两条硬约束（官方 `assertChannel`，见 @deepseek-ai/dsh-client-connection）：
+//   1) **必须带前导斜杠**（正则 `^\/[A-Za-z0-9._~-]+$`，写 "dshmobile" 会直接抛 invalid channel）；
+//   2) 不能是保留名 `"/api"`（官方 API 网关占用）。
+// 客户端调用时写同一个字符串（`rpc.call("/dshmobile", endpoint, payload)`，内部 slice(1) 成相对路径）。
+const RPC_CHANNEL = "/dshmobile";
+// 官方通道的探测节奏（秒）：前 60s 每秒试一次 → 之后每 30s 一次 → 300s 后放弃（转纯 HTTP 兜底）。
+// 放弃后行为与 1.0.x 完全一致：拿到 launch token 就停掉轮询。
+const RPC_PROBE_FAST_TICKS = 60;
+const RPC_PROBE_SLOW_EVERY = 30;
+const RPC_PROBE_GIVE_UP_TICKS = 300;
 // 加密配对码（第二个码）TTL：独立于登录码，15 分钟足够完成「扫码→连设备→握手」。
 const E2EE_PAIRING_TTL_MS = 900_000;
 
@@ -250,7 +268,101 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
-  // 途径 1：同步直取（connection 服务可能已就绪）
+  /* ==================== 首选通道：官方连接服务 RPC（能力探测） ====================
+     探测条件是**唯一判据**，故意不看 DSH 版本号（版本号不可靠）：
+       typeof ctx.connection?.rpc?.handle === "function"
+     探测失败 ⇒ 什么都不做，面板继续走下面的本地 HTTP 兜底（旧代码一字未删）。
+     通道名 RPC_CHANNEL 带前导斜杠；handler 必须返回官方信封：
+       { ok: true, value } | { ok: false, error: { code, message, details } }
+     （官方在 handler 抛异常时会把响应变成 HTTP 500 文本，所以这里全量 try/catch 成错误信封，
+       保证面板侧拿到的是**业务错误**而不是"传输失败"，从而不会误触发回退。） */
+  let rpcRegistered = false;
+  let rpcSource = "";
+
+  /** 面板状态快照：HTTP `GET /state` 与 rpc `state` endpoint 共用同一份，两条通道数据必然一致。 */
+  function panelSnapshot() {
+    ensureE2eeCode();
+    // E2EE 运行时状态随每次取状态现读（策略文件 + device-key.json），面板刷新即可反映手机端操作
+    const rt = readE2eeRuntime();
+    return {
+      ...state,
+      e2eeRequire: rt.require,
+      e2eePinned: rt.pinned,
+      e2eePeerKeyId: rt.peerKeyId ? rt.peerKeyId.slice(0, 12) : "",
+    };
+  }
+
+  /** RPC handler：`(endpoint, payload) => Promise<信封>`；payload 与旧 HTTP body 完全同形。 */
+  async function handleRpc(endpoint: string, payload: any) {
+    try {
+      switch (endpoint) {
+        case "state":
+          return { ok: true, value: panelSnapshot() };
+        case "action":
+          await handleAction(String(payload?.action ?? ""), payload?.payload);
+          return { ok: true, value: null };
+        default:
+          return {
+            ok: false,
+            error: {
+              code: "dshmobile/unknown-endpoint",
+              message: `unknown endpoint: ${endpoint}（可用：state / action）`,
+              details: {},
+            },
+          };
+      }
+    } catch (err: any) {
+      return { ok: false, error: { code: "dshmobile/failed", message: String(err?.message ?? err), details: {} } };
+    }
+  }
+
+  /**
+   * 注册官方 RPC 通道（幂等：成功一次就够）。
+   * @param source 诊断用来源标记（sync / inject / poll）
+   * @param contextCtx 已注入 connection 的上下文（声明式路径用），缺省则用宿主根 ctx 现探
+   * @returns 通道是否可用（false = 保持 HTTP 兜底，不改变任何旧行为）
+   */
+  function tryRegisterRpc(source: string, contextCtx?: any): boolean {
+    if (rpcRegistered) return true;
+    try {
+      const base = contextCtx ?? ctx;
+      let conn: any;
+      // cordis 里读未注入的服务属性会抛（"cannot get property ... without inject"）→ 单独 catch
+      try { conn = base?.connection; } catch { conn = undefined; }
+      // 不触发 inject 要求的读取（宿主本插件**故意不声明** connection 硬依赖，见"途径 0"说明）
+      if (!conn) {
+        try { conn = ctx?.get?.("connection") ?? ctx?.root?.get?.("connection"); } catch { conn = undefined; }
+      }
+      const rpc = conn?.rpc;
+      if (typeof rpc?.handle !== "function") return false;
+      rpc.handle(RPC_CHANNEL, (endpoint: string, payload: any) => handleRpc(endpoint, payload));
+      rpcRegistered = true;
+      rpcSource = source;
+      hostLog(`rpc[${source}]: ${RPC_CHANNEL} channel registered (官方通道已启用；本地 HTTP 兜底仍在监听 ${HTTP_PORT})`);
+      return true;
+    } catch (err: any) {
+      hostLog(`rpc[${source}]: unavailable: ${err?.message ?? err}`);
+      return false;
+    }
+  }
+
+  // 途径 0（官方声明式形态）：把一个「声明 inject: ["connection"]」的子插件挂到本插件下。
+  //   ⚠ 为什么不直接在本插件顶层写 `export const inject = ["connection"]`：
+  //     顶层 inject 是**硬依赖**，服务缺席时 cordis 会把整个宿主插件挂起（pending）——
+  //     连桥进程和本地 HTTP 兜底都起不来。而本插件承诺兼容"没有 connection 服务的老版 DSH"
+  //     （见上方 dshLaunchToken 的说明），所以这里把硬依赖降级成一个**子 fiber**：
+  //     服务到位 → 子插件 apply → 注册通道；服务永不到位 → 只有子 fiber 挂起，宿主本体照常工作。
+  try {
+    ctx.plugin?.({
+      name: "dshmobile-rpc",
+      inject: ["connection"],
+      apply(connCtx: any) { tryRegisterRpc("inject", connCtx); },
+    });
+  } catch (err: any) {
+    hostLog(`rpc[inject]: plugin mount failed: ${err?.message ?? err}`);
+  }
+
+  // 途径 1：同步直取（connection 服务可能已就绪；顺带立刻注册 RPC 通道，不依赖回调时序）
   try {
     const conn = ctx?.get?.("connection") ?? ctx?.root?.get?.("connection");
     const ws = ctx?.get?.("webServer") ?? ctx?.root?.get?.("webServer");
@@ -258,17 +370,27 @@ export function apply(ctx: any, _config: any = {}) {
   } catch (err: any) {
     hostLog(`token[sync]: ${err?.message ?? err}`);
   }
+  tryRegisterRpc("sync");
 
   // 途径 2：事件驱动注入（官方形态；服务就绪后回调）
   try {
-    ctx.inject?.(["connection"], (connectionCtx: any) => applyToken(connectionCtx, "inject"));
+    ctx.inject?.(["connection"], (connectionCtx: any) => {
+      applyToken(connectionCtx, "inject");
+      tryRegisterRpc("inject-cb", connectionCtx);
+    });
   } catch (err: any) {
     hostLog(`token[inject]: unavailable: ${err?.message ?? err}`);
   }
 
-  // 途径 3：轮询兜底（inject 不触发/作用域隔离时也能拿到；拿到即停）
+  // 途径 3：轮询兜底（inject 不触发/作用域隔离时也能拿到；两项都拿到即停）
+  //   节奏：前 RPC_PROBE_FAST_TICKS 秒每秒试一次；之后每 RPC_PROBE_SLOW_EVERY 秒试一次；
+  //        超过 RPC_PROBE_GIVE_UP_TICKS 秒仍拿不到 rpc ⇒ 放弃官方通道（回落到旧版行为）。
+  let pollTicks = 0;
   tokenPollTimer = setInterval(() => {
-    if (dshLaunchToken) {
+    pollTicks++;
+    const needToken = !dshLaunchToken;
+    const needRpc = !rpcRegistered && pollTicks <= RPC_PROBE_GIVE_UP_TICKS;
+    if (!needToken && !needRpc) {
       if (tokenPollTimer) { clearInterval(tokenPollTimer); tokenPollTimer = null; }
       return;
     }
@@ -278,6 +400,9 @@ export function apply(ctx: any, _config: any = {}) {
       if (conn) applyToken({ connection: conn, webServer: ws }, "poll");
     } catch {
       /* 下一轮再试 */
+    }
+    if (needRpc && (pollTicks <= RPC_PROBE_FAST_TICKS || pollTicks % RPC_PROBE_SLOW_EVERY === 0)) {
+      tryRegisterRpc("poll");
     }
   }, 1000);
 
@@ -833,13 +958,21 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
-  /** 127.0.0.1 本地 HTTP 服务：面板轮询 /state、下发 /action（CORS 仅放行本机来源）。 */
+  /** 兜底路径：127.0.0.1 本地 HTTP 服务：面板轮询 /state、下发 /action（CORS 仅放行本机来源）。 */
   function startServer() {
     const server = createServer((req, res) => {
       const origin = String(req.headers.origin ?? "");
-      const corsOk = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin);
+      // ★ 2026-09-29：**放宽为回显请求方 origin**（原来是只认 127.0.0.1/localhost 的正则）。
+      //   起因：官方**桌面版 DSH（0.2.0）**里面板报 `TypeError: Failed to fetch`，而同一插件在
+      //   `dsh web`（浏览器开 http://127.0.0.1:3080）里正常 —— 差别就是**渲染进程的 origin**：
+      //   桌面版若不是 `http://127.0.0.1:port` 这种写法（自定义 scheme / file:// / app://，
+      //   origin 可能是 "null" 或别的值），旧正则判不匹配 ⇒ 回 `ACAO: "null"` ⇒ 浏览器**直接拦掉**
+      //   ⇒ 面板只看到一句 `Failed to fetch`（浏览器故意不给细节）。
+      //   ⚠ 安全性不变：本服务只绑回环（listen(HTTP_PORT, "127.0.0.1")），外网访问不到。
+      //   ⚠ origin 缺失（同源请求 / 非浏览器客户端）时回 `*`，与旧行为等价可用。
+      const acao = origin && origin !== "null" ? origin : "*";
       const headers: Record<string, string> = {
-        "Access-Control-Allow-Origin": corsOk ? origin : "null",
+        "Access-Control-Allow-Origin": acao,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
         "Content-Type": "application/json; charset=utf-8",
@@ -856,18 +989,8 @@ export function apply(ctx: any, _config: any = {}) {
       };
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       if (req.method === "GET" && url.pathname === "/state") {
-        ensureE2eeCode();
-        // E2EE 运行时状态随每次 /state 现读（策略文件 + device-key.json），面板刷新即可反映手机端操作
-        const rt = readE2eeRuntime();
-        send(200, {
-          ok: true,
-          data: {
-            ...state,
-            e2eeRequire: rt.require,
-            e2eePinned: rt.pinned,
-            e2eePeerKeyId: rt.peerKeyId ? rt.peerKeyId.slice(0, 12) : "",
-          },
-        });
+        // 与 rpc 的 "state" endpoint 共用 panelSnapshot()：两条通道返回同一份数据
+        send(200, { ok: true, data: panelSnapshot() });
         return;
       }
       if (req.method === "POST" && url.pathname === "/action") {
@@ -896,7 +1019,8 @@ export function apply(ctx: any, _config: any = {}) {
   }
 
   const server = startServer();
-  hostLog(`plugin applied: dshUrl=${dshBaseUrl()} token=${dshLaunchToken ? "yes" : "no"}`);
+  // 诊断一行：官方通道注册结果（rpcSource: sync / inject / inject-cb / poll；no = 只有 HTTP 兜底）
+  hostLog(`plugin applied: dshUrl=${dshBaseUrl()} token=${dshLaunchToken ? "yes" : "no"} rpc=${rpcRegistered ? `yes(${rpcSource})` : "no"}`);
   scheduleConfig(); // 首次装载：按持久化配置启动桥 + 出码
 
   return () => {
