@@ -135,6 +135,10 @@ interface CardSnapshot {
     username?: string;
     password?: string;
     deviceLabel?: string;
+    /** 宿主**自己**推导的"本机已登录"（会话在手 或 本次填了密码）。缺省(undefined)=老宿主 → 退回旧判据。 */
+    loggedIn?: boolean;
+    /** 是否随宿主启动自动连桥（默认 false = 必须用户点「保存并连接」）。 */
+    autoConnect?: boolean;
     bridgeStatus?: string;
     mode?: string;
     pairingCode?: string;
@@ -451,6 +455,15 @@ function bridgeState(snap: CardSnapshot | null): { kind: DotKind; text: string }
   if (snap?.status !== "ok") {
     return /connecting/.test(String(snap?.status ?? "")) ? { kind: "warn", text: "连接中…" } : { kind: "off", text: "未连接" };
   }
+  /* ④ 登录态判据（1.0.4 引入 loggedIn，1.0.5 沿用）：
+     · v.loggedIn === false ⇒ 明确"没凭据"：即使 bridgeStatus 是 running 也不显示「已连接」
+       （避免"用户名预填着、其实桥没跑"被显示成已连接）；
+     · v.loggedIn === undefined ⇒ 老宿主（没有该字段）→ **完全沿用旧判据**，不改变旧行为。 */
+  if (v.loggedIn === false) {
+    if (v.bridgeStatus === "running") return { kind: "warn", text: "桥运行中" };
+    if (v.bridgeStatus === "needs-login") return { kind: "warn", text: "待登录" };
+    return { kind: "off", text: "未连接" };
+  }
   if (v.bridgeStatus === "running" && v.username) return { kind: "ok", text: "已连接" };
   // 桥让位/被顶替：本机还有另一个桥实例在跑（旧版本孤儿或另一个 DSH 实例），本桥已主动退出
   if (/另一个桥实例|已让位/.test(String(v.bridgeStatus ?? ""))) return { kind: "warn", text: "另一个桥实例在运行" };
@@ -478,6 +491,8 @@ function DshmobileCard(props: any) {
   const [e2eeLeft, setE2eeLeft] = React.useState(-1);
   const [localError, setLocalError] = React.useState("");
   const [copied, setCopied] = React.useState("");
+  // 「用户点过连接」：仅用于让「断开」按钮在点击后立刻出现（真实状态以宿主 bridgeStatus 为准）
+  const [connectAsked, setConnectAsked] = React.useState(false);
   const qr1Ref = React.useRef<HTMLCanvasElement | null>(null);
   const qr2Ref = React.useRef<HTMLCanvasElement | null>(null);
   ensureStyle();
@@ -563,6 +578,14 @@ function DshmobileCard(props: any) {
       try { await actions.save(patch); } catch (e) { setLocalError(String(e)); }
     }
   };
+  /** 「保存并连接」= 先落盘表单差异，再**显式**通知宿主"用户点了连接"。
+   *  1.0.4 起宿主不再自动连接 ⇒ 这一下是唯一能让桥启动、连 relay 的动作（表单没改动时也要发）。 */
+  const connect = async () => {
+    await save();
+    setLocalError("");
+    setConnectAsked(true);
+    try { await actions.connect(); } catch (e) { setLocalError(String(e)); }
+  };
   const register = async () => {
     setLocalError("");
     const u = ((form?.username ?? (value as any)?.username) ?? "").trim();
@@ -582,6 +605,27 @@ function DshmobileCard(props: any) {
     setLocalError("");
     try { await actions.logout(); } catch (e) { setLocalError(String(e)); }
   };
+  // 「清除本机凭据」：清掉这台机器上的**登录痕迹 + 设备身份**（含 E2EE 设备私钥、relay 设备 ID）。
+  // 与「退出登录」区别：退出登录只丢会话（设备身份保留，扫个码就能回来）；清凭据是"换一台新机器"的语义。
+  // 二次确认用原生 confirm —— 不往按钮里塞长文案（面板按 320px 窄栏排版，长标签会溢出边框）。
+  const clearCreds = async () => {
+    setLocalError("");
+    if (typeof window !== "undefined" && typeof window.confirm === "function") {
+      const okGo = window.confirm(
+        "清除本机凭据？\n\n" +
+        "· 删除这台电脑上保存的登录令牌、设备身份（设备私钥 / 设备 ID）与预填账号；\n" +
+        "· 不会在服务端注销账号；端到端加密配对会失效，需要重新扫码配对；\n" +
+        "· 之后需要重新登录（手机扫码授权，或填写账号密码）。",
+      );
+      if (!okGo) return;
+    }
+    try { await actions.clearCredentials(); } catch (e) { setLocalError(String(e)); }
+  };
+  // 用户点过「保存并连接」后允许"断开"（只停桥，不删本机凭据）
+  const disconnect = async () => {
+    setLocalError("");
+    try { await actions.disconnect(); } catch (e) { setLocalError(String(e)); }
+  };
   const copy = (text: string, tag: string) => {
     setCopied(tag);
     window.setTimeout(() => setCopied(""), 1600);
@@ -589,7 +633,11 @@ function DshmobileCard(props: any) {
   };
 
   const st = bridgeState(snap);
-  const logged = Boolean(value.username);
+  /* ④ 登录判据：宿主下发 loggedIn（会话在手 或 本次填了密码）时以它为准；
+     老宿主没有该字段 → 沿用旧判据（有账号即视为已登录）。 */
+  const logged = value.loggedIn === true || (value.loggedIn === undefined && Boolean(value.username));
+  // 「断开」按钮的出现条件：桥在跑，或"用户刚点过连接"（点完立刻给一条退出路径，不用等下一次轮询）
+  const startedOrRunning = value.bridgeStatus === "running" || connectAsked;
   const errText = localError || value.registerError || value.pairError || "";
   const cnt1 = value.pairingExpiresAt ? (left > 0 ? `剩余 ${left}s` : "已过期") : "未生成";
   const cnt2 = value.e2eePairingExpiresAt ? (e2eeLeft > 0 ? `剩余 ${e2eeLeft}s` : "已过期") : "";
@@ -656,22 +704,48 @@ function DshmobileCard(props: any) {
   );
 
   // 登录区的说明 + 动作（两种布局共用；横版靠 .dsm-actions 压到卡片底部与其它栏对齐）
+  // ④ 1.0.5 起**默认自动连接**（对标微信/淘宝）：`autoConnect !== false` 就是自动登录路径。
+  //    ⚠ 只有宿主**显式**下发 false 才算"用户关掉了自动连接"；老宿主快照没有该字段
+  //      （1.0.3 及更早是自动连接）⇒ 也必须按"自动连接"显示，不能反过来说"不会自动连接"。
+  const autoConnectOff = value.autoConnect === false;
+  const connectHint = autoConnectOff
+    ? "自动连接已被显式关闭（autoConnect=false）：账号只用于预填，点「保存并连接」后才会启动桥并连接 relay。"
+    : "已开启自动连接：DSH 启动 / 重启后会自动登录并连桥；点这里可立即重连。";
   const loginNote = (
-    <p className="dsm-note" style={{ marginTop: 12 }}>
-      已有账号直接连接；没有账号点「注册新账号」自动创建（账号 ≥3 位、密码 ≥6 位）。
-    </p>
+    <>
+      <p className="dsm-note" style={{ marginTop: 12 }}>
+        已有账号直接连接；没有账号点「注册新账号」自动创建（账号 ≥3 位、密码 ≥6 位）。
+      </p>
+      <p className="dsm-note" style={{ marginTop: 6 }}>{connectHint}</p>
+    </>
   );
   const loginButtons = (bottomAligned: boolean) => (
     <div
       className={bottomAligned ? "dsm-actions" : undefined}
       style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", ...(bottomAligned ? {} : { marginTop: 12 }) }}
     >
-      <button className="dsm-btn dsm-btn--brand" onClick={save}>保存并连接</button>
-      <button className="dsm-btn dsm-btn--ghost" onClick={register}>注册新账号</button>
-      {/* 退出登录并进登录栏（不再单独占一行） */}
+      <button className="dsm-btn dsm-btn--brand" onClick={connect}>{autoConnectOff ? "保存并连接" : "重新连接"}</button>
+      {/* 退出登录：紧跟主按钮（验收要求"与「保存并连接」同一行"）。
+          ⚠ 320px 窄栏里一行只放得下「主按钮 + 退出登录 + 注册新账号」，
+            所以它必须排在注册/清凭据**之前**，否则会被挤到第二行。 */}
       {logged ? (
-        <button className="dsm-btn dsm-btn--danger" style={{ marginLeft: "auto" }} onClick={logout}>退出登录</button>
+        <button className="dsm-btn dsm-btn--danger" onClick={logout}>退出登录</button>
       ) : null}
+      <button className="dsm-btn dsm-btn--ghost" onClick={register}>注册新账号</button>
+      {/* 断开：只在"用户点过连接"或桥在跑时出现（不删本机凭据，可随时再连） */}
+      {startedOrRunning ? (
+        <button className="dsm-btn dsm-btn--ghost" onClick={disconnect}>断开</button>
+      ) : null}
+      {/* 「清除本机凭据」与「退出登录」相邻但**语义不同**（只清本机、不再主动连）；
+          用 marginLeft:auto 推到这一行右端，与"退出登录"（服务端登出语义）在视觉上分开。 */}
+      <button
+        className="dsm-btn dsm-btn--ghost"
+        title="只清除这台电脑上保存的登录令牌与预填账号（不在服务端退出登录，也不会再自动连接）"
+        style={{ marginLeft: "auto" }}
+        onClick={clearCreds}
+      >
+        清除本机凭据
+      </button>
     </div>
   );
   const loginErr = errText ? <div className="dsm-err"><span>!</span><span>{errText}</span></div> : null;
@@ -710,6 +784,10 @@ function DshmobileCard(props: any) {
           ? "手机（已登录）扫码授权本机登录同一账号。"
           : "手机扫码即可登录同一账号，无需输入密码。"}
       </p>
+      {/* ③ 1.0.4：未点「保存并连接」前不会出码（也不连 relay）——明确说明，避免用户干等二维码 */}
+      {autoConnectOff && !code ? (
+        <p className="dsm-note" style={{ marginTop: 6 }}>尚未生成：点左侧「保存并连接」后才会出码并连接 relay。</p>
+      ) : null}
       <button className="dsm-btn dsm-btn--ghost" style={{ marginTop: 10, width: "100%" }} onClick={genPairing}>
         刷新二维码
       </button>
@@ -846,6 +924,12 @@ function DshmobileCard(props: any) {
                   ? "手机（已登录）扫码授权本机登录同一账号。"
                   : "手机扫码即可登录同一账号，无需输入密码。"}
               </p>
+              {/* ③ 1.0.4（横版同样要说清）：未点「保存并连接」前不会出码、也不连 relay */}
+              {autoConnectOff && !code ? (
+                <p className="dsm-note" style={{ marginTop: 6, textAlign: "center" }}>
+                  尚未生成：点左侧「保存并连接」后才会出码并连接 relay。
+                </p>
+              ) : null}
               <button className="dsm-btn dsm-btn--ghost dsm-actions" style={{ width: "100%" }} onClick={genPairing}>
                 刷新二维码
               </button>
@@ -1013,6 +1097,12 @@ export function apply(ctx: any) {
   const actions = {
     refreshPairing: async () => { await request("action", { action: "refreshPairing" }); },
     save: async (patch: Record<string, unknown>) => { await request("action", { action: "save", payload: patch }); },
+    // ③ 显式连接（1.0.4 起宿主不再自动连桥/连 relay）：面板「保存并连接」调用它
+    connect: async () => { await request("action", { action: "connect" }); },
+    // 断开：只停桥（保留本机凭据），可随时再点连接
+    disconnect: async () => { await request("action", { action: "disconnect" }); },
+    // 清除本机凭据：只清本机、不再主动连（与 logout 严格区分）
+    clearCredentials: async () => { await request("action", { action: "clearCredentials" }); },
     register: async (req: { username: string; password: string }) => {
       await request("action", { action: "register", payload: req });
     },

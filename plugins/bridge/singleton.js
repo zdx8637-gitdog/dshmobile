@@ -16,6 +16,8 @@ import { join } from "node:path";
 export const EXIT_ANOTHER_INSTANCE = 42;
 /** 本进程已让位给更新的实例 → 宿主不得自动重启。 */
 export const EXIT_YIELDED = 43;
+/** 宿中心跳过期（插件被卸载/DSH 被强杀）→ 本进程自杀；宿主同样**不得**自动拉起（否则自杀↔重启死循环）。 */
+export const EXIT_HOST_GONE = 44;
 
 /**
  * 单例端口：stateDir 稳定散列到 17660..17699。

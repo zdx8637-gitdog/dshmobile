@@ -1,6 +1,6 @@
 // DSH bridge 入口：provision 设备 → 连 relay → 连 DSH 两条下行流 → 事件泵。
 // 断线自动重连（指数退避）。
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RelayBridge } from "./relay.js";
@@ -14,6 +14,7 @@ import {
   clearSingletonInfo,
   EXIT_ANOTHER_INSTANCE,
   EXIT_YIELDED,
+  EXIT_HOST_GONE,
 } from "./singleton.js";
 import { killOtherBridges } from "./scan.js";
 
@@ -56,6 +57,53 @@ const adapter = new Adapter({ dsh, relay, workspaceRoot, e2ee });
 let mux = null;
 let stopping = false;
 let singleton = null; // { ok, server, port, tookOver }
+// 宿主存活监视（另一条独立的自杀条件，与单例锁互不干扰）：见 hostWatchdog()
+let hostGone = false;
+let watchdogTimer = null;
+
+/**
+ * 宿主存活监测：宿主每隔几秒写一次心跳文件，**卸载时删掉它**。
+ * 为什么需要（实测缺陷）：插件被卸载/关闭时 **DSH 进程还活着** ——
+ *   · `process.ppid` 检查发现不了（父进程还在）；
+ *   · IPC `disconnect` 也发现不了（通道还在，只是没人再用）。
+ * 于是桥会继续在后台跑、继续连 relay，手机仍能操作这台电脑。
+ * 判据（两条都会自杀，都**不是**"文件从未出现过就放行"的特例）：
+ *   · 心跳文件不存在 → 宿主已卸载（dispose 删文件）或从未创建；
+ *   · 心跳文件 mtime 距今 > 阈值 → 宿主卡死/被强杀。
+ * 阈值故意宽松（宿主 5s 写一次，默认容忍 90s）：宁可不杀，也不要误杀正常工作的桥。
+ * 未配置心跳（独立运行 bridge/main.js、旧宿主）时**完全关闭本机制**，旧行为一字不变。
+ */
+function hostWatchdog() {
+  const file = config.hostHeartbeatFile || process.env.DSHMOBILE_HOST_HEARTBEAT || "";
+  if (!file) {
+    console.log("[watchdog] 未配置宿中心跳文件（config.hostHeartbeatFile / DSHMOBILE_HOST_HEARTBEAT 均为空）：本机制关闭（独立运行时为旧行为）");
+    return;
+  }
+  const staleMs = Number(config.hostHeartbeatStaleMs) > 0 ? Number(config.hostHeartbeatStaleMs) : 90_000;
+  const intervalMs = Number(process.env.DSHMOBILE_HEARTBEAT_CHECK_MS) > 0 ? Number(process.env.DSHMOBILE_HEARTBEAT_CHECK_MS) : 5_000;
+  console.log(`[watchdog] 监测宿中心跳：${file}（阈值 ${staleMs / 1000}s，每 ${intervalMs / 1000}s 检查）`);
+  const check = () => {
+    if (stopping || hostGone) return;
+    let ageMs;
+    if (!existsSync(file)) {
+      ageMs = Infinity;
+    } else {
+      try {
+        ageMs = Date.now() - statSync(file).mtimeMs;
+      } catch {
+        ageMs = Infinity; // 读不到（被删/权限）按"宿主不在"处理
+      }
+    }
+    if (ageMs <= staleMs) return;
+    hostGone = true;
+    const what = Number.isFinite(ageMs) ? `host heartbeat stale ${Math.round(ageMs / 1000)}s` : "host heartbeat file missing";
+    // 这一行就是排查用的"明确原因"（宿主把桥的 stdout/stderr 落进 <stateDir>/bridge.log）
+    console.warn(`[watchdog] ${what} (> ${staleMs / 1000}s), exiting（宿主已不在：插件被卸载/DSH 被强杀）`);
+    shutdown(EXIT_HOST_GONE, `${what}, exiting`);
+  };
+  check(); // 启动即查一次（不会误杀：宿主保证"先建心跳再 spawn 桥"）
+  watchdogTimer = setInterval(check, intervalMs);
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -65,6 +113,7 @@ function sleep(ms) {
 function shutdown(code, why) {
   if (stopping) return;
   stopping = true;
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   console.warn(`[bridge] 退出（code=${code}）：${why}`);
   try { clearSingletonInfo(config.stateDir); } catch { /* 忽略 */ }
   try { mux?.close(); } catch { /* 已关 */ }
@@ -185,11 +234,16 @@ async function relayLoop() {
 process.on("SIGINT", () => shutdown(0, "收到 SIGINT（终端/宿主要求停止）"));
 process.on("SIGTERM", () => shutdown(0, "收到 SIGTERM"));
 
-// 父进程看门狗：宿主用 IPC 通道拉起本进程，父进程消失时该通道关闭 → 本进程必须跟着退出。
+// 父进程看门狗（原有，保留不动）：宿主用 IPC 通道拉起本进程，父进程消失时该通道关闭 → 本进程必须跟着退出。
 // 否则它会变成"孤儿桥"：与下一次 DSH 启动的桥共用同一份 config/设备标识，在 relay 侧互相顶替。
+// ⚠ 它**覆盖不了**"DSH 还活着、只是插件被卸载"（通道仍在）→ 那条由 hostWatchdog() 心跳兜底，两者独立生效。
 process.on("disconnect", () => shutdown(0, "父进程（DSH 插件宿主）已消失（IPC 通道关闭）"));
 
 console.log("[bridge] starting: DSH", config.dsh.url, "-> relay", config.relay.url);
+
+// 独立自杀条件之一：宿主存活心跳（与单例锁、IPC disconnect 互不干扰，各自独立触发）
+hostWatchdog();
+
 await ensureSingleton();
 await waitProtocol();
 await Promise.all([relayLoop(), dshStreamLoop()]);

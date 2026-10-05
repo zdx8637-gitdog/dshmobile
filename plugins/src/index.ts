@@ -18,7 +18,7 @@
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -38,6 +38,8 @@ const BRIDGE_STATE_MARKER = `--state-dir=${STATE_DIR}`;
 // 否则两个宿主会互相重启、互相顶替。
 const BRIDGE_EXIT_ANOTHER_INSTANCE = 42;
 const BRIDGE_EXIT_YIELDED = 43;
+// 桥自己发现"宿中心跳过期"而自杀的退出码（见 bridge/main.js hostWatchdog）：同样**不得**自动拉起。
+const BRIDGE_EXIT_HOST_GONE = 44;
 // 桥"让位/被占用"后的礼貌重试：对方（可能是另一个 DSH 实例的桥）还活着就继续等，
 // 对方消失就自动接管。带上 --no-yield，绝不会反过来要求对方让位 → 不会形成宿主互踢。
 const YIELD_RETRY_MS = 60_000;
@@ -51,6 +53,27 @@ const DEVICE_KEY_FILE = path.join(STATE_DIR, "device-key.json");
 // E2EE 策略（与桥同一份文件）：{"require":bool}，缺失/坏文件 = 要求加密（与桥侧默认一致）
 const E2EE_POLICY_FILE = path.join(STATE_DIR, "e2ee-policy.json");
 const PAIRING_FILE = path.join(STATE_DIR, "pairing.json");
+/* ==================== 宿主存活心跳（桥的兜底自杀条件） ====================
+   背景（实测缺陷）：卸载/关闭插件后，桥可能继续在后台跑并继续连 relay —— 手机仍能操作这台电脑。
+   `process.ppid` / IPC disconnect 都**发现不了**"DSH 进程还活着、只是插件被卸载了"这种情况，
+   所以必须由宿主主动证明"我还活着"：
+     · 宿主每 HEARTBEAT_WRITE_MS 写一次 `<stateDir>/host-alive.json`（含 pid + 时间戳）；
+     · 卸载（dispose）时删掉它；
+     · 桥每 HEARTBEAT_CHECK_MS 检查一次，超过 HEARTBEAT_STALE_MS 没更新（或文件不存在）⇒ 自杀退出。
+   阈值故意宽松（宿主 5s 写一次，桥容忍 90s）：宁可不杀，也不要误杀一个正常工作的桥。
+   ⚠ 顺序契约：**必须先创建心跳文件，再 spawn 桥**（apply() 里 writeHeartbeat() 早于 startServer()）。
+   ⚠ 不做"文件从未出现过就不退出"的特例 —— 那会让这道保护在最需要它的场景下失效。 */
+const HEARTBEAT_FILE = path.join(STATE_DIR, "host-alive.json");
+const HEARTBEAT_WRITE_MS = 5_000;
+const HEARTBEAT_STALE_MS = 90_000;
+const HEARTBEAT_CHECK_MS = 5_000;
+/** 桥配置里的字段名（桥侧读 config.hostHeartbeatFile / config.hostHeartbeatStaleMs）。 */
+const HEARTBEAT_FIELD = "hostHeartbeatFile";
+const HEARTBEAT_STALE_FIELD = "hostHeartbeatStaleMs";
+// 兜底（**默认开启 = 启动即连**）：对标微信/淘宝 —— 正常启动 / DSH 重启 / 插件更新后都自动登录。
+// 只有显式关掉（panel.json 里 `autoConnect:false`，或插件配置 `{autoConnect:false}`）才退化为
+// 「必须用户点一次『保存并连接』」；用户点过连接（startedByUser）则始终允许。
+const DEFAULT_AUTO_CONNECT = true;
 // 兜底通道：本地 HTTP 服务端口（面板侧同值；可用环境变量改，仅影响兜底路径）。
 const HTTP_PORT = parseInt(process.env.DSHMOBILE_HTTP_PORT ?? "17653", 10);
 // 首选通道：官方连接服务上的 RPC 通道名。
@@ -66,6 +89,579 @@ const RPC_PROBE_SLOW_EVERY = 30;
 const RPC_PROBE_GIVE_UP_TICKS = 300;
 // 加密配对码（第二个码）TTL：独立于登录码，15 分钟足够完成「扫码→连设备→握手」。
 const E2EE_PAIRING_TTL_MS = 900_000;
+
+/* ==================== ④ 安装生命周期：凭据只活在「这次安装」里 ====================
+   产品口径（对标微信/淘宝）：
+     · 正常启动 / DSH 重启 / 插件更新（含同版本重装）⇒ **保持登录**（自动登录）；
+     · 插件卸载 ⇒ 凭据必须消失；卸载后重装 ⇒ 空状态、必须重新登录。
+   两条**互相独立**的判据（任一成立即清；都不成立则绝不动凭据）：
+
+   判据 1（卸载当场，快）：插件的 disposer 被调用时读 `<profile>/package.json`
+     · `dsh.profile.bundles` **仍含本包** ⇒ App 退出 / 配置热重载 ⇒ 直接返回，**绝不动凭据**；
+     · 已不含本包 ⇒ 可能是真卸载、也可能只是「关掉开关」⇒ 落 tombstone，并每 1s（最多 30 次）
+       检查「`dependencies` 里没有本包 **且** 包目录不存在」⇒ 两者都成立才清凭据（.unref()，不拖住进程退出）。
+     依据（见 DSH-PLUGIN-UNINSTALL-LIFECYCLE.md §2.1/§4.1）：卸载 = 先摘 bundles → reload（dispose 插件 fiber）
+     → 再 `pnpm remove`；更新（installBundle 走 restart-required 分支）**根本不 dispose**。
+
+   判据 2（启动对账，准）：每次 apply 读 `<profile>/.plugin-manager/logs/operation-XXXXXX` 里的 pnpm.log
+     · 每个 operation 目录 = DSH 的一次 pnpm 操作，日志里的 `+ 包名` = 安装、`- 包名` = 卸载；
+     · 记账锚点（已对账过的 operation 目录名 + 最新 mtime）写在 `<stateDir>/install-ledger.json`，幂等可重复执行；
+     · 「自上次记账以来」存在**只对本包**的 `- 记录` ⇒ 清凭据；
+     · 同一个 operation 里同时出现 `+`/`-`（pnpm 换版本的差异输出）**不算**卸载凭据（更新必须保持登录）；
+     · 找不到 logs 目录 ⇒ **必须写 host.log 留痕**（将来 DSH 若改掉该布局，这里是静默漏删的唯一线索），且不动凭据。
+
+   判据 2b（首次回溯，堵漏档；1.0.6 新增）：判据 2 的锚点机制有个明确空档 —— **首次记账只落锚点、
+   不回溯历史日志**。于是「上一个版本（没有清理钩子的旧版）卸载时留在磁盘上的凭据」会被新版本
+   当成自己的，照单全收 ⇒ 用户实测：卸载 1.0.3 → 装 1.0.5 → **直接就是登录状态**（违背「卸载即重新登录」）。
+   修法 = 启动时**回溯全部历史**日志做一次时间戳比对：
+     · 卸载记录时间 = 所有「只含 `- 本包`」的 operation 里最新的那个的时间；
+     · 凭据时间     = **登录态锚点**文件（`LOGIN_STATE_FILES` = session.json / device-key.json，
+                      只挑"只在真的登录/建身份时才被写"的文件）里**最新**的 mtime；
+     · 卸载记录**新于等于**凭据 ⇒ 这些凭据属于上一次安装 ⇒ 清掉 ⇒ 本次运行为未登录、要求重新登录；
+     · 有任何一个登录态锚点**新于**卸载记录 ⇒ 卸载后已经重新登录过 ⇒ **保持登录**（不误登出老用户）。
+   ⚠ 时间戳方向是关键：只有「卸载记录比凭据新」才清，"很久以前卸载过、之后又正常登录"的老用户不受影响。
+   ⚠ 这条与判据 2 的锚点机制互不干扰：2b 在锚点之外**额外**跑一次全量回溯，命中即清并推进锚点后返回；
+     2b 不命中则完全走原来的锚点路径（"启动时新发现的卸载回执"仍由锚点负责）。
+
+   明确**不删**：诊断日志（bridge.log / host.log / e2ee-debug.log）、用户偏好（e2ee-policy.json）、
+   记账文件（install-ledger.json，不是凭据而是墓碑/锚点）、用户数据（deliveries/）、
+   运行期临时文件（bridge.lock.json / takeover-scan.ps1）。理由逐条写在报告里。 */
+const PACKAGE_NAME = "@zdx8637/dshmobile-bridge";
+const LEDGER_FILE = path.join(STATE_DIR, "install-ledger.json");
+// 卸载确认轮询：1s × 30（本机 3 次真实 pnpm remove 分别耗时 310/291/319ms，30s 极宽裕）。
+// 环境变量只作**离线自测**用的加速开关（生产不设即用默认值）。
+const UNINSTALL_POLL_MS = parseInt(process.env.DSHMOBILE_UNINSTALL_POLL_MS ?? "1000", 10);
+const UNINSTALL_POLL_TRIES = parseInt(process.env.DSHMOBILE_UNINSTALL_POLL_TRIES ?? "30", 10);
+/** 记账锚点最多保留多少个 operation 名字（logs 目录只增不减，锚点不能无限膨胀）。 */
+const LEDGER_MAX_OPS = 200;
+/** 「清除本机凭据」要删的文件清单（只列**凭据/身份**，不含日志与偏好）。
+ *  ⚠ 必须包含设备私钥与设备身份：只删 token 的话，重装后 relay 侧仍认得这台设备。 */
+const CREDENTIAL_FILES = [
+  "session.json",          // relay access + refresh token（登录态本体）
+  "config.json",           // 桥的配置：同一组 token + clientDeviceKey（凭据容器；桥每次启动都会重写）
+  "panel.json",            // 面板持久化：预填账号（身份痕迹）+ 连接偏好 ⇒ 卸载后必须回到空状态
+  "device-id.json",        // relay 侧设备身份（provision 得到，手机端设备列表就是它）
+  "device-key.json",       // E2EE 设备身份私钥（+ pinnedPeer 绑定）—— 设备私钥，必须删
+  "dsh-auth-cookie.json",  // 本机 DSH API 的会话 Cookie 缓存（launch token 换来的）
+  "pairing.json",          // 一次性配对 secret（15min TTL，但属配对凭据）
+  "machine-key.txt",       // 无 MachineGuid 时的机器标识（relay clientDeviceKey 的来源）
+];
+
+/** 状态目录里的关键事件落盘（模块级：判据 1/2 在 apply 之外也要能写）。 */
+function stateLog(msg: string) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    appendFileSync(path.join(STATE_DIR, "host.log"), `${new Date().toISOString()} ${msg}\n`);
+  } catch {
+    /* 日志失败不影响主流程 */
+  }
+}
+
+function readJsonFile(file: string): any | null {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/* ---- install-ledger.json：判据 2 的记账锚点 + 判据 1 的 tombstone ---- */
+interface InstallLedger {
+  version: number;
+  /** 已对账过的 operation 目录名（新的在前，最多 LEDGER_MAX_OPS 个）—— 幂等的关键。 */
+  processed: string[];
+  /** 已处理过的 pnpm.log 最大 mtime（processed 被截断后的兜底闸门）。 */
+  lastOpMtimeMs: number;
+  /** 「可能被卸载」的足迹：dispose 时 bundles 已不含本包 ⇒ 记在这里，供下次启动对账。 */
+  pendingUninstall: { at: number; reason: string } | null;
+  /** 最后一次清除凭据的时间 / 原因 / 删掉的文件（诊断用）。 */
+  lastWipe: { at: number; reason: string; files: string[] } | null;
+  updatedAt: string;
+}
+
+function loadLedger(): InstallLedger {
+  const raw = readJsonFile(LEDGER_FILE);
+  const pending = raw?.pendingUninstall;
+  const lastWipe = raw?.lastWipe;
+  return {
+    version: 1,
+    processed: Array.isArray(raw?.processed) ? raw.processed.filter((n: unknown) => typeof n === "string") : [],
+    lastOpMtimeMs: Number.isFinite(raw?.lastOpMtimeMs) ? Number(raw.lastOpMtimeMs) : 0,
+    pendingUninstall:
+      pending && typeof pending === "object"
+        ? { at: Number(pending.at) || 0, reason: String(pending.reason ?? "") }
+        : null,
+    lastWipe:
+      lastWipe && typeof lastWipe === "object"
+        ? {
+            at: Number(lastWipe.at) || 0,
+            reason: String(lastWipe.reason ?? ""),
+            files: Array.isArray(lastWipe.files) ? lastWipe.files.filter((f: unknown) => typeof f === "string") : [],
+          }
+        : null,
+    updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : "",
+  };
+}
+
+/** 原子写记账文件（tmp + rename）：崩溃时不会留下半个 JSON。 */
+function saveLedger(l: InstallLedger) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    l.updatedAt = new Date().toISOString();
+    const tmp = `${LEDGER_FILE}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(l, null, 2));
+    renameSync(tmp, LEDGER_FILE);
+  } catch (err: any) {
+    stateLog(`install-ledger: 写入失败（不影响本次判定，但下次可能重复对账）：${err?.message ?? err}`);
+  }
+}
+
+function updateLedger(mutate: (l: InstallLedger) => void): InstallLedger {
+  const l = loadLedger();
+  try {
+    mutate(l);
+  } catch (err: any) {
+    stateLog(`install-ledger: 更新异常（已忽略）：${err?.message ?? err}`);
+  }
+  saveLedger(l);
+  return l;
+}
+
+/* ---- profile 目录与「本包是否还在这次安装里」---- */
+
+/** profile 目录：`ctx.get("profileContext").dir` 首选；取不到则从本包目录向上找带
+ *  `dsh.profile.bundles` 的 package.json（不依赖任何 DSH 内部结构，两者都失败则返回 null）。 */
+function resolveProfileDir(ctx: any): string | null {
+  const fromEnv = process.env.DSHMOBILE_PROFILE_DIR;
+  if (fromEnv && existsSync(path.join(fromEnv, "package.json"))) return fromEnv;
+  try {
+    const pc = ctx?.get?.("profileContext") ?? ctx?.root?.get?.("profileContext");
+    const dir = pc?.dir;
+    if (typeof dir === "string" && dir && existsSync(path.join(dir, "package.json"))) return dir;
+  } catch {
+    /* 老版本 DSH 没有 profileContext：走下面的兜底 */
+  }
+  let d = path.resolve(HERE, "..");
+  for (let i = 0; i < 6; i++) {
+    const m = readJsonFile(path.join(d, "package.json"));
+    if (Array.isArray(m?.dsh?.profile?.bundles)) return d;
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return null;
+}
+
+/** `<profile>/package.json` 的 `dsh.profile.bundles` 里还有本包吗？
+ *  ⚠ null = 读不到 / 结构不明 ⇒ 判据不成立（fail-safe：宁可留凭据，也不误删登录态）。 */
+function bundlesHasPackage(profileDir: string): boolean | null {
+  const m = readJsonFile(path.join(profileDir, "package.json"));
+  const list = m?.dsh?.profile?.bundles;
+  if (!Array.isArray(list)) return null;
+  return list.includes(PACKAGE_NAME);
+}
+
+/** `dependencies` 里还有本包吗？null = 读不到。 */
+function dependenciesHasPackage(profileDir: string): boolean | null {
+  const m = readJsonFile(path.join(profileDir, "package.json"));
+  const deps = m?.dependencies;
+  if (!deps || typeof deps !== "object") return null;
+  return Object.prototype.hasOwnProperty.call(deps, PACKAGE_NAME);
+}
+
+/** `<profile>/node_modules/@scope/name`（hoisted linker 下就是真实包目录；isolated 下也仍是同一个入口路径）。 */
+function packageDir(profileDir: string): string {
+  return path.join(profileDir, "node_modules", ...PACKAGE_NAME.split("/"));
+}
+
+function packageDirExists(profileDir: string): boolean {
+  try {
+    return existsSync(packageDir(profileDir));
+  } catch {
+    return false;
+  }
+}
+
+/** 真卸载确认：bundles 不含本包 **且** dependencies 不含本包 **且** 包目录已消失。
+ *  「只是关掉开关」只满足第一条（依赖与目录都还在）⇒ 不确认 ⇒ 不误删。 */
+function uninstallConfirmed(profileDir: string): boolean {
+  return (
+    bundlesHasPackage(profileDir) === false &&
+    dependenciesHasPackage(profileDir) === false &&
+    !packageDirExists(profileDir)
+  );
+}
+
+/* ---- pnpm 操作流水账（判据 2 的输入）---- */
+interface OpDir {
+  name: string;
+  log: string;
+  mtimeMs: number;
+}
+
+/** 列出 `<profile>/.plugin-manager/logs/operation-*`，按 mtime 升序（目录名是随机串，无内在顺序）。
+ *  ⚠ null = 日志根目录读不到 ⇒ 判据 2 本次无输入（必须留痕，见 reconcileInstallLedger）。 */
+function listOperationDirs(profileDir: string): OpDir[] | null {
+  const root = path.join(profileDir, ".plugin-manager", "logs");
+  try {
+    if (!existsSync(root)) return null;
+    const out: OpDir[] = [];
+    for (const e of readdirSync(root, { withFileTypes: true })) {
+      if (!e.isDirectory() || !e.name.startsWith("operation-")) continue;
+      const dir = path.join(root, e.name);
+      const log = path.join(dir, "pnpm.log");
+      let mtimeMs = 0;
+      try {
+        mtimeMs = statSync(log).mtimeMs;
+      } catch {
+        try {
+          mtimeMs = statSync(dir).mtimeMs;
+        } catch {
+          mtimeMs = 0;
+        }
+      }
+      out.push({ name: e.name, log, mtimeMs });
+    }
+    out.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** 一个 operation 日志里本包的标记：`{'+'}` / `{'-'}` / `{'-','retro'}`（同时含 +/- 的"换版本差异输出"）
+ *  / `{'+','-'}`；null = 该操作与本包无关。
+ *  只匹配 ASCII 行首标记 `^[+-]\s+<包名>`（pnpm 的框线字符是多字节 UTF-8，不要去碰）。
+ *  ⚠ 1.0.6 起额外区分两种 `-`：
+ *    · 一个操作里**只出现** `- 本包` ⇒ 标记 `'-'` = 真卸载记录（判据 2 / 2b 的依据）；
+ *    · 同一个操作里 `- 本包` 与 `+ 本包` **同时**出现 ⇒ 只有 `retro`（pnpm 换版本的差异输出）
+ *      ⇒ 既不算卸载（更新必须保持登录），也**不能**被判据 2b 当成"上一次安装的卸载记录"。 */
+function packageMarkers(logFile: string): Set<string> | null {
+  let text = "";
+  try {
+    text = readFileSync(logFile, "utf8");
+  } catch {
+    return null;
+  }
+  const escaped = PACKAGE_NAME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^([+-])[ \\t]+${escaped}(?![\\w.@/-])`, "gm");
+  const set = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) set.add(m[1]);
+  if (!set.size) return null;
+  if (set.has("-")) {
+    if (set.has("+")) {
+      // 同一操作里既有 - 又有 +：pnpm 换版本的差异输出 ⇒ 不是卸载记录
+      return new Set<string>(["retro"]);
+    }
+    return new Set<string>(["-"]);
+  }
+  return new Set<string>(["+"]); // 纯安装记录
+}
+
+/** 清除本机凭据（清单 = CREDENTIAL_FILES）。幂等：文件不存在也算成功。 */
+function wipeLocalCredentials(reason: string): { deleted: string[]; failed: string[] } {
+  const deleted: string[] = [];
+  const failed: string[] = [];
+  for (const n of CREDENTIAL_FILES) {
+    const f = path.join(STATE_DIR, n);
+    try {
+      if (!existsSync(f)) continue;
+      rmSync(f, { force: true });
+      deleted.push(n);
+    } catch {
+      failed.push(n);
+    }
+  }
+  stateLog(
+    `wipe: ${reason} → 已删除 [${deleted.join(", ") || "无"}]` +
+      (failed.length ? `；删除失败 [${failed.join(", ")}]` : "") +
+      `（保留：诊断日志 / e2ee-policy.json / install-ledger.json / deliveries）`,
+  );
+  updateLedger((l) => {
+    l.pendingUninstall = null;
+    l.lastWipe = { at: Date.now(), reason, files: deleted };
+  });
+  return { deleted, failed };
+}
+
+/** `<stateDir>/session.json` 是否比 `ms` 更新（= 那次卸载记录之后又登录过）。
+ *  用于避免"已结清的卸载记录"在下次启动时误删**新登录**态。 */
+function sessionNewerThan(ms: number): boolean {
+  try {
+    return statSync(path.join(STATE_DIR, "session.json")).mtimeMs > ms;
+  } catch {
+    return false;
+  }
+}
+
+/* ---- 判据 2b：首次回溯（时间戳比对）---- */
+
+/** operation 目录名里的创建时间（`operation-<base36 毫秒>`，取自 DSH 的 `mkdtemp(join(logRoot,'operation-'))`）。
+ *  null = 名字不是这种形态（老版本 / 测试造的名）⇒ 用文件 mtime。 */
+function opNameTimeMs(name: string): number | null {
+  const m = /^operation-([0-9a-z]+)$/.exec(name);
+  if (!m) return null;
+  const ms = parseInt(m[1], 36);
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  // 合理区间（2001-09-09 ~ 5138 年）——排除误把随机串解析成数字
+  if (ms < 1e12 || ms > 1e14) return null;
+  return ms;
+}
+
+/** 一次操作的时间（判据 2b 的时间轴）。
+ *  ⚠ 目录名里的时间**就是** mkdtemp 的创建时刻 ⇒ 比 mtime 更权威：取两者较大值。
+ *    这同时兜住"文件系统 mtime 被整体重置/回拨"的机器（否则老的卸载记录会显得比凭据还新）。 */
+function opTimeMs(o: OpDir): number {
+  const fromName = opNameTimeMs(o.name);
+  return fromName === null ? o.mtimeMs : Math.max(o.mtimeMs, fromName);
+}
+
+/** 「登录态锚点」：这些文件的 mtime 代表**这次安装**最后一次真的动过登录态的时刻。
+ *  ⚠ 只用这两个（**故意不含 config.json / device-id.json**，理由都有本机实证）：
+ *    · `session.json` —— **只在登录成功时写**（设备码登录 index.ts 的 saveSession() 三处调用点），
+ *      是"这次安装有没有真的登录过"的唯一直接证据；
+ *    · `device-key.json` —— E2EE 设备身份：不存在时生成、pin 变化时重写；旧版卸载留下的私钥
+ *      被清掉后会重新生成 ⇒ 它的 mtime 同样是"本机登录后写过凭据"的证据。
+ *  为什么不把 config.json / device-id.json 算进来（**实测**：本机 2026-10-01 卸载 1.0.3 于 15:50:45，
+ *  随后 1.0.5 一启动就把 config.json 重写成 15:57:53、device-id.json 重写成 15:57:54，而**并没有重新登录**
+ *  —— 用户就是这个状态）：
+ *    · `config.json` 由宿主/桥在**每次启动**时重写（与是否登录无关）；
+ *    · `device-id.json` 由桥在**每次 provision**（首次拿到设备令牌）时写。
+ *  把这两个算成"登录态锚点"，就会让"上一个版本留下的凭据"看起来是本次安装写的
+ *  ⇒ 判据 2b 永不触发 ⇒ **修的正是本次要修的漏档，等于没修**。 */
+const LOGIN_STATE_FILES = ["session.json", "device-key.json"];
+
+/** 登录态锚点里最新的 mtime；null = 一个都不存在。 */
+function loginStateMtimeMs(): number | null {
+  let newest: number | null = null;
+  for (const n of LOGIN_STATE_FILES) {
+    try {
+      const ms = statSync(path.join(STATE_DIR, n)).mtimeMs;
+      if (newest === null || ms > newest) newest = ms;
+    } catch {
+      /* 该锚点不存在 ⇒ 跳过 */
+    }
+  }
+  return newest;
+}
+
+/** 磁盘上还剩几个凭据文件（`CREDENTIAL_FILES` 清单）——判据 2b 用它兜住"没东西可清"的情况：
+ *  凭据一个都不在 ⇒ 本次运行为本来就是未登录 ⇒ **不写 wipe、不重复告警**（幂等）。 */
+function credentialFileCount(): number {
+  let n = 0;
+  for (const f of CREDENTIAL_FILES) {
+    try {
+      if (existsSync(path.join(STATE_DIR, f))) n += 1;
+    } catch {
+      /* 读不到 ⇒ 不计入 */
+    }
+  }
+  return n;
+}
+
+/** 判据 2b：回溯全部历史卸载记录，回答"磁盘上的凭据是不是上一次安装留下的"。
+ *  @param ops `listOperationDirs()` 的结果（null = logs 读不到 ⇒ 调用方已留痕，这里按"无记录"处理）。
+ *  · `"none"`   = 历史里没有本包的卸载记录（正常启动 / 只更新过）⇒ 凭据属于本次安装；
+ *  · `"empty"`  = 有卸载记录，但磁盘上**一个凭据都没有** ⇒ 本来就是未登录，无需清（幂等关键）；
+ *  · `"settled"`= 有卸载记录，但有登录态锚点比它新（卸载后重新登录过）⇒ 保持登录；
+ *  · `"stale"`  = 有卸载记录，且所有登录态锚点都比它旧 ⇒ 凭据是上一次安装的遗留 ⇒ 清。
+ *  边界（`credMs >= atMs` 判为"已重新登录"）：两者**同一时刻**算"卸载后又登录过"⇒ **保持登录**。
+ *  理由：凭据的 mtime 是"最后一次真的写登录态"的时刻，它 **== 卸载记录时刻**只可能出现在
+ *  「卸载后极短时间内就登录」（毫秒级打平，不可区分）这一种情形 ⇒ 按 fail-safe 方向（宁可留凭据、
+ *  也不误登出用户）处理；真正"上一个版本留下的"凭据通常比卸载记录早几分钟到几天，不受影响。 */
+function checkStaleCredentials(ops: OpDir[] | null): {
+  verdict: "none" | "empty" | "settled" | "stale";
+  newest: OpDir | null;
+  atMs: number;
+  credMs: number | null;
+  files: number;
+} {
+  const credMs = loginStateMtimeMs();
+  const files = credentialFileCount();
+  const removals: { op: OpDir; atMs: number }[] = [];
+  for (const o of ops ?? []) {
+    const markers = packageMarkers(o.log);
+    // 只认「只含 `- 本包`」的操作；同一操作里同时含 +/- ⇒ 标记 retro ⇒ 不算卸载记录
+    if (markers?.has("-")) removals.push({ op: o, atMs: opTimeMs(o) });
+  }
+  if (!removals.length) return { verdict: "none", newest: null, atMs: 0, credMs, files };
+  const newest = removals.reduce((a, b) => (b.atMs > a.atMs ? b : a));
+  const base = { newest: newest.op, atMs: newest.atMs, credMs, files };
+  if (files === 0) return { verdict: "empty", ...base };
+  if (credMs !== null && credMs >= newest.atMs) return { verdict: "settled", ...base };
+  return { verdict: "stale", ...base };
+}
+
+/* ---- 判据 1：卸载当场 ---- */
+/** dispose 时调用：判断这次 dispose 是「真卸载」还是「App 退出 / 热重载 / 关开关」。 */
+function onPluginDisposed(profileDir: string | null, reason: string) {
+  if (!profileDir) {
+    stateLog(`uninstall-watch: 取不到 profile 目录（无 profileContext 且向上没找到 dsh.profile.bundles）⇒ 判据 1 跳过、凭据不动（fail-safe）`);
+    return;
+  }
+  const listed = bundlesHasPackage(profileDir);
+  if (listed === null) {
+    stateLog(`uninstall-watch: 读不出 ${path.join(profileDir, "package.json")} 的 dsh.profile.bundles ⇒ 凭据不动（fail-safe）`);
+    return;
+  }
+  if (listed) {
+    stateLog(`dispose: ${reason} → bundles 里仍有本包（App 退出 / 配置热重载）⇒ 凭据不动`);
+    return;
+  }
+  // bundles 已摘除：可能是「真卸载」，也可能只是「关掉开关」⇒ 落 tombstone + 轮询确认
+  updateLedger((l) => {
+    l.pendingUninstall = { at: Date.now(), reason };
+  });
+  stateLog(`uninstall-watch: bundles 已摘除（${reason}）⇒ 落 tombstone，开始 1s×${UNINSTALL_POLL_TRIES} 轮询确认`);
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries += 1;
+    try {
+      if (uninstallConfirmed(profileDir)) {
+        clearInterval(timer);
+        const r = wipeLocalCredentials(`卸载确认（bundles/dependencies/包目录均已消失；第 ${tries} 次轮询）`);
+        stateLog(`uninstall-watch: 确认真卸载 ⇒ 凭据已清除（删掉 ${r.deleted.length} 个文件）`);
+        return;
+      }
+      if (tries >= UNINSTALL_POLL_TRIES) {
+        clearInterval(timer);
+        stateLog(
+          `uninstall-watch: ${UNINSTALL_POLL_TRIES}s 内未确认（bundles=${bundlesHasPackage(profileDir)} ` +
+            `deps=${dependenciesHasPackage(profileDir)} 包目录=${packageDirExists(profileDir)}）` +
+            `⇒ 判定为「只是关掉开关 / 半途失败」，凭据保留；tombstone 留给下次启动对账`,
+        );
+      }
+    } catch (err: any) {
+      stateLog(`uninstall-watch: 轮询异常（忽略，继续）：${err?.message ?? err}`);
+    }
+  }, UNINSTALL_POLL_MS);
+  timer.unref?.();
+}
+
+/* ---- 判据 2：启动对账 ---- */
+/** 启动时对账：读 pnpm 流水账，先做判据 2b（全量回溯 + 时间戳比对），再按锚点处理增量。
+ *  幂等：处理过的 operation 目录名写进 ledger；再跑一次没有新输入 ⇒ 什么都不做。 */
+function reconcileInstallLedger(profileDir: string | null): { wiped: boolean; reason: string } {
+  if (!profileDir) {
+    stateLog("install-ledger: 取不到 profile 目录 ⇒ 判据 2（启动对账）跳过、凭据不动（fail-safe）");
+    return { wiped: false, reason: "no-profile" };
+  }
+  const ledger = loadLedger();
+  const ops = listOperationDirs(profileDir);
+  if (ops === null) {
+    // 报告 §7.3：这个目录若将来被 DSH 改掉/清掉，判据 2 会**静默漏删** ⇒ 必须留痕
+    stateLog(
+      `install-ledger: 找不到 ${path.join(profileDir, ".plugin-manager", "logs")} ⇒ 判据 2 本次跳过（凭据不动）。` +
+        `⚠ 若 DSH 改掉了该目录布局，这里就是「卸载后凭据没被清」的唯一线索`,
+    );
+    return { wiped: false, reason: "no-logs" };
+  }
+  // 「首次记账」= 本机还没有任何记账文件（1.0.4 → 1.0.5 升级后的第一次运行，或全新 stateDir）。
+  // ⚠ 判据故意用 updatedAt（"记账文件是否存在"）而不是 processed 是否为空：
+  //   若首次运行时 logs 目录恰好是空的（例如开发态手工安装），记账文件照样会被写出来，
+  //   之后出现的卸载回执才会被正常识别（否则会永远停在"首次记账"而漏删）。
+  const firstTime = !ledger.updatedAt;
+
+  // ── 判据 2b（1.0.6）：**回溯全部历史日志**，先堵掉"首次记账不回溯"的漏档 ──────────────
+  //    场景：旧版（没有清理钩子）卸载 ⇒ 凭据留在磁盘上 ⇒ 装新版 ⇒ 新版把旧凭据当成自己的
+  //          ⇒ 直接就是登录状态（用户实测复现）。这里在锚点之外额外做一次时间戳比对。
+  const stale = checkStaleCredentials(ops);
+  if (stale.verdict === "stale") {
+    const r = wipeLocalCredentials(
+      `首次回溯：卸载记录 ${stale.newest?.name}（${new Date(stale.atMs).toISOString()}）晚于本机凭据` +
+        `（${stale.credMs === null ? "凭据不存在" : new Date(stale.credMs).toISOString()}）` +
+        `⇒ 判定为上一次安装的遗留 ⇒ 清除，本次运行为未登录、需要重新登录`,
+    );
+    stateLog(
+      `install-ledger: 判据 2b 首次回溯 ⇒ 发现**新于凭据**的卸载记录 ${stale.newest?.name}` +
+        `（卸载 ${new Date(stale.atMs).toISOString()} / 凭据 ${stale.credMs === null ? "(不存在)" : new Date(stale.credMs).toISOString()}）` +
+        `⇒ 凭据已清除（删掉 ${r.deleted.length} 个文件）`,
+    );
+    // ⚠ 必须用 updateLedger（在那个时刻**重新读盘**再改）：wipeLocalCredentials 刚刚写过 lastWipe，
+    //   若用 `saveLedger({...启动时读到的 ledger})` 会把 lastWipe 又覆盖回 null（记账信息丢失）。
+    updateLedger((l) => {
+      l.processed = Array.from(new Set([...ops.map((o) => o.name).reverse(), ...l.processed])).slice(0, LEDGER_MAX_OPS);
+      l.lastOpMtimeMs = Math.max(l.lastOpMtimeMs, ops.length ? ops[ops.length - 1].mtimeMs : 0);
+      l.pendingUninstall = null; // 凭据已清 ⇒ 旧 tombstone 无意义（避免下次启动重复告警）
+    });
+    return { wiped: true, reason: "stale-credentials" };
+  }
+  if (stale.verdict === "settled") {
+    stateLog(
+      `install-ledger: 判据 2b 首次回溯 ⇒ 历史卸载记录 ${stale.newest?.name}` +
+        `（${new Date(stale.atMs).toISOString()}）**早于**本机凭据` +
+        `（${stale.credMs === null ? "(不存在)" : new Date(stale.credMs).toISOString()}）` +
+        `⇒ 卸载之后已重新登录，凭据属于本次安装 ⇒ 保持登录`,
+    );
+  } else if (stale.verdict === "empty") {
+    // 幂等：旧凭据清掉之后每次启动都会走到这里（磁盘上已无凭据）⇒ 不再写 wipe、不再重复告警
+    stateLog(
+      `install-ledger: 判据 2b 首次回溯 ⇒ 历史卸载记录 ${stale.newest?.name}，但磁盘上没有任何凭据文件` +
+        `（本来就是未登录）⇒ 无需清除`,
+    );
+  }
+
+  const seen = new Set(ledger.processed);
+  const candidates = firstTime ? [] : ops.filter((o) => !seen.has(o.name) && o.mtimeMs > ledger.lastOpMtimeMs);
+  const removals: OpDir[] = [];
+  const ambiguous: string[] = [];
+  for (const o of candidates) {
+    const markers = packageMarkers(o.log);
+    if (!markers) continue;
+    if (markers.has("retro")) ambiguous.push(o.name);
+    else if (markers.has("-")) removals.push(o);
+  }
+  let wiped = false;
+  let reason = "nothing";
+  if (firstTime) {
+    // 首次记账（1.0.4 → 1.0.5 升级后的第一次运行，或全新 stateDir）：这里只落锚点、不回溯。
+    // 理由：本判据靠"自上次记账以来"的增量，没有锚点时它无法区分历史与本次。
+    // ⚠ 1.0.6 起"首次回溯"这个职责**已经交给判据 2b**（它靠时间戳方向判断，见上方注释与本文件
+    //   开头的说明）⇒ 首次运行不再漏掉"上一个版本卸载时留下的凭据"。
+    reason = "first-run";
+    stateLog(
+      `install-ledger: 首次记账（无历史锚点）⇒ 以当前最新操作 ${ops.length ? ops[ops.length - 1].name : "(无)"} 为锚点，不回溯清理`,
+    );
+  } else if (removals.length) {
+    const newest = removals.reduce((a, b) => (b.mtimeMs > a.mtimeMs ? b : a));
+    if (sessionNewerThan(newest.mtimeMs)) {
+      reason = "settled";
+      stateLog(
+        `install-ledger: 发现卸载记录 ${removals.map((o) => o.name).join(", ")}，但 session.json 比其中最新的还新` +
+          `（说明之后已重新登录）⇒ 视为已结清，凭据保留`,
+      );
+    } else {
+      const r = wipeLocalCredentials(
+        `启动对账：发现卸载记录 ${removals.map((o) => o.name).join(", ")}` +
+          (ledger.pendingUninstall ? "（且有上次 dispose 落下的 tombstone）" : ""),
+      );
+      wiped = true;
+      reason = "removal-receipt";
+      stateLog(`install-ledger: 确认真卸载 ⇒ 凭据已清除（删掉 ${r.deleted.length} 个文件）`);
+    }
+  } else if (ledger.pendingUninstall) {
+    reason = "tombstone-unconfirmed";
+    stateLog(
+      `install-ledger: 上次 dispose 落了 tombstone（${new Date(ledger.pendingUninstall.at).toISOString()}，` +
+        `${ledger.pendingUninstall.reason}），但流水账里没有本包的卸载回执 ⇒ 判定为「App 退出 / 关开关 / 半途失败」，凭据保留`,
+    );
+  }
+  if (ambiguous.length) {
+    stateLog(
+      `install-ledger: ${ambiguous.join(", ")} 同时含 +/- 记录（pnpm 换版本的差异输出）⇒ 不算卸载凭据（更新必须保持登录）`,
+    );
+  }
+  // 推进锚点：所有看到的 operation 都记为已对账（幂等的关键）
+  const names = ops.map((o) => o.name).reverse();
+  const newestMtime = ops.length ? ops[ops.length - 1].mtimeMs : 0;
+  updateLedger((l) => {
+    l.processed = Array.from(new Set([...names, ...ledger.processed])).slice(0, LEDGER_MAX_OPS);
+    l.lastOpMtimeMs = Math.max(ledger.lastOpMtimeMs, newestMtime);
+    l.pendingUninstall = null; // 已对账过（无论结论如何）——避免每次启动重复告警
+  });
+  return { wiped, reason };
+}
 
 /** 读取包版本号（package.json），供面板显示「当前 bridge 版本」。 */
 function readPackageVersion(): string {
@@ -85,6 +681,11 @@ interface PanelState {
   username: string;
   password: string;
   deviceLabel: string;
+  /** 是否随宿主启动自动连桥（**默认 true = 启动即自动登录**；显式 false 才需要用户点「保存并连接」）。 */
+  autoConnect: boolean;
+  /** 宿主**自己**推导的"本机已登录"（会话在手上，或用户本次填了密码）——
+   *  与"用户名非空"区分开：用户名只是预填值，不代表可用凭据。 */
+  loggedIn: boolean;
   // 常驻二维码（两种模式共用一个码位，内容按登录态切换）
   mode: string; // "pair" | "grant"
   pairingCode: string;
@@ -110,6 +711,8 @@ function defaultState(): PanelState {
     username: "",
     password: "",
     deviceLabel: "DSH Bridge",
+    autoConnect: DEFAULT_AUTO_CONNECT,
+    loggedIn: false,
     mode: "grant",
     pairingCode: "",
     pairingExpiresAt: "",
@@ -127,13 +730,15 @@ function defaultState(): PanelState {
   };
 }
 
-/** 面板配置持久化（仅用户可编辑字段；二维码/状态等运行时字段不落盘）。 */
+/** 面板配置持久化（仅用户可编辑字段；二维码/状态等运行时字段不落盘）。
+ *  ⚠ 1.0.4 起 **不再持久化 password**（明文口令不落盘）：panel.json 里即使有也会在启动时被清除。
+ *  密码只活在内存里（本次进程），用于"换一次令牌"；令牌存 session.json。 */
 function loadPanelState(): Partial<PanelState> {
   try {
     if (!existsSync(PANEL_FILE)) return {};
     const v = JSON.parse(readFileSync(PANEL_FILE, "utf8"));
     const out: Record<string, unknown> = {};
-    for (const k of ["enabled", "relayUrl", "username", "password", "deviceLabel"]) {
+    for (const k of ["enabled", "relayUrl", "username", "deviceLabel", "autoConnect"]) {
       if (typeof v[k] === "string" || typeof v[k] === "boolean") out[k] = v[k];
     }
     return out;
@@ -151,8 +756,8 @@ function savePanelState(s: PanelState) {
         enabled: s.enabled,
         relayUrl: s.relayUrl,
         username: s.username,
-        password: s.password,
         deviceLabel: s.deviceLabel,
+        autoConnect: s.autoConnect,
       }),
     );
   } catch (err: any) {
@@ -210,8 +815,81 @@ function saveSession(s: Session) {
   writeFileSync(SESSION_FILE, JSON.stringify(s));
 }
 
+/* ==================== ① 宿主存活心跳：写 / 清 ====================
+   桥侧的兜底自杀条件（见 bridge/main.js 的 hostWatchdog）。宿主只负责"证明我还活着"：
+   周期性写一个带时间戳的文件，卸载时删掉它 —— 桥据此判断宿主是否还在。 */
+
+/** 立即写一次心跳（apply() 启动时第一件事，**必须在 spawn 桥之前**）。 */
+function writeHeartbeat(): void {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    const body = JSON.stringify({ pid: process.pid, at: Date.now(), atIso: new Date().toISOString(), plugin: name });
+    // 原子写：桥读到的永远是完整 JSON（先写临时文件再 rename）
+    const tmp = `${HEARTBEAT_FILE}.tmp-${process.pid}`;
+    writeFileSync(tmp, body);
+    renameSync(tmp, HEARTBEAT_FILE);
+  } catch {
+    /* 心跳写失败不阻塞主流程：桥侧超时后会自行退出（宁可不杀，也不要因此让宿主起不来） */
+  }
+}
+
+/** 删掉心跳文件（卸载路径）。桥看到"文件消失"会立刻自杀，不用等阈值。 */
+function clearHeartbeat(): void {
+  try { rmSync(HEARTBEAT_FILE, { force: true }); } catch { /* 忽略 */ }
+}
+
+/**
+ * ② 老配置自动清理：删掉 config.json / panel.json 里的**明文口令**字段（只删这一个字段）。
+ * @returns 被清理的文件名（用于 host.log 一行说明）
+ */
+function purgeLegacyPlaintextPassword(): string[] {
+  const purged: string[] = [];
+  for (const file of [CONFIG_FILE, PANEL_FILE]) {
+    try {
+      if (!existsSync(file)) continue;
+      const raw = JSON.parse(readFileSync(file, "utf8"));
+      if (!raw || typeof raw !== "object") continue;
+      let hit = false;
+      if (typeof (raw as any).password === "string" && (raw as any).password !== "") {
+        delete (raw as any).password;
+        hit = true;
+      }
+      // 桥的 config.json 是嵌套结构：口令在 relay.password（老版本由本宿主写入）
+      const relay = (raw as any).relay;
+      if (relay && typeof relay === "object" && typeof relay.password === "string" && relay.password !== "") {
+        delete relay.password;
+        hit = true;
+      }
+      if (!hit) continue;
+      writeFileSync(file, JSON.stringify(raw, null, 2));
+      purged.push(path.basename(file));
+    } catch {
+      /* 读不出/写不了：不动它（宁可留着，也不要写坏用户的配置） */
+    }
+  }
+  return purged;
+}
+
 export function apply(ctx: any, _config: any = {}) {
+  // ④ 安装生命周期 —— 启动对账（判据 2）必须跑在**任何状态加载之前**：
+  //    这样"卸载后重装"的这次启动从一开始就是空状态（不会先把老 session/panel 读进内存再删文件）。
+  const profileDir = resolveProfileDir(ctx);
+  if (!profileDir) {
+    stateLog("install-ledger: 取不到 profile 目录（profileContext 缺失且向上没找到 dsh.profile.bundles）");
+  }
+  const reconcile = reconcileInstallLedger(profileDir);
+  // ② 老配置清理必须在 loadPanelState() 之前跑：这样"内存里的 state"从一开始就不含明文口令。
+  const purgedFiles = purgeLegacyPlaintextPassword();
   let state: PanelState = { ...defaultState(), ...loadPanelState() };
+  // 清理结果要写 host.log，但日志函数在下面才定义 → 先记下来，稍后补写。
+  const bootNotices: string[] = purgedFiles.length
+    ? [`purged legacy plaintext password from ${purgedFiles.join(", ")}（只删 password 字段，其它字段未改动）`]
+    : [];
+  // ④ 对账结论也要写进 host.log（日志函数在下面才定义）
+  bootNotices.push(
+    `install-ledger: profileDir=${profileDir ?? "(未识别)"} 对账结论=${reconcile.reason}` +
+      (reconcile.wiped ? "（本次已清除本机凭据 ⇒ 空状态，需要重新登录）" : "（凭据未改动）"),
+  );
 
   let child: ReturnType<typeof spawn> | null = null;
   let stopped = false;
@@ -221,6 +899,9 @@ export function apply(ctx: any, _config: any = {}) {
   let lastConfig: PanelState | null = null;
   let lastRespawnAt = 0;
   let yieldRetries = 0; // 让位/被占用后的礼貌重试次数（成功启动即清零）
+  // 手动连接标记：仅用于「显式关掉 autoConnect」的用户（默认路径不再需要它）。
+  let startedByUser = false;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   // 新版 DSH（v0.1.5+）鉴权：connection 服务提供的进程 launch token（每次 DSH 启动换新）。
   // 桥子进程用它做一次性 Cookie 换发。老版 DSH 无 connection 服务 → token 保持空，
   // 桥按无鉴权模式直连（向后兼容）。
@@ -234,12 +915,36 @@ export function apply(ctx: any, _config: any = {}) {
 
   /** 宿主关键事件落盘（stdio 不可见时也能诊断）。 */
   function hostLog(msg: string) {
-    try {
-      mkdirSync(STATE_DIR, { recursive: true });
-      appendFileSync(path.join(STATE_DIR, "host.log"), `${new Date().toISOString()} ${msg}\n`);
-    } catch {
-      /* 日志失败不影响主流程 */
-    }
+    stateLog(msg);
+  }
+
+  // 启动期的清理/状态说明（此时日志函数已可用）
+  for (const n of bootNotices) hostLog(n);
+
+  /** 桥是否具备可用凭据：宿主手上的会话，或用户本次填写的账号密码。
+   *  ⚠ 只看用户名不算 —— 用户名只是预填值，令牌/密码才是凭据。 */
+  function hasBridgeCreds(): boolean {
+    return session !== null || Boolean(state.username && state.password);
+  }
+
+  /** 「自动连接」的**有效配置**（不含"用户本次点过连接"这个临时状态）—— 面板显示与本机行为都以它为准。
+   *  优先级：插件配置 `{autoConnect:false}` > panel.json 的 autoConnect > 默认 true。 */
+  function autoConnectEffective(): boolean {
+    const configured = typeof _config?.autoConnect === "boolean" ? _config.autoConnect : undefined;
+    return (configured ?? state.autoConnect) !== false;
+  }
+
+  /** 是否允许本宿主启动/维持桥与 relay 连接。
+   *  ★ 1.0.5 起**默认允许**（对标微信/淘宝：正常启动 / DSH 重启 / 插件更新后都自动登录）。
+   *  只有**显式关闭**才退化为"必须用户点一次『保存并连接』"：
+   *    · 插件配置 `{autoConnect:false}`（优先级最高，来自 cordis.patch.yml 的 config）；或
+   *    · `panel.json` 里的 `autoConnect:false`（用户显式关掉；1.0.5 默认写的是 true）。
+   *  用户点过连接（startedByUser）时始终允许 —— 手动动作永远优先于配置。 */
+  function bridgeAllowed(): boolean {
+    return startedByUser || autoConnectEffective();
+  }
+  function bridgeShouldRun(): boolean {
+    return state.enabled && bridgeAllowed() && hasBridgeCreds();
   }
 
   /** 从 connection 服务提取 launch token；成功返回 true。多渠道共用，保证不重不漏。 */
@@ -257,7 +962,9 @@ export function apply(ctx: any, _config: any = {}) {
       if (token && token !== dshLaunchToken) {
         dshLaunchToken = token;
         hostLog(`token[${source}]: acquired (bridge will authenticate /api)`);
-        if (state.enabled && (session !== null || Boolean(state.username && state.password)) && child) {
+        // ⚠ 只"续"不"起"：桥已经在跑才用新 token 重启它；桥没跑就绝不在这里启动（起桥只由
+        //    bridgeShouldRun()/bridgeAllowed() 决定，见 onConfig 与 startBridge）。
+        if (state.enabled && hasBridgeCreds() && bridgeAllowed() && child) {
           startBridge(state);
         }
       }
@@ -286,6 +993,11 @@ export function apply(ctx: any, _config: any = {}) {
     const rt = readE2eeRuntime();
     return {
       ...state,
+      // ④ 面板据此把"没凭据"显示成「未连接」。loggedIn **现场推导**（会话在手 或 本次填了密码），
+      //    不再拿"用户名非空"当登录判据 —— 用户名只是预填值，不代表可用凭据。
+      loggedIn: session !== null || Boolean(state.username && state.password),
+      // 面板按「有效配置」显示：插件配置/panel.json 显式关掉时，面板要说"自动连接已关闭"
+      autoConnect: autoConnectEffective(),
       e2eeRequire: rt.require,
       e2eePinned: rt.pinned,
       e2eePeerKeyId: rt.peerKeyId ? rt.peerKeyId.slice(0, 12) : "",
@@ -428,6 +1140,8 @@ export function apply(ctx: any, _config: any = {}) {
       const p = child;
       child = null;
       try { p.kill(); } catch {}
+    } else if (state.bridgeStatus === "stopped") {
+      return; // 幂等：本来就没有桥、状态也已经是 stopped，不要重复写状态（避免把 "running" 之外的提示覆盖掉）
     }
     patchState({ bridgeStatus: "stopped" });
   }
@@ -448,16 +1162,35 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
-  function startBridge(value: PanelState, opts: { noYield?: boolean } = {}) {
+  /**
+   * 启动桥子进程（默认路径：宿主启动时由 autoConnect 自动拉起；显式关掉时只由「保存并连接」触发）。
+   * @returns 桥是否真的被拉起（false = 缺凭据/未获授权，调用方据此给面板提示）
+   */
+  function startBridge(value: PanelState, opts: { noYield?: boolean } = {}): boolean {
+    // 只有**显式**关了 autoConnect 且用户没点过连接时才拦下来（默认路径不拦）。
+    if (!bridgeAllowed()) {
+      hostLog("startBridge skipped: autoConnect=false（显式关闭）且未点「保存并连接」");
+      return false;
+    }
+    // 只有用户名、没有任何可用凭据（无会话且本次没填密码）→ 不启动，等用户填密码或扫码授权。
+    // 这样本插件永远不会在用户没提供凭据的情况下尝试登录 relay。
+    if (!hasBridgeCreds()) {
+      patchState({ bridgeStatus: "needs-login" });
+      hostLog("startBridge skipped: 无可用凭据（无会话且未填密码）");
+      return false;
+    }
     stopBridge();
     takeoverStaleBridges();
     try {
       mkdirSync(STATE_DIR, { recursive: true });
-      const cfg = {
+      const cfg: Record<string, any> = {
         relay: {
           url: value.relayUrl,
           username: value.username || session?.username || "",
-          password: value.password || "",
+          // ⚠ 有会话时**绝不**把明文口令写进 config.json（1.0.4 起口令只在内存里用于换令牌）：
+          //    正常流程走 bootInteractively() → 换到令牌后口令已从内存清空，这里必然是空串。
+          //    "手机扫码授权"模式下也必然是空串。
+          password: session ? "" : value.password,
           // 手机授权模式：token 直用（无密码）；账号密码模式：这两个为空
           accessToken: session?.accessToken ?? "",
           refreshToken: session?.refreshToken ?? "",
@@ -472,6 +1205,10 @@ export function apply(ctx: any, _config: any = {}) {
         },
         stateDir: STATE_DIR,
       };
+      // ① 心跳文件名与阈值一起传给桥：桥据此监测"宿主还在不在"（宿主不在 ⇒ 桥自杀）。
+      //    阈值同时作为桥自己的默认值来源，两端口径必然一致（不再各自写死）。
+      cfg[HEARTBEAT_FIELD] = HEARTBEAT_FILE;
+      cfg[HEARTBEAT_STALE_FIELD] = HEARTBEAT_STALE_MS;
       writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
       // 桥日志落盘到 <stateDir>/bridge.log（stdio 不再丢弃，重启后可直接诊断）
       let logFd = -1;
@@ -509,18 +1246,24 @@ export function apply(ctx: any, _config: any = {}) {
           patchState({ bridgeStatus: `${why}（${delay / 1000} 秒后自动重试）` });
           setTimeout(() => {
             if (stopped || !state.enabled) return;
-            if (session === null && !(state.username && state.password)) return;
+            if (!hasBridgeCreds()) return;
             startBridge(state, { noYield: true });
           }, delay);
           return;
         }
         // 异常退出则 3 秒后自动拉起（60 秒内最多一次，防崩溃循环）
-        patchState({ bridgeStatus: `exited:${code}，3 秒后自动重启` });
+        // ⚠ 退出码 44 = 桥自己发现"宿主心跳过期"而自杀（见 bridge/main.js hostWatchdog）。
+        //   那不是崩溃，**绝不能自动拉起** —— 否则会变成"自杀→重启"死循环。
+        patchState({ bridgeStatus: code === BRIDGE_EXIT_HOST_GONE ? "host-heartbeat-stale" : `exited:${code}，3 秒后自动重启` });
+        if (code === BRIDGE_EXIT_HOST_GONE) {
+          hostLog(`bridge exited ${code}: 桥检测到宿中心跳过期而退出（本宿主不再自动拉起）`);
+          return;
+        }
         const now = Date.now();
         if (now - lastRespawnAt > 60_000) {
           lastRespawnAt = now;
           setTimeout(() => {
-            if (!stopped && state.enabled && (session !== null || Boolean(state.username && state.password))) {
+            if (!stopped && state.enabled && hasBridgeCreds() && bridgeAllowed()) {
               startBridge(state);
             }
           }, 3000);
@@ -534,8 +1277,10 @@ export function apply(ctx: any, _config: any = {}) {
       // 真正起来了（能连上 DSH 也由桥自己再确认）：重置让位重试计数
       yieldRetries = 0;
       patchState({ bridgeStatus: "running" });
+      return true;
     } catch (err: any) {
       patchState({ bridgeStatus: `error:${err?.message ?? err}` });
+      return false;
     }
   }
 
@@ -601,7 +1346,9 @@ export function apply(ctx: any, _config: any = {}) {
     return body;
   }
 
-  /** 拿可用 access token：会话优先，否则账号密码登录。 */
+  /** 拿可用 access token：会话优先；没有会话时才用内存里的账号密码换一次令牌。
+   *  ⚠ 密码**只活在内存**（panel.json / config.json 都不再保存，启动时会自动清理）：它是"换令牌"的一次性输入，
+   *  换到令牌后立刻从内存清掉（令牌落 session.json），从而避免任何时刻的明文口令落盘。 */
   async function obtainAccessToken(base: string): Promise<string> {
     if (session?.accessToken) return session.accessToken;
     if (!state.username || !state.password) {
@@ -611,6 +1358,17 @@ export function apply(ctx: any, _config: any = {}) {
       method: "POST",
       body: JSON.stringify({ username: state.username, password: state.password }),
     });
+    // 令牌已到手 → 内存里的明文口令可以丢了（会话由 session.json 承载）
+    if (login?.data?.accessToken && login?.data?.refreshToken) {
+      session = {
+        accessToken: login.data.accessToken,
+        refreshToken: login.data.refreshToken,
+        username: login.data.user?.username ?? state.username,
+      };
+      saveSession(session);
+      patchState({ password: "", loggedIn: true });
+      hostLog("auth: 账号密码换令牌成功（明文口令已从内存清除，未落盘）");
+    }
     return login.data.accessToken;
   }
 
@@ -791,7 +1549,8 @@ export function apply(ctx: any, _config: any = {}) {
             grantPairingId: "",
             bridgeStatus: "granted",
           });
-          if (state.enabled) startBridge(state);
+          // 手机扫码授权成功 = 用户显式动作 ⇒ 允许起桥；但仍尊重"未获授权就不起"的总闸门
+          if (bridgeShouldRun()) startBridge(state);
           ensurePairCode().catch(() => {});
         }
       } catch {
@@ -862,7 +1621,10 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
-  /** 退出登录：清本机会话与账号显示 → 停桥 → 转回授权码模式。 */
+  /** 退出登录：清本机会话与账号显示 → 停桥 → 转回授权码模式。
+   *  ⚠ 语义边界（与面板「清除本机凭据」严格区分）：
+   *    · 退出登录 = **服务端登出语义**：丢弃本机会话/账号，桥停掉；二维码转回授权模式，手机仍可扫码授权本机登录。
+   *    · 清除本机凭据 = **只清本机**：丢掉会话与预填账号，且**不再主动连**（二维码也不自动重出）。 */
   async function handleLogout() {
     session = null;
     grantSecret = "";
@@ -871,9 +1633,11 @@ export function apply(ctx: any, _config: any = {}) {
       rmSync(SESSION_FILE, { force: true });
     } catch {}
     stopBridge();
+    startedByUser = false; // 退出登录后回到"未连接、等用户点连接"的状态
     patchState({
       username: "",
       password: "",
+      loggedIn: false,
       mode: "grant",
       pairingCode: "",
       pairingExpiresAt: "",
@@ -885,14 +1649,78 @@ export function apply(ctx: any, _config: any = {}) {
     scheduleConfig();
   }
 
+  /** 「清除本机凭据」：把**这台机器上的身份/登录痕迹**清干净（不只是 token）。
+   *  清单 = CREDENTIAL_FILES：会话令牌 + 桥配置 + 预填账号 + relay 设备 ID + **E2EE 设备私钥**
+   *  + DSH API Cookie 缓存 + 配对 secret + 机器标识。
+   *  与「退出登录」的区别：退出登录只丢会话（设备身份/私钥都留着，扫个码就能回来）；
+   *  清除本机凭据是"换一台新机器"的语义 —— 之后必须完整重新登录（可能还要重新做 E2EE 配对）。 */
+  async function clearLocalCredentials() {
+    session = null;
+    grantSecret = "";
+    stopPolling();
+    stopBridge();
+    startedByUser = false;
+    patchState({
+      username: "",
+      password: "",
+      loggedIn: false,
+      mode: "grant",
+      pairingCode: "",
+      pairingExpiresAt: "",
+      grantPairingId: "",
+      registerError: "",
+      pairError: "",
+      bridgeStatus: "stopped",
+    });
+    const wiped = wipeLocalCredentials("面板动作 clearCredentials（用户显式清除本机凭据）");
+    // ⚠ 这里**不再** savePanelState(state)：panel.json 已被删除，写回去等于"清完又落盘账号"。
+    hostLog(`clearCredentials: 本机凭据已清除（删除 ${wiped.deleted.join(", ") || "无"}；桥已停）`);
+    scheduleConfig();
+  }
+
+  /** 「保存并连接」= 用户显式授权连桥：此后才允许起桥 / 连 relay / 自动出码。
+   *  ⚠ 顺序：**先用密码换令牌（内存）→ 再起桥**。这样桥的 config.json 里只有令牌，永远不含明文口令。 */
+  async function bootInteractively() {
+    startedByUser = true;
+    hostLog(`connect: 用户显式触发（autoConnect=${autoConnectEffective()}）`);
+    // 用户本次填了密码：先换令牌（令牌落 session.json），再起桥 ⇒ 明文口令不落盘
+    if (state.username && state.password) {
+      try {
+        await obtainAccessToken(state.relayUrl.replace(/\/$/, ""));
+        patchState({ pairError: "" });
+        hostLog("connect: 已用账号密码换取令牌（明文口令未落盘，已从内存清除）");
+      } catch (err: any) {
+        const msg = String(err?.message ?? err);
+        patchState({ pairError: `账号密码登录失败（${msg}）；也可用手机 App 扫码授权本机登录` });
+        hostLog(`connect: 账号密码登录失败：${msg}`);
+      }
+    }
+    await onConfig();
+    // ⚠ 必须补这一下：onConfig 的"该不该起桥"是**变化检测**，而 prevShouldRun / shouldRun 都用
+    //   **当前**的 bridgeAllowed() 求值 —— 用户点连接只改了 startedByUser（不是 state 字段），
+    //   两边会同时变成 true ⇒ 检测不到变化 ⇒ 表单没改动时点「保存并连接」将毫无反应（实测踩到）。
+    //   显式关闭 autoConnect 的用户全靠这个按钮，所以这里必须自己起桥。
+    if (bridgeShouldRun() && !child) startBridge(state);
+    // 既没有会话、也没有可用密码 → 桥起不来；明确告诉用户缺什么，而不是静默失败
+    if (state.enabled && !session && !state.password) {
+      patchState({
+        pairError: state.username
+          ? "本机缺少可用凭据：请输入密码后重试，或用手机 App 扫码授权本机登录"
+          : "请填写账号与密码，或用手机 App 扫码授权本机登录",
+      });
+    }
+  }
+
   async function onConfig() {
     const next = { ...state };
     const prev = lastConfig;
     lastConfig = next;
     // 桥启停（配置变化或首次装载）
-    const shouldRun = next.enabled && (session !== null || Boolean(next.username && next.password));
+    // ④ 首次装载时 shouldRun 由 bridgeShouldRun() 决定：**默认自动连接** ⇒ 有凭据就 spawn（自动登录）。
+    //    只有显式 autoConnect=false 时才停在 stopped，等用户点「保存并连接」。
+    const shouldRun = next.enabled && bridgeAllowed() && (session !== null || Boolean(next.username && next.password));
     const prevShouldRun = prev
-      ? prev.enabled && (session !== null || Boolean(prev.username && prev.password))
+      ? prev.enabled && bridgeAllowed() && (session !== null || Boolean(prev.username && prev.password))
       : false;
     const cfgChanged =
       !prev ||
@@ -900,14 +1728,18 @@ export function apply(ctx: any, _config: any = {}) {
       prev.username !== next.username ||
       prev.password !== next.password ||
       prev.deviceLabel !== next.deviceLabel ||
-      prev.enabled !== next.enabled;
-    if (cfgChanged || (!child && shouldRun)) {
-      if (shouldRun) startBridge(next);
+      prev.enabled !== next.enabled ||
+      prev.autoConnect !== next.autoConnect;
+    if (cfgChanged || shouldRun !== prevShouldRun) {
+      // 幂等：shouldRun=true 时重复 startBridge 会重启桥，所以只在"没有桥"时启动
+      if (shouldRun) { if (!child) startBridge(next); }
       else stopBridge();
     }
-    // 常驻二维码：凭据变化/尚无有效码时（重新）出码
+    // 常驻二维码：凭据变化/尚无有效码时（重新）出码。
+    // 默认路径（自动登录）下这里也自动出码；只有显式 autoConnect=false 时才不主动连 relay，
+    // 面板显示"未生成：点「保存并连接」后才会出码"。
     const credsChanged = !prev || prev.username !== next.username || prev.password !== next.password;
-    if (credsChanged || !next.pairingCode) {
+    if (bridgeAllowed() && (credsChanged || !next.pairingCode)) {
       await ensureQr();
     }
   }
@@ -916,11 +1748,22 @@ export function apply(ctx: any, _config: any = {}) {
   async function handleAction(action: string, payload: any) {
     switch (action) {
       case "save": {
-        for (const k of ["relayUrl", "username", "password", "deviceLabel", "enabled"]) {
+        // ⚠ password 只进内存、绝不落盘（savePanelState 不再持久化它）；autoConnect 可被显式打开。
+        for (const k of ["relayUrl", "username", "password", "deviceLabel", "enabled", "autoConnect"]) {
           if (payload && payload[k] !== undefined) (state as any)[k] = payload[k];
         }
         savePanelState(state);
         scheduleConfig();
+        break;
+      }
+      case "connect": {
+        await bootInteractively();
+        break;
+      }
+      case "disconnect": {
+        startedByUser = false;
+        stopBridge();
+        hostLog("disconnect: 用户断开（桥已停，relay 连接随之中断）");
         break;
       }
       case "register": {
@@ -936,6 +1779,10 @@ export function apply(ctx: any, _config: any = {}) {
       }
       case "logout": {
         await handleLogout();
+        break;
+      }
+      case "clearCredentials": {
+        await clearLocalCredentials();
         break;
       }
       case "e2eePolicy": {
@@ -1018,16 +1865,63 @@ export function apply(ctx: any, _config: any = {}) {
     return server;
   }
 
+  /* ==================== ① 宿主生命周期：心跳 + 卸载钩子 ====================
+     为什么必须有这两条（实测缺陷）：卸载/关闭插件后，spawn 出来的桥可能继续在后台跑、继续连 relay，
+     手机仍能操作这台电脑，只能手动 taskkill。而**插件被卸载时 DSH 进程还活着**，
+     `process.ppid` / IPC 存活检查都发现不了 → 必须由宿主自己"报活"，并在卸载时主动收尾。 */
+
+  /** 幂等收尾：卸载钩子与 apply 的返回值都指向它（两条路都注册，任一条生效即可）。
+   *  ★ 1.0.5 起这里**同时**触发 ④ 判据 1（卸载当场清凭据）：只有"bundles 里已不含本包"
+   *  才会落 tombstone 并轮询确认；App 退出 / 热重载（bundles 仍在）时一律不动凭据。 */
+  let tornDown = false;
+  function teardown(reason: string) {
+    if (tornDown) return;
+    tornDown = true;
+    stopped = true;
+    // 顺序很重要：先清掉心跳文件（桥下一次检查立刻发现"宿主不在了"），再杀子进程。
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    clearHeartbeat();
+    const pid = child?.pid;
+    stopPolling();
+    stopBridge(); // 杀 spawn 出来的桥子进程（stopBridge 内部对 child 判空，幂等）
+    if (tokenPollTimer) { clearInterval(tokenPollTimer); tokenPollTimer = null; }
+    try { server.close(); } catch { /* 未监听/已关 */ }
+    hostLog(`dispose: ${reason} → 心跳文件已清除、桥${pid ? `(pid=${pid})` : ""}已停止、面板 HTTP 已关闭`);
+    // ④ 判据 1：桥已经停了，再判断这次 dispose 是不是"真卸载"（是则清凭据）
+    try {
+      onPluginDisposed(profileDir, reason);
+    } catch (err: any) {
+      hostLog(`uninstall-watch: 判定异常（已忽略，凭据不动）：${err?.message ?? err}`);
+    }
+  }
+
+  // cordis 的正确卸载钩子（在 DSH 仓库的 cordis 里读过实现）：
+  //  · `ctx.effect(fn)` 把 fn 注册到**当前插件 fiber**；fiber 卸载时按 LIFO 执行它返回的清理函数。
+  //  · apply 返回的函数同样会被 `Fiber._execute()` 收进 `runner.collect` → 卸载时执行（本文件末尾的 return）。
+  //  · ⚠ cordis **没有** `dispose` 事件（内部只发 `internal/plugin` / `internal/status`），
+  //    所以这里用的是 `ctx.effect`，**不是** `ctx.on("dispose")` —— 后者永远不会触发。
+  // 两条注册（effect + 返回值）都指向幂等的 teardown()，重复调用无副作用。
+  try {
+    if (typeof ctx?.effect === "function") {
+      ctx.effect(() => {
+        return () => teardown("插件 fiber 卸载（ctx.effect 清理回调）");
+      });
+    }
+  } catch (err: any) {
+    hostLog(`dispose: ctx.effect 注册失败（仍依赖 apply 返回值清理）：${err?.message ?? err}`);
+  }
+
+  // ★ 先写心跳文件，再 startServer()/scheduleConfig()：契约是"桥被 spawn 之前心跳必定已存在"。
+  writeHeartbeat();
+  heartbeatTimer = setInterval(writeHeartbeat, HEARTBEAT_WRITE_MS);
+  hostLog(`heartbeat: ${HEARTBEAT_FILE}（每 ${HEARTBEAT_WRITE_MS / 1000}s 一次；桥容忍 ${HEARTBEAT_STALE_MS / 1000}s）`);
+
   const server = startServer();
   // 诊断一行：官方通道注册结果（rpcSource: sync / inject / inject-cb / poll；no = 只有 HTTP 兜底）
   hostLog(`plugin applied: dshUrl=${dshBaseUrl()} token=${dshLaunchToken ? "yes" : "no"} rpc=${rpcRegistered ? `yes(${rpcSource})` : "no"}`);
-  scheduleConfig(); // 首次装载：按持久化配置启动桥 + 出码
+  // 首次装载：默认 autoConnect=true ⇒ 有凭据就**自动起桥、自动出码**（自动登录，对标微信/淘宝）；
+  // 只有显式 autoConnect=false 时才停在"未连接"，等用户点「保存并连接」。
+  scheduleConfig();
 
-  return () => {
-    stopped = true;
-    stopPolling();
-    stopBridge();
-    if (tokenPollTimer) { clearInterval(tokenPollTimer); tokenPollTimer = null; }
-    try { server.close(); } catch {}
-  };
+  return () => teardown("插件卸载（apply 返回的 disposer）");
 }
