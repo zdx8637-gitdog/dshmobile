@@ -47,7 +47,7 @@ your sessions.
 
 **Pick your path first**: DSH **desktop app 0.2.0 or newer** → §A (GUI, recommended); legacy
 `dsh web` (**0.1.7**) → §B (CLI). Both install the same package
-`@zdx8637/dshmobile-bridge` (current plugin version **1.0.3**).
+`@zdx8637/dshmobile-bridge` (current plugin version **1.0.7**).
 
 ### A. PC — DSH 0.2.0 desktop app: install from the GUI (recommended)
 
@@ -57,7 +57,7 @@ your sessions.
    path is accepted there too):
 
    ```
-   @zdx8637/dshmobile-bridge@1.0.3
+   @zdx8637/dshmobile-bridge@1.0.7
    ```
 
 3. On the right pick **「安装源」** — `npm 官方源` (official npm registry) or `中国大陆镜像源`
@@ -67,7 +67,7 @@ your sessions.
 6. Open the panel: a ▶ arrow appears at the bottom of the web sidebar — click to open it
    (① login / grant code, ② encrypted pairing code).
 
-> ⚠️ **Always pin an exact version** (e.g. `@zdx8637/dshmobile-bridge@1.0.3`). The profile directory
+> ⚠️ **Always pin an exact version** (e.g. `@zdx8637/dshmobile-bridge@1.0.7`). The profile directory
 > contains a `pnpm-lock.yaml`; when you reinstall by bare package name the lockfile can pin the
 > version back to the old one (measured: npm already served 1.0.2, yet a reinstall still left 1.0.0
 > installed).
