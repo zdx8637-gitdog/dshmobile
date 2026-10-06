@@ -17,7 +17,8 @@ let capturedCb = null;
 const authCalls = [];
 const fakeCtx = {
   inject(services, cb) {
-    if (JSON.stringify(services) === JSON.stringify(["connection"])) capturedCb = cb;
+    // 1.0.7 起 host 半边同时注入 connection + webServer（端口与 RPC 通道都要 webServer）
+    if (JSON.stringify(services) === JSON.stringify(["connection", "webServer"])) capturedCb = cb;
   },
 };
 
@@ -47,7 +48,7 @@ capturedCb({
 });
 check("重复注入不崩溃", authCalls.length === 2);
 
-// 无 env 覆盖时沿用注入回调学到的 webServer 端口（静态兜底 3080 由 grep 验证）
+// 无 env 覆盖时沿用注入回调学到的 webServer 端口（1.0.7 起不猜 3080，端口只从 webServer.port 来）
 delete process.env.DSHMOBILE_DSH_URL;
 capturedCb({
   connection: { authenticatedUrl(base) { authCalls.push(base); return `${base}?token=T3`; } },
@@ -56,7 +57,7 @@ check("端口记忆：无 env 时沿用上次端口", authCalls[2] === "http://1
 
 dispose();
 const hostLogText = readFileSync(join(stateDir, "host.log"), "utf8");
-check("host.log 已落盘（apply 完成 + token 获取记录）", hostLogText.includes("plugin applied") && hostLogText.includes("token[inject]: acquired"), hostLogText.split("\n").slice(0, 4).join(" | "));
+check("host.log 已落盘（apply 完成 + token 获取记录）", hostLogText.includes("plugin applied") && hostLogText.includes("token[inject-cb]: acquired"), hostLogText.split("\n").slice(0, 4).join(" | "));
 rmSync(stateDir, { recursive: true, force: true });
 console.log(failures === 0 ? "ALL PASS" : `${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

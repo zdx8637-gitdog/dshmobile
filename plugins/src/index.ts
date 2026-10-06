@@ -15,6 +15,9 @@
 //     仅在**能力探测失败**时被面板使用（`typeof ctx.connection?.rpc?.handle === "function"` 为假，
 //     例如更老/没有该服务的 DSH）；宿主这边**永远**照旧监听，两条通道可以同时存在。
 // 收益：一条命令安装即用、跨平台、DSH 升级不受影响、无需任何本地补丁。
+// ⚠ 1.0.7 起端口**绝不猜**：DSH 本机 API 的端口只从 `webServer.port` 读取（官方桌面 `--port 0` 随机端口、
+//    `dsh web` 默认 3080 但可改、dsh-tauri 默认 3080 被占则顺延 —— 三种载体端口策略不同，猜必错）；
+//    未解析前桥不启动（面板显示 dsh-port-unresolved），可用 DSHMOBILE_DSH_URL 显式指定。
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -906,11 +909,18 @@ export function apply(ctx: any, _config: any = {}) {
   // 桥子进程用它做一次性 Cookie 换发。老版 DSH 无 connection 服务 → token 保持空，
   // 桥按无鉴权模式直连（向后兼容）。
   let dshLaunchToken = "";
-  let webServerPort = 3080;
+  // ★ 端口**绝不猜**（1.0.7 起）：0 = 未解析；解析值只来自 DSH `webServer` 服务的真实监听端口
+  //   （任何载体都成立，含官方桌面 `--port 0` 的随机端口）。显式覆盖：环境变量 DSHMOBILE_DSH_URL。
+  let webServerPort = 0;
+  let webServerPortSource = "";
   let tokenPollTimer: ReturnType<typeof setInterval> | null = null;
+  let booted = false; // apply 尾部置 true；避免启动期 port 解析与 scheduleConfig 抢跑互相重启桥
 
   function dshBaseUrl(): string {
-    return process.env.DSHMOBILE_DSH_URL || `http://127.0.0.1:${webServerPort}`;
+    const env = process.env.DSHMOBILE_DSH_URL;
+    if (env) return env.replace(/\/+$/, "");
+    if (webServerPort > 0) return `http://127.0.0.1:${webServerPort}`;
+    return ""; // 未解析：调用方（起桥/取 token）必须显式处理，绝不猜 3080
   }
 
   /** 宿主关键事件落盘（stdio 不可见时也能诊断）。 */
@@ -947,14 +957,48 @@ export function apply(ctx: any, _config: any = {}) {
     return state.enabled && bridgeAllowed() && hasBridgeCreds();
   }
 
-  /** 从 connection 服务提取 launch token；成功返回 true。多渠道共用，保证不重不漏。 */
+  // 诊断日志去重：同一类失败只报一次（变化时报），根治 host.log 每秒刷屏
+  let lastTokenDiag = "";
+  function tokenDiag(source: string, msg: string) {
+    if (msg === lastTokenDiag) return;
+    lastTokenDiag = msg;
+    hostLog(`token[${source}]: ${msg}`);
+  }
+  let lastRpcDiag = "";
+  function rpcDiag(source: string, msg: string) {
+    if (msg === lastRpcDiag) return;
+    lastRpcDiag = msg;
+    hostLog(`rpc[${source}]: ${msg}`);
+  }
+
+  /** 记录 DSH webServer 真实端口（`ws.port` 在任何载体下都返回实际监听端口，含 `--port 0` 随机分配）。
+   *  端口第一次解析/发生变化时：若桥已在跑则用新地址重启；若桥此前因"端口未解析"没起，则补起。 */
+  function recordWebServer(ws: any, source: string): void {
+    try {
+      const port = ws?.port;
+      if (Number.isInteger(port) && port > 0 && port !== webServerPort) {
+        webServerPort = port;
+        webServerPortSource = source;
+        hostLog(`port[${source}]: resolved http://127.0.0.1:${port}`);
+        if (booted && bridgeShouldRun()) startBridge(state);
+      }
+    } catch { /* 读不到端口就保持未解析；失败在 applyToken 里统一报 */ }
+  }
+
+  /** 从 connection 服务提取 launch token；成功返回 true。多渠道共用，保证不重不漏。
+   *  端口与 token 分开记：端口未解析也能继续等（轮询不会停），但**不猜端口**。 */
   function applyToken(connectionCtx: any, source: string): boolean {
     try {
-      const port = connectionCtx?.webServer?.port;
-      if (Number.isInteger(port) && port > 0) webServerPort = port;
+      // 端口：注入式 ctx 用属性直取；sync/poll 传的 {connection,webServer} 普通对象同样兼容
+      const ws = connectionCtx?.webServer ?? connectionCtx?.get?.("webServer");
+      if (ws) recordWebServer(ws, source);
+      if (!dshBaseUrl()) {
+        tokenDiag(source, "waiting: webServer 端口未解析（不猜端口，继续轮询）");
+        return false;
+      }
       const conn = connectionCtx?.connection ?? connectionCtx?.get?.("connection");
       if (!conn || typeof conn.authenticatedUrl !== "function") {
-        hostLog(`token[${source}]: connection service not visible`);
+        tokenDiag(source, "connection service not visible");
         return false;
       }
       const authed = conn.authenticatedUrl(dshBaseUrl());
@@ -970,7 +1014,7 @@ export function apply(ctx: any, _config: any = {}) {
       }
       return Boolean(token);
     } catch (err: any) {
-      hostLog(`token[${source}]: failed: ${err?.message ?? err}`);
+      tokenDiag(source, `failed: ${err?.message ?? err}`);
       return false;
     }
   }
@@ -985,6 +1029,7 @@ export function apply(ctx: any, _config: any = {}) {
        保证面板侧拿到的是**业务错误**而不是"传输失败"，从而不会误触发回退。） */
   let rpcRegistered = false;
   let rpcSource = "";
+  let rpcDispose: (() => void) | null = null;
 
   /** 面板状态快照：HTTP `GET /state` 与 rpc `state` endpoint 共用同一份，两条通道数据必然一致。 */
   function panelSnapshot() {
@@ -1028,14 +1073,77 @@ export function apply(ctx: any, _config: any = {}) {
     }
   }
 
+  /** RPC 通道请求处理（直接挂载形态）：解析官方 client-request 信封 → handleRpc → server-response 信封。
+   *  栅栏复用官方 `connection.admit`（Host/Origin 403 + 浏览器会话 401；dsh-tauri 等载体按需改写其语义）。 */
+  function handleRpcHttpRequest(req: any, res: any, conn: any) {
+    const finish = (code: number, body: any) => {
+      res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    try {
+      if (conn && typeof conn.admit === "function") {
+        const admission = conn.admit(req);
+        if (admission && "rejection" in admission) {
+          res.writeHead(admission.rejection);
+          res.end(admission.rejection === 401 ? "unauthorized" : "forbidden");
+          return;
+        }
+      }
+      let raw = "";
+      req.on("data", (c: any) => { if (raw.length < 2_000_000) raw += c; });
+      req.on("end", () => {
+        let body: any = null;
+        try { body = JSON.parse(raw || "{}"); } catch { body = null; }
+        if (!body || body.type !== "client-request" || typeof body.rpcId !== "string" || typeof body.method !== "string") {
+          finish(400, { type: "server-response", rpcId: "invalid-request", result: { ok: false, error: { code: "dshmobile/invalid-request", message: "invalid client-request envelope", details: {} } } });
+          return;
+        }
+        (async () => {
+          try {
+            const result = await handleRpc(body.method, body.payload);
+            finish(200, { type: "server-response", rpcId: body.rpcId, result });
+          } catch (err: any) {
+            finish(500, { type: "server-response", rpcId: body.rpcId, result: { ok: false, error: { code: "dshmobile/failed", message: String(err?.message ?? err), details: {} } } });
+          }
+        })();
+      });
+    } catch {
+      try { res.writeHead(500); res.end(); } catch { /* 连接已断 */ }
+    }
+  }
+
   /**
-   * 注册官方 RPC 通道（幂等：成功一次就够）。
+   * 注册官方 RPC 通道（幂等：成功一次就够）。**两条注册形态**：
+   *   ★ 直接挂载（与官方 /api 同款）：把 RPC_CHANNEL 作为 prefix 路由注册到 DSH webServer，
+   *     信封与官方 rpc 通道一致。用于 `connection.rpc.handle` 不可用的 DSH 版本 ——
+   *     其 register 把 owner 固定为 connection 服务自身 ctx（该 ctx 只注入 credentials），
+   *     必抛 "cannot get property webServer without inject"（0.1.7-rc.2 / 0.2.0-rc.2 实测）。
+   *   ☆ rpc.handle（未来版本可能修复 owner 语义）：直接挂载不可用时再试。
    * @param source 诊断用来源标记（sync / inject / poll）
-   * @param contextCtx 已注入 connection 的上下文（声明式路径用），缺省则用宿主根 ctx 现探
+   * @param contextCtx 已注入 connection/webServer 的上下文（声明式路径用），缺省则用宿主根 ctx 现探
    * @returns 通道是否可用（false = 保持 HTTP 兜底，不改变任何旧行为）
    */
   function tryRegisterRpc(source: string, contextCtx?: any): boolean {
     if (rpcRegistered) return true;
+    // ① 直接挂载（优先：不依赖 connection 服务的 owner ctx）
+    try {
+      const base = contextCtx ?? ctx;
+      const ws = base?.get?.("webServer") ?? ctx?.get?.("webServer") ?? ctx?.root?.get?.("webServer");
+      const conn = base?.get?.("connection") ?? ctx?.get?.("connection") ?? ctx?.root?.get?.("connection");
+      if (ws && typeof ws.register === "function") {
+        const route = { kind: "prefix", path: RPC_CHANNEL, handler: (req: any, res: any) => handleRpcHttpRequest(req, res, conn) };
+        const disposeRoute = ws.register(route);
+        if (typeof ctx?.effect === "function") ctx.effect(() => disposeRoute, "dshmobile: rpc route (direct)");
+        rpcDispose = disposeRoute;
+        rpcRegistered = true;
+        rpcSource = `${source}-direct`;
+        hostLog(`rpc[${source}]: ${RPC_CHANNEL} 通道已直接注册到 webServer（官方 rpc.handle 不可用时的等价通道；本地 HTTP 兜底仍在监听 ${HTTP_PORT})`);
+        return true;
+      }
+    } catch (err: any) {
+      rpcDiag(source, `direct unavailable: ${err?.message ?? err}`);
+    }
+    // ② 官方 rpc.handle（兜底形态；未来 DSH 修复 owner 语义后自动走这里）
     try {
       const base = contextCtx ?? ctx;
       let conn: any;
@@ -1050,48 +1158,54 @@ export function apply(ctx: any, _config: any = {}) {
       rpc.handle(RPC_CHANNEL, (endpoint: string, payload: any) => handleRpc(endpoint, payload));
       rpcRegistered = true;
       rpcSource = source;
-      hostLog(`rpc[${source}]: ${RPC_CHANNEL} channel registered (官方通道已启用；本地 HTTP 兜底仍在监听 ${HTTP_PORT})`);
+      hostLog(`rpc[${source}]: ${RPC_CHANNEL} channel registered (官方 rpc.handle；本地 HTTP 兜底仍在监听 ${HTTP_PORT})`);
       return true;
     } catch (err: any) {
-      hostLog(`rpc[${source}]: unavailable: ${err?.message ?? err}`);
+      rpcDiag(source, `unavailable: ${err?.message ?? err}`);
       return false;
     }
   }
 
-  // 途径 0（官方声明式形态）：把一个「声明 inject: ["connection"]」的子插件挂到本插件下。
+  // 途径 0（官方声明式形态）：把一个「声明 inject: ["connection","webServer"]」的子插件挂到本插件下。
   //   ⚠ 为什么不直接在本插件顶层写 `export const inject = ["connection"]`：
   //     顶层 inject 是**硬依赖**，服务缺席时 cordis 会把整个宿主插件挂起（pending）——
   //     连桥进程和本地 HTTP 兜底都起不来。而本插件承诺兼容"没有 connection 服务的老版 DSH"
   //     （见上方 dshLaunchToken 的说明），所以这里把硬依赖降级成一个**子 fiber**：
-  //     服务到位 → 子插件 apply → 注册通道；服务永不到位 → 只有子 fiber 挂起，宿主本体照常工作。
+  //     服务到位 → 子插件 apply → 取端口/token + 注册通道；服务永不到位 → 只有子 fiber 挂起，宿主本体照常工作。
+  //     ★ webServer 必须一并注入：读端口与注册 RPC 通道都要它（1.0.6 只注入 connection ⇒
+  //       端口读不到退化猜 3080、rpc 通道注册必抛 "cannot get property webServer without inject"）。
   try {
     ctx.plugin?.({
       name: "dshmobile-rpc",
-      inject: ["connection"],
-      apply(connCtx: any) { tryRegisterRpc("inject", connCtx); },
+      inject: ["connection", "webServer"],
+      apply(connCtx: any) {
+        applyToken(connCtx, "inject");
+        tryRegisterRpc("inject", connCtx);
+      },
     });
   } catch (err: any) {
     hostLog(`rpc[inject]: plugin mount failed: ${err?.message ?? err}`);
   }
 
-  // 途径 1：同步直取（connection 服务可能已就绪；顺带立刻注册 RPC 通道，不依赖回调时序）
+  // 途径 1：同步直取（connection/webServer 服务可能已就绪；顺带立刻注册 RPC 通道，不依赖回调时序）
   try {
     const conn = ctx?.get?.("connection") ?? ctx?.root?.get?.("connection");
     const ws = ctx?.get?.("webServer") ?? ctx?.root?.get?.("webServer");
-    if (conn) applyToken({ connection: conn, webServer: ws }, "sync");
+    if (conn || ws) applyToken({ connection: conn, webServer: ws }, "sync");
+    else tokenDiag("sync", "connection/webServer 服务不可见");
   } catch (err: any) {
-    hostLog(`token[sync]: ${err?.message ?? err}`);
+    tokenDiag("sync", `${err?.message ?? err}`);
   }
   tryRegisterRpc("sync");
 
-  // 途径 2：事件驱动注入（官方形态；服务就绪后回调）
+  // 途径 2：事件驱动注入（官方形态；服务就绪后回调；同样带上 webServer）
   try {
-    ctx.inject?.(["connection"], (connectionCtx: any) => {
-      applyToken(connectionCtx, "inject");
+    ctx.inject?.(["connection", "webServer"], (connectionCtx: any) => {
+      applyToken(connectionCtx, "inject-cb");
       tryRegisterRpc("inject-cb", connectionCtx);
     });
   } catch (err: any) {
-    hostLog(`token[inject]: unavailable: ${err?.message ?? err}`);
+    tokenDiag("inject-cb", `unavailable: ${err?.message ?? err}`);
   }
 
   // 途径 3：轮询兜底（inject 不触发/作用域隔离时也能拿到；两项都拿到即停）
@@ -1101,17 +1215,22 @@ export function apply(ctx: any, _config: any = {}) {
   tokenPollTimer = setInterval(() => {
     pollTicks++;
     const needToken = !dshLaunchToken;
+    // ★ 端口也算停轮条件：token 拿到了但端口还没解析时**必须继续轮询**（旧代码会在端口仍错时提前停掉）
+    const needPort = webServerPort === 0 && !process.env.DSHMOBILE_DSH_URL;
     const needRpc = !rpcRegistered && pollTicks <= RPC_PROBE_GIVE_UP_TICKS;
-    if (!needToken && !needRpc) {
+    if (!needToken && !needPort && !needRpc) {
       if (tokenPollTimer) { clearInterval(tokenPollTimer); tokenPollTimer = null; }
       return;
     }
-    try {
-      const conn = ctx?.get?.("connection") ?? ctx?.root?.get?.("connection");
-      const ws = ctx?.get?.("webServer") ?? ctx?.root?.get?.("webServer");
-      if (conn) applyToken({ connection: conn, webServer: ws }, "poll");
-    } catch {
-      /* 下一轮再试 */
+    if (needToken || needPort) {
+      try {
+        const conn = ctx?.get?.("connection") ?? ctx?.root?.get?.("connection");
+        const ws = ctx?.get?.("webServer") ?? ctx?.root?.get?.("webServer");
+        if (conn || ws) applyToken({ connection: conn, webServer: ws }, "poll");
+        else tokenDiag("poll", "connection/webServer 服务不可见");
+      } catch {
+        /* 下一轮再试 */
+      }
     }
     if (needRpc && (pollTicks <= RPC_PROBE_FAST_TICKS || pollTicks % RPC_PROBE_SLOW_EVERY === 0)) {
       tryRegisterRpc("poll");
@@ -1177,6 +1296,13 @@ export function apply(ctx: any, _config: any = {}) {
     if (!hasBridgeCreds()) {
       patchState({ bridgeStatus: "needs-login" });
       hostLog("startBridge skipped: 无可用凭据（无会话且未填密码）");
+      return false;
+    }
+    // ★ 端口未解析绝不猜（不再硬编码 3080）：等 webServer 端口就绪，或用 DSHMOBILE_DSH_URL 显式指定。
+    //   端口错误时写进 config.json 的 dsh.url 必然错，桥起来也连不上 DSH —— 宁可不起、明确报状态。
+    if (!dshBaseUrl()) {
+      patchState({ bridgeStatus: "dsh-port-unresolved（等待 DSH web 服务端口就绪）" });
+      hostLog("startBridge skipped: DSH webServer 端口未解析；不猜端口，可用环境变量 DSHMOBILE_DSH_URL 显式指定");
       return false;
     }
     stopBridge();
@@ -1918,10 +2044,11 @@ export function apply(ctx: any, _config: any = {}) {
 
   const server = startServer();
   // 诊断一行：官方通道注册结果（rpcSource: sync / inject / inject-cb / poll；no = 只有 HTTP 兜底）
-  hostLog(`plugin applied: dshUrl=${dshBaseUrl()} token=${dshLaunchToken ? "yes" : "no"} rpc=${rpcRegistered ? `yes(${rpcSource})` : "no"}`);
+  hostLog(`plugin applied: dshUrl=${dshBaseUrl() || "(未解析)"} token=${dshLaunchToken ? "yes" : "no"} rpc=${rpcRegistered ? `yes(${rpcSource})` : "no"} port=${webServerPort > 0 ? `${webServerPort}(${webServerPortSource})` : "unresolved"}`);
   // 首次装载：默认 autoConnect=true ⇒ 有凭据就**自动起桥、自动出码**（自动登录，对标微信/淘宝）；
   // 只有显式 autoConnect=false 时才停在"未连接"，等用户点「保存并连接」。
   scheduleConfig();
+  booted = true; // 启动期结束：此后端口解析成功会主动补起桥（见 recordWebServer）
 
   return () => teardown("插件卸载（apply 返回的 disposer）");
 }

@@ -2,6 +2,7 @@
 // decryptEnvelope 在「未建立连接但收到密文」与「解密失败」时回 E2EE_RESTARTED，
 // 明文放行与 E2EE_REQUIRED 原有语义不变。
 import { RelayBridge } from "../bridge/relay.js";
+import { supportsRequireE2ee } from "../bridge/e2ee-policy.js";
 
 let failures = 0;
 const check = (n, c, e = "") => {
@@ -62,12 +63,18 @@ console.log("[3] 已建立连接 + 解密失败（旧密钥）→ E2EE_RESTARTED
   check("回 E2EE_RESTARTED", sent.length === 1 && sent[0].payload?.error?.code === "E2EE_RESTARTED", JSON.stringify(sent));
 }
 
-console.log("[4] 已建立连接 + 明文信封 → E2EE_REQUIRED（原有语义不变）");
+console.log("[4] 已建立连接 + 明文信封 → E2EE_REQUIRED（1.0.6 版本闸门语义）");
 {
+  // 未上报 appVersion 的老客户端 → fail-open：不回 E2EE_REQUIRED（见 smoke-e2ee-require ①）
   const { b, sent } = makeBridge({ isConnectionEstablished: true, decryptIncoming: null, encryptOutgoing: null });
-  const r = b.decryptEnvelope(req());
-  check("返回 null", r === null);
-  check("回 E2EE_REQUIRED", sent.length === 1 && sent[0].payload?.error?.code === "E2EE_REQUIRED", JSON.stringify(sent));
+  b.decryptEnvelope(req());
+  check("老客户端（无 appVersion）不回 E2EE_REQUIRED", sent.length === 0, JSON.stringify(sent));
+  // 上报 appVersion=0.2.21 的客户端 → 保留强制语义：回 E2EE_REQUIRED
+  //（模拟 adapter 的真实接线：版本闸门守卫；无版本 fail-open、≥0.2.21 强制）
+  const { b: b2, sent: sent2 } = makeBridge({ isConnectionEstablished: true, decryptIncoming: null, encryptOutgoing: null });
+  b2.setPlaintextGuard((env) => !supportsRequireE2ee(typeof env?.appVersion === "string" ? env.appVersion : undefined));
+  const r2 = b2.decryptEnvelope(req({ appVersion: "0.2.21" }));
+  check("0.2.21+ 明文 → 回 E2EE_REQUIRED", r2 === null && sent2.length === 1 && sent2[0].payload?.error?.code === "E2EE_REQUIRED", JSON.stringify(sent2));
 }
 
 console.log("[5] 明文类型（hello/心跳）任何状态原样放行");
