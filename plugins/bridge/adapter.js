@@ -16,8 +16,14 @@ function e2eeDebug(msg) {
   }
 }
 
-const READ_ONLY_TYPES = new Set(["sessions.list", "sessions.history", "session.models", "commands.list", "events.subscribe", "events.unsubscribe", "workspace.list", "host.listDirectory", "host.listDrives"]);
+const READ_ONLY_TYPES = new Set(["sessions.list", "sessions.history", "session.models", "commands.list", "events.subscribe", "events.unsubscribe", "workspace.list", "host.listDirectory", "host.listDrives", "speech.status", "speech.chunk", "speech.transcribe"]);
 const WRITE_TYPES = new Set(["sessions.create", "sessions.run", "sessions.interrupt", "sessions.steer", "session.selectModel", "commands.execute", "approvals.respond", "questions.respond", "sessions.rename", "sessions.fork", "sessions.archive", "sessions.updateQueue", "host.createDirectory", "sessions.markSeen"]);
+
+/** 语音：单次转写暂存音频的硬上限 4 MiB；分片 60s 未被触碰即过期（懒清理）。 */
+const SPEECH_MAX_TRANSFER_BYTES = 4 * 1024 * 1024;
+const SPEECH_TRANSFER_TTL_MS = 60000;
+/** 语音 bundle 未挂载时 DSH 回的错误码：只用来区分「PC 没开语音」与「PC 内部故障」。 */
+const SPEECH_NOT_MOUNTED_CODES = new Set(["gateway/invocation-unavailable", "gateway/definition-unavailable", "gateway/method-unavailable"]);
 
 /**
  * `inbox` 投影 → 手机端**队列帧的 items（旧形状）**。
@@ -81,6 +87,14 @@ function sniffImageMediaType(buf) {
   if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return "image/gif";
   if (buf.length >= 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return "image/webp";
   return null;
+}
+
+/** 严格 base64 校验：只接受规范编码（标准字母表、正确填充、尾位为零）。
+ *  Node 的解码器非常宽松（会忽略非法字符/错误填充），所以必须「解码后再编码」与原串逐字比对。 */
+function isCanonicalBase64(value) {
+  if (typeof value !== "string" || value.length % 4 !== 0) return false;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return false;
+  return Buffer.from(value, "base64").toString("base64") === value;
 }
 
 /** 祖先链（从文件系统根到 target，含盘符根）——手机端面包屑回退/换盘用。 */
@@ -257,6 +271,8 @@ export class Adapter {
     // 工具输出全文缓存（toolResult.full 按需取回）：被截断的 tool/result 存这里，LRU 逐出
     this.toolFullCache = new Map();
     this.toolFullCacheBytes = 0;
+    // 语音分片暂存：transferId -> { chunks: Map<index, Buffer>, bytes, at }（内存中，转写后即删）
+    this.speechTransfers = new Map();
   }
 
 
@@ -678,6 +694,15 @@ export class Adapter {
         archivedSessionIds: Array.isArray(value.value?.archivedSessionIds) ? value.value.archivedSessionIds : [],
       };
       this.archivedSessionIds = [...this.workspaceBaseline.archivedSessionIds];
+      // ★ 基线也要转推给手机：否则刷新后只能等下一次 upsert 才有工作区数据，
+      //   会话列表的项目分组会整片消失（直到某个 workspace 恰好被更新）。
+      this.relay.forwardEvent({
+        frame: {
+          type: "host/workspace-baseline",
+          items: this.workspaceBaseline.items,
+          archivedSessionIds: this.workspaceBaseline.archivedSessionIds,
+        },
+      });
       this.workspaceWaiterDone?.(this.workspaceBaseline);
       return;
     }
@@ -742,6 +767,9 @@ export class Adapter {
   #e2eeState() {
     const pin = this.e2ee?.pinState ?? {};
     return {
+      // 2026-10-18：E2EE 整层停用时 e2ee === null → 明确告诉客户端"本桥不支持加密"，
+      // 客户端据此隐藏入口（而不是把 require:false 误读成"可选但不加密"）。
+      enabled: this.e2ee != null,
       require: this.e2ee?.require === true,
       pinned: pin.pinned === true,
       bridgeKeyId: typeof pin.bridgeKeyId === "string" ? pin.bridgeKeyId : "",
@@ -817,9 +845,11 @@ export class Adapter {
       });
     }
     if (!this.e2ee) {
+      // E2EE 已整层停用：这是"功能不存在"，不是"用户操作失败"。
+      // 回 ok 让老版本 App 静默接受（它会收到 enabled:false 并隐藏入口），避免弹错误条。
       return this.relay.respond(requestId, "e2ee.allowPlaintext", {
-        ok: false,
-        error: { code: "disabled", message: "e2ee not available" },
+        ok: true,
+        data: { enabled: false, mode, ...this.#e2eeState() },
       });
     }
     if (mode === "session") {
@@ -874,7 +904,8 @@ export class Adapter {
 
   /** 取消 E2EE 配对：清 pin + setRequire(false)（等价于老的"永久非加密"入口，语义与 allowPlaintext permanent 一致）。 */
   #e2eeClear(payload, requestId) {
-    if (!this.e2ee) return this.relay.respond(requestId, "e2ee.clear", { ok: false, error: { code: "disabled", message: "e2ee not available" } });
+    // E2EE 停用：没有 pin 可清。回 ok 让老版本 App 的"取消加密"路径正常收尾（不弹错）。
+    if (!this.e2ee) return this.relay.respond(requestId, "e2ee.clear", { ok: true, data: { cleared: true, enabled: false } });
     this.e2ee.clearPin();
     this.e2ee.setRequire(false); // 用户明确取消加密 = 永久非加密（否则一重启又变成"要求加密"）
     e2eeDebug("e2ee.clear -> pin cleared + policy require=false, back to legacy plaintext");
@@ -1182,6 +1213,14 @@ export class Adapter {
     }
   }
 
+  /** 丢弃 60s 未被触碰的语音分片（懒清理：每次 speech.chunk / speech.transcribe 调用时顺带跑一遍）。 */
+  #pruneSpeechTransfers() {
+    const now = Date.now();
+    for (const [transferId, entry] of this.speechTransfers) {
+      if (now - entry.at > SPEECH_TRANSFER_TTL_MS) this.speechTransfers.delete(transferId);
+    }
+  }
+
   async #read(type, payload, requestId) {
     switch (type) {
       case "sessions.list": {
@@ -1337,9 +1376,19 @@ export class Adapter {
         return this.relay.respond(requestId, type, { ok: true, data: { commands: r.value } });
       }
       case "workspace.list": {
-        // 工作区列表：新建会话时选目录用（手机端目录选择，无需推送目录）
-        const ws = await this.ensureWorkspaceBaseline();
-        if (!ws) return this.relay.respond(requestId, type, { ok: false, error: { code: "unavailable", message: "workspace baseline not ready yet" } });
+        // 工作区列表：新建会话选目录 + 会话列表按项目分组用。
+        // ⚠ 基线迟到时**不能报错**（一次刷新就丢掉全部分组，直到某个 workspace 被 upsert 才回来）：
+        //   最多等 3s；仍未到 → 回空列表 + pending:true，App 先渲染，等 host/workspace-baseline 帧补齐。
+        const ws = await Promise.race([
+          this.ensureWorkspaceBaseline(),
+          new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+        ]);
+        if (!ws) {
+          return this.relay.respond(requestId, type, {
+            ok: true,
+            data: { items: [], archivedSessionIds: [], pending: true },
+          });
+        }
         return this.relay.respond(requestId, type, { ok: true, data: ws });
       }
       case "host.listDirectory": {
@@ -1391,6 +1440,107 @@ export class Adapter {
         }));
         const drives = results.filter(Boolean);
         return this.relay.respond(requestId, type, { ok: true, data: { drives } });
+      }
+      case "speech.status": {
+        // 语音转写可用性：把「PC 没装/没开语音」与「PC 内部故障」区分开，
+        // App 只看 available/reason，无需解析 DSH 的 gateway/* 错误码。
+        try {
+          const r = await this.dsh.unary("speech/catalog", {}, { timeoutMs: 5000 });
+          if (r.ok) {
+            return this.relay.respond(requestId, type, { ok: true, data: { available: true, catalog: r.value } });
+          }
+          if (SPEECH_NOT_MOUNTED_CODES.has(r.error?.code)) {
+            return this.relay.respond(requestId, type, { ok: true, data: { available: false, reason: "not-mounted" } });
+          }
+          return this.relay.respond(requestId, type, { ok: true, data: { available: true, reason: "error", error: r.error } });
+        } catch (err) {
+          // 网络/超时等异常同样不能把整个请求打成失败：按「PC 内部故障」上报。
+          return this.relay.respond(requestId, type, {
+            ok: true,
+            data: { available: true, reason: "error", error: { code: "internal", message: String(err?.message ?? err) } },
+          });
+        }
+      }
+      case "speech.chunk": {
+        // 语音分片：App 把录音切成 base64 分片逐片送上来，桥按 transferId 暂存，转写时按 index 拼回。
+        const { transferId, index, data } = payload ?? {};
+        if (typeof transferId !== "string" || transferId === "" || !Number.isInteger(index) || index < 0 || !isCanonicalBase64(data)) {
+          return this.relay.respond(requestId, type, {
+            ok: false,
+            error: { code: "bad-request", message: "transferId, a non-negative integer index and canonical base64 data are required" },
+          });
+        }
+        this.#pruneSpeechTransfers();
+        const buf = Buffer.from(data, "base64");
+        const existing = this.speechTransfers.get(transferId);
+        const projected = (existing?.bytes ?? 0) - (existing?.chunks.get(index)?.length ?? 0) + buf.length;
+        if (projected > SPEECH_MAX_TRANSFER_BYTES) {
+          // 超限：**不写入**（保留原有分片），App 收到明确错误后可换更短的音频重来。
+          return this.relay.respond(requestId, type, {
+            ok: false,
+            error: { code: "too-large", message: `speech transfer exceeds ${SPEECH_MAX_TRANSFER_BYTES} bytes` },
+          });
+        }
+        const entry = existing ?? { chunks: new Map(), bytes: 0, at: Date.now() };
+        entry.chunks.set(index, buf);
+        entry.bytes = projected;
+        entry.at = Date.now();
+        this.speechTransfers.set(transferId, entry);
+        return this.relay.respond(requestId, type, { ok: true, data: { received: entry.bytes } });
+      }
+      case "speech.transcribe": {
+        // 按 index 拼回分片 → 校验 WAV 头 → 调 DSH 转写。无论成败，这个 transfer 都从内存中删除。
+        // totalChunks 只是 App 侧提示，桥不强制校验（缺失分片由 WAV 头/长度校验兜底）。
+        const { transferId, providerId, language } = payload ?? {};
+        if (typeof transferId !== "string" || transferId === "") {
+          return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "transferId is required" } });
+        }
+        this.#pruneSpeechTransfers();
+        const entry = this.speechTransfers.get(transferId);
+        this.speechTransfers.delete(transferId);
+        if (!entry || entry.chunks.size === 0 || entry.bytes === 0) {
+          return this.relay.respond(requestId, type, {
+            ok: false,
+            error: { code: "no-transfer", message: "no audio chunks for this transfer (expired or never uploaded)" },
+          });
+        }
+        const indices = [...entry.chunks.keys()].sort((a, b) => a - b);
+        // 分片必须从 0 连续：缺片时静默拼出来的 WAV 头仍然合法、但内容是错的，
+        // 这种"看起来成功、转写结果却是乱的"必须挡在送模型之前。
+        for (let i = 0; i < indices.length; i++) {
+          if (indices[i] !== i) {
+            return this.relay.respond(requestId, type, {
+              ok: false,
+              error: { code: "missing-chunk", message: `audio chunk ${i} is missing (expired or dropped)` },
+            });
+          }
+        }
+        const buf = Buffer.concat(indices.map((i) => entry.chunks.get(i)));
+        const isWav = buf.length > 44
+          && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 // "RIFF"
+          && buf[8] === 0x57 && buf[9] === 0x41 && buf[10] === 0x56 && buf[11] === 0x45; // "WAVE"
+        if (!isWav) {
+          return this.relay.respond(requestId, type, {
+            ok: false,
+            error: { code: "bad-audio", message: "reassembled audio is not a WAV (need RIFF/WAVE, > 44 bytes)" },
+          });
+        }
+        try {
+          const r = await this.dsh.unary("speech/transcribe", {
+            request: {
+              audioBase64: buf.toString("base64"),
+              ...(typeof providerId === "string" && providerId ? { providerId } : {}),
+              ...(typeof language === "string" && language ? { language } : {}),
+            },
+          }, { timeoutMs: 120000 });
+          if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
+          return this.relay.respond(requestId, type, { ok: true, data: r.value });
+        } catch (err) {
+          return this.relay.respond(requestId, type, {
+            ok: false,
+            error: { code: "transcribe-failed", message: String(err?.message ?? err) },
+          });
+        }
       }
       default:
         return this.relay.respond(requestId, type, { ok: false, error: { code: "UNSUPPORTED", message: type } });

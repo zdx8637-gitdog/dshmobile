@@ -6,13 +6,20 @@
 //       审批/提问走 $events 瀑布 + $events/result（不再有 events.mux / events.host / respond）。
 //   协议在首次调用时自动探测（v2 探针 401=需要鉴权，探针要求 ok:true 防误判）；探测失败即 fail-fast 并提示升级 DSH。
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export class DshClient {
-  constructor(baseUrl, { stateDir, token } = {}) {
+  constructor(baseUrl, { stateDir, token, tokenProvider } = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.token = token ?? "";
+    /**
+     * 重读 launch token 的回调。DSH 重启后宿主会把新 token 写回 config.json，
+     * 但桥只在启动时读过一次 —— mux 连续失败时用这个回调补救。
+     */
+    this.tokenProvider = typeof tokenProvider === "function" ? tokenProvider : null;
+    /** mux 连续"连上就断"的次数（鉴权失败的自愈信号，见 noteMuxFailure）。 */
+    this.consecutiveMuxFailures = 0;
     this.stateDir = stateDir ?? null;
     this.cookie = this.#loadCookie(); // { name, value, expiresAt }
     // 鉴权形态（1.0.7 起，由 401/交换结果决定，不再"有 token 就强制铸"）：
@@ -78,6 +85,53 @@ export class DshClient {
       this.authMode = "unknown";
       this.openDiagLogged = false;
     }
+  }
+
+  /** 作废当前会话 Cookie（内存 + 磁盘）。下次 cookieHeader() 会用 launch token 重铸。
+   *
+   *  为什么需要它：mux 走 WebSocket，**鉴权失败拿不到 401**（服务端直接关连接），
+   *  而 cookieHeader() 只要 this.cookie 非空就直接返回缓存 —— 缓存一旦失效（DSH 重启换了
+   *  签名密钥）就会无限重连。这个入口让 mux 侧也能主动丢弃缓存。 */
+  invalidateCookie() {
+    if (!this.cookie) return false;
+    this.cookie = null;
+    this.authMode = "unknown";
+    try {
+      const f = this.#cookieFile();
+      if (f) rmSync(f, { force: true });
+    } catch {
+      /* 删不掉不影响重铸 */
+    }
+    return true;
+  }
+
+  /** mux「连上就断」计一次：连续 3 次判定为鉴权失效 → 作废 cookie + 重读 token。 */
+  noteMuxFailure() {
+    this.consecutiveMuxFailures += 1;
+    if (this.consecutiveMuxFailures < 3) return;
+    this.consecutiveMuxFailures = 0;
+    const dropped = this.invalidateCookie();
+    let reloaded = false;
+    if (this.tokenProvider) {
+      try {
+        const next = this.tokenProvider();
+        if (typeof next === "string" && next && next !== this.token) {
+          this.setToken(next);
+          reloaded = true;
+        }
+      } catch {
+        /* 读不到就沿用旧 token */
+      }
+    }
+    console.warn(
+      `[dsh] mux 连续失败 3 次 → ${dropped ? "已作废缓存 cookie" : "无缓存 cookie"}` +
+        `${reloaded ? " + 已重读 launch token" : ""}，下次重连重新鉴权`,
+    );
+  }
+
+  /** mux 存活够久（>5s）：清零失败计数。 */
+  noteMuxSuccess() {
+    this.consecutiveMuxFailures = 0;
   }
 
   #cookieFile() {
@@ -233,6 +287,8 @@ export class MuxConnection {
     this.streams = new Map(); // streamId -> { onItem, onError, onEnd }
     this.ws = null;
     this.closedReason = null;
+    /** WS 握手成功的时刻（0 = 从未连上）；用于区分"连上就断"和"稳定后掉线"。 */
+    this.openedAt = 0;
     this.#resolveReady = null;
     this.#rejectReady = null;
     this.ready = new Promise((resolve, reject) => {
@@ -250,7 +306,7 @@ export class MuxConnection {
       if (cookie) headers.cookie = cookie;
       const ws = new WebSocket(`${this.client.baseUrl.replace(/^http/, "ws")}/api/remote.mux`, { headers });
       this.ws = ws;
-      ws.onopen = () => this.#resolveReady();
+      ws.onopen = () => { this.openedAt = Date.now(); this.#resolveReady(); };
       ws.onclose = () => this.#closed();
       ws.onerror = () => { /* onclose 会跟着来 */ };
       ws.onmessage = (ev) => {
@@ -275,6 +331,11 @@ export class MuxConnection {
     this.#rejectReady(new Error(message));
     for (const s of this.streams.values()) s.onError?.({ code: "stream-closed", message });
     this.streams.clear();
+    // 鉴权失败的表现是"连上就断"（DSH 对无效 cookie 直接关 WS，不给 401）：
+    // 存活不足 5s 记一次失败，连续 3 次就作废缓存 cookie；存活够久则清零计数。
+    const alive = this.openedAt ? Date.now() - this.openedAt : 0;
+    if (alive >= 5000) this.client.noteMuxSuccess?.();
+    else this.client.noteMuxFailure?.();
     this.onClose?.(reason);
   }
 

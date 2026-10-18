@@ -17,6 +17,7 @@ import {
   EXIT_HOST_GONE,
 } from "./singleton.js";
 import { killOtherBridges } from "./scan.js";
+import { E2EE_ENABLED } from "./features.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const configPath = process.env.DSHMOBILE_BRIDGE_CONFIG || join(HERE, "..", "config.json");
@@ -28,7 +29,9 @@ if (stateDirArg && config.stateDir && stateDirArg.slice("--state-dir=".length) !
   console.warn("[bridge] 警告：命令行 --state-dir 与 config.stateDir 不一致（按 config 执行）");
 }
 
-const e2ee = new E2eeSession({ stateDir: config.stateDir });
+// E2EE 整层停用（见 features.js）：不构造 E2eeSession → relay 加解密透传、策略层失效。
+const e2ee = E2EE_ENABLED ? new E2eeSession({ stateDir: config.stateDir }) : null;
+if (!E2EE_ENABLED) console.log("[bridge] E2EE disabled (features.E2EE_ENABLED=false)");
 const relay = new RelayBridge({ ...config.relay, stateDir: config.stateDir, e2ee });
 
 // 自愈：连续被顶替说明本机还有另一个桥（多半是老版本/孤儿，不认识单例锁）→ 主动清掉它。
@@ -49,7 +52,19 @@ relay.onDuplicateKick = () => {
     console.warn("[scan] 清理失败：", err?.message ?? err);
   }
 };
-const dsh = new DshClient(config.dsh.url, { stateDir: config.stateDir, token: config.dsh?.token ?? "" });
+// DSH 重启后宿主会把新 launch token 写回 config.json，而桥只在启动时读过一次。
+// 这里把"重读"做成回调交给 DshClient：mux 连续失败时它会用新 token 重新鉴权。
+const dsh = new DshClient(config.dsh.url, {
+  stateDir: config.stateDir,
+  token: config.dsh?.token ?? "",
+  tokenProvider: () => {
+    try {
+      return JSON.parse(readFileSync(configPath, "utf8"))?.dsh?.token ?? "";
+    } catch {
+      return "";
+    }
+  },
+});
 // Data plane 落盘根目录：默认 <stateDir>/deliveries（可在 config.dsh.workspaceRoot 覆盖）
 const workspaceRoot = config.dsh?.workspaceRoot || join(config.stateDir || ".", "deliveries");
 const adapter = new Adapter({ dsh, relay, workspaceRoot, e2ee });
