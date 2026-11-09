@@ -216,6 +216,37 @@ export function resolveInRoot(root, rel) {
   return target;
 }
 
+/**
+ * 在一条 session 事件里找 image 块的 attachment 元数据。
+ *
+ * DSH 0.2.2 的 `session/attachment` 要求 mediaType/bytes/width/height 齐全，
+ * 而老 App 只发 attachmentId —— 这时从会话日志里把元数据捞出来补上。
+ */
+export function findAttachmentInEvent(event, attachmentId) {
+  const data = event?.data;
+  if (!data) return null;
+  const pools = [];
+  if (Array.isArray(data.content)) pools.push(data.content);
+  if (Array.isArray(data.message?.content)) pools.push(data.message.content);
+  if (Array.isArray(data.blocks)) pools.push(data.blocks);
+  for (const blocks of pools) {
+    for (const b of blocks) {
+      const att = b?.attachment;
+      if (att?.attachmentId !== attachmentId) continue;
+      if (typeof att.mediaType !== "string" || !(Number(att.bytes) > 0)) continue;
+      return {
+        attachmentId: att.attachmentId,
+        mediaType: att.mediaType,
+        bytes: Number(att.bytes),
+        width: Number(att.width) || 1,
+        height: Number(att.height) || 1,
+        ...(typeof att.name === "string" && att.name ? { name: att.name } : {}),
+      };
+    }
+  }
+  return null;
+}
+
 export class Adapter {
   constructor({ dsh, relay, workspaceRoot, e2ee = null }) {
     this.dsh = dsh;
@@ -1186,31 +1217,115 @@ export class Adapter {
    * Data plane 附件回显（Phase B）：手机请求桥代取 DSH 附件字节 →
    * 反向传输进 relay spool → 回 transferId。
    */
+  /**
+   * 附件字节回显。
+   *
+   * ⚠ 2026-11-09：DSH **0.2.2** 把 `session/attachment` 的请求体从 `{sessionId, attachmentId}`
+   *   改成了 `{sessionId, attachment:{attachmentId, mediaType, bytes, width, height, ...}}`
+   *   （strict codec，`required:["sessionId","attachment"]`）。旧请求会被 gateway 以
+   *   `gateway/input-invalid` 拒掉 ⇒ 手机端所有图片都显示"加载失败"。
+   *
+   * 兼容策略（三个方向都兜住）：
+   *   ① App 带了完整元数据 → 先发新形状；被 `input-invalid` 拒（0.2.1 老 DSH）→ 退回旧形状；
+   *   ② App 只给 attachmentId（老 App）→ 先发旧形状；被拒（0.2.2）→ 从会话日志里查出该附件的
+   *      元数据再发新形状；
+   *   ③ 都失败 → 明确回 `attachment-unavailable`（不再静默）。
+   */
   async #resolveAttachment(payload, requestId) {
-    const { sessionId, attachmentId } = payload ?? {};
+    const { sessionId, attachmentId, attachment } = payload ?? {};
+    const id = typeof attachment?.attachmentId === "string"
+      ? attachment.attachmentId
+      : (typeof attachmentId === "string" ? attachmentId : "");
     const fail = (code, message) =>
       this.relay.respond(requestId, "attachment.resolve", { ok: false, error: { code, message } });
-    if (typeof sessionId !== "string" || typeof attachmentId !== "string") {
+    if (typeof sessionId !== "string" || !id) {
       return fail("bad-request", "sessionId/attachmentId required");
     }
+    const num = (v) => (Number.isFinite(v) ? Number(v) : 0);
+    const meta = attachment && typeof attachment.mediaType === "string" &&
+      num(attachment.bytes) > 0 && num(attachment.width) > 0 && num(attachment.height) > 0
+      ? {
+        attachmentId: id,
+        mediaType: attachment.mediaType,
+        bytes: num(attachment.bytes),
+        width: num(attachment.width),
+        height: num(attachment.height),
+        ...(typeof attachment.name === "string" && attachment.name ? { name: attachment.name } : {}),
+      }
+      : null;
+    console.log(`[adapter] attachment.resolve ${id.slice(0, 18)}… meta=${meta ? "full" : "id-only"}`);
+    const isInputInvalid = (x) =>
+      !x?.ok && (x?.error?.code === "gateway/input-invalid" ||
+        String(x?.error?.message ?? "").includes("boundary validation"));
+
     try {
-      const r = await this.dsh.unary("session/attachment", { request: { sessionId, attachmentId } }, { timeoutMs: 30000 });
+      let r;
+      if (meta) {
+        r = await this.dsh.unary("session/attachment", { request: { sessionId, attachment: meta } }, { timeoutMs: 30000 });
+        if (isInputInvalid(r)) {
+          r = await this.dsh.unary("session/attachment", { request: { sessionId, attachmentId: id } }, { timeoutMs: 30000 });
+        }
+      } else {
+        r = await this.dsh.unary("session/attachment", { request: { sessionId, attachmentId: id } }, { timeoutMs: 30000 });
+        if (isInputInvalid(r)) {
+          const found = await this.#findAttachmentMeta(sessionId, id);
+          if (found) {
+            r = await this.dsh.unary("session/attachment", { request: { sessionId, attachment: found } }, { timeoutMs: 30000 });
+          }
+        }
+      }
       if (!r.ok || !r.value?.attachment || typeof r.value?.data !== "string") {
         return fail("attachment-unavailable", String(r.error?.message ?? "attachment not found"));
       }
-      const { attachment, data } = r.value;
+      const { attachment: got, data } = r.value;
       const bytes = Buffer.from(data, "base64");
       const EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
-      const name = attachment.name || `${attachmentId}.${EXT[attachment.mediaType] ?? "bin"}`;
-      const transferId = await this.#reverseTransferAsUser(bytes, name, `attachments/${attachmentId}`);
+      const name = got.name || `${id}.${EXT[got.mediaType] ?? "bin"}`;
+      const transferId = await this.#reverseTransferAsUser(bytes, name, `attachments/${id}`);
       return this.relay.respond(requestId, "attachment.resolve", {
         ok: true,
-        data: { transferId, width: attachment.width, height: attachment.height, mediaType: attachment.mediaType, bytes: bytes.length },
+        data: { transferId, width: got.width, height: got.height, mediaType: got.mediaType, bytes: bytes.length },
       });
     } catch (err) {
       console.error("[adapter] attachment.resolve failed:", err?.message);
       return fail("resolve-failed", String(err?.message ?? err));
     }
+  }
+
+  /**
+   * 从会话日志里找某个 attachmentId 的元数据（老 App 只给 id 时用）。
+   * 只翻最近几页（最多 4 页 × 100 条），找不到就返回 null —— 不做全量扫描。
+   */
+  async #findAttachmentMeta(sessionId, attachmentId) {
+    try {
+      const entry = await this.ensureSessionFollow(sessionId);
+      let cursor = Number.isInteger(entry.cursor) ? entry.cursor : -1;
+      for (let page = 0; page < 4; page++) {
+        const r = await this.dsh.unary("session/page", {
+          request: {
+            address: this.#addressFor(sessionId),
+            throughSeq: cursor,
+            ...(page > 0 ? { beforeSeq: cursor } : {}),
+            maxMessages: 100,
+          },
+        }, { timeoutMs: 30000 });
+        if (!r.ok) return null;
+        const records = r.value?.records ?? [];
+        let minSeq = null;
+        for (const rec of records) {
+          const ev = rec?.event;
+          if (Number.isInteger(ev?.seq) && (minSeq === null || ev.seq < minSeq)) minSeq = ev.seq;
+          const found = findAttachmentInEvent(ev, attachmentId);
+          if (found) return found;
+        }
+        if (minSeq === null) return null;
+        cursor = minSeq;
+        if (r.value?.hasMore !== true) return null;
+      }
+    } catch (err) {
+      console.warn("[adapter] attachment meta lookup failed:", err?.message);
+    }
+    return null;
   }
 
   /** 丢弃 60s 未被触碰的语音分片（懒清理：每次 speech.chunk / speech.transcribe 调用时顺带跑一遍）。 */
