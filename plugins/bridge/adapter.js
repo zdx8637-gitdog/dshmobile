@@ -653,20 +653,45 @@ export class Adapter {
       this.#forwardQueue(value.sessionId, value.items);
       return;
     }
-    if (value.type === "projection" && typeof value.sessionId === "string" && typeof value.key === "string") {
-      this.#applyProjection(value.sessionId, value.key, value.value, value.seq, /* forward */ true);
-      // ⚠ **2026-09-28 断链修复**：DSH `0.1.7-rc.2` 起「排队」不再是独立帧，而是 `inbox` 投影。
-      //   不在这里翻译，`session/queue` 帧就**永远不会发**（`#forwardQueue` 成为死代码），
-      //   手机端队列坞（`DshQueueBar`）整条不显示。
-      //   实测依据：桥日志里 `session/queue` 转发恒为 0；App 侧 logcat 有 `projection key=inbox`。
-      if (value.key === "inbox") this.#forwardQueue(value.sessionId, inboxToQueueItems(value.value));
+    // ⚠ 2026-11-21 DSH 0.2.2-rc.5：投影增量从"一条一个 key"改成**批量帧**
+    //   旧：{type:'projection', sessionId, key, value, seq}
+    //   新：{type:'projection', sessionId, seq, changes:[{key, val}, …]}
+    //   只认旧形状会把**所有实时投影更新静默丢掉**（任务条/队列/统计停在订阅那一刻），
+    //   和 2026-09-26 丢掉 projection 帧是同一类回归。两种形状都接。
+    const projected = typeof value.sessionId === "string"
+      ? (Array.isArray(value.changes)
+        ? value.changes.map((ch) => [ch?.key, ch && "val" in ch ? ch.val : ch?.value])
+        : typeof value.key === "string"
+          ? [[value.key, value.value]]
+          : [])
+      : [];
+    if (projected.length > 0) {
+      const batched = Array.isArray(value.changes);
+      if (batched && !this.projectionBatchLogged) {
+        this.projectionBatchLogged = true;
+        console.log("[adapter] projection batch frame (rc.5+), keys:", projected.map(([k]) => k).join(","));
+      }
+      for (const [k, v] of projected) {
+        if (typeof k !== "string") continue;
+        this.#applyProjection(value.sessionId, k, v, value.seq, /* forward */ true);
+        // ⚠ **2026-09-28 断链修复**：DSH `0.1.7-rc.2` 起「排队」不再是独立帧，而是 `inbox` 投影。
+        //   不在这里翻译，`session/queue` 帧就**永远不会发**（`#forwardQueue` 成为死代码），
+        //   手机端队列坞（`DshQueueBar`）整条不显示。
+        //   实测依据：桥日志里 `session/queue` 转发恒为 0；App 侧 logcat 有 `projection key=inbox`。
+        if (k === "inbox") this.#forwardQueue(value.sessionId, inboxToQueueItems(v));
+      }
       return;
     }
     // ⚠ 上游每搬一次协议，这里就会**静默漏掉一条路**（2026-09-26 的 projection、2026-09-28 的 queue
     //   都是这么发现的）。未知帧类型必须留痕，且**每种只报一次**，否则会把日志刷爆。
     if (!this.warnedControlTypes.has(value.type)) {
       this.warnedControlTypes.add(value.type);
-      console.warn("[adapter] control frame: 未识别的类型（已忽略，只报一次）:", value.type);
+      console.warn(
+        "[adapter] control frame: 未识别的类型（已忽略，只报一次）:",
+        value.type,
+        "keys=" + Object.keys(value).join(","),
+        "sample=" + JSON.stringify(value).slice(0, 400),
+      );
     }
   }
 
