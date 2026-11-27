@@ -16,8 +16,8 @@ function e2eeDebug(msg) {
   }
 }
 
-const READ_ONLY_TYPES = new Set(["sessions.list", "sessions.history", "session.models", "commands.list", "events.subscribe", "events.unsubscribe", "workspace.list", "host.listDirectory", "host.listDrives", "speech.status", "speech.chunk", "speech.transcribe"]);
-const WRITE_TYPES = new Set(["sessions.create", "sessions.run", "sessions.interrupt", "sessions.steer", "session.selectModel", "commands.execute", "approvals.respond", "questions.respond", "sessions.rename", "sessions.fork", "sessions.archive", "sessions.updateQueue", "host.createDirectory", "sessions.markSeen"]);
+const READ_ONLY_TYPES = new Set(["sessions.list", "sessions.history", "session.models", "commands.list", "events.subscribe", "events.unsubscribe", "workspace.list", "host.listDirectory", "host.listDrives", "speech.status", "speech.chunk", "speech.transcribe", "jobs.list", "jobs.follow"]);
+const WRITE_TYPES = new Set(["sessions.create", "sessions.run", "sessions.interrupt", "sessions.steer", "session.selectModel", "commands.execute", "approvals.respond", "questions.respond", "sessions.rename", "sessions.fork", "sessions.archive", "sessions.updateQueue", "host.createDirectory", "sessions.markSeen", "jobs.kill"]);
 
 /** 语音：单次转写暂存音频的硬上限 4 MiB；分片 60s 未被触碰即过期（懒清理）。 */
 const SPEECH_MAX_TRANSFER_BYTES = 4 * 1024 * 1024;
@@ -1361,8 +1361,88 @@ export class Adapter {
     }
   }
 
+  /**
+   * DSH `job/list` 是流：首帧带当前 job 集合，取到即取消订阅。
+   * 仅新版桥提供；老桥对 `jobs.*` 回 UNSUPPORTED，多 Agent 工具需优雅降级。
+   */
+  async #jobsList(sessionId, timeoutMs = 15000) {
+    return await new Promise((resolve) => {
+      let handle = null;
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        try { handle?.cancel(); } catch {}
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const timer = setTimeout(() => finish({ type: "rows", jobs: [] }), timeoutMs);
+      this.mux.openStream("job/list", { request: { sessionId } }, {
+        onItem: (frame) => finish(frame ?? { type: "rows", jobs: [] }),
+        onError: () => finish({ type: "rows", jobs: [] }),
+        onEnd: () => finish({ type: "rows", jobs: [] }),
+      }).then((h) => { handle = h; }).catch(() => finish({ type: "rows", jobs: [] }));
+    });
+  }
+
+  /** DSH `job/follow`：读该 job 的保留输出；**空闲 1.2s 即返回**（不阻塞到任务结束）。 */
+  async #jobsFollow(sessionId, jobId, offset = 0, timeoutMs = 15000) {
+    return await new Promise((resolve, reject) => {
+      let handle = null;
+      let done = false;
+      const parts = [];
+      let job = null;
+      let status = null;
+      let idle = null;
+      const finish = (err) => {
+        if (done) return;
+        done = true;
+        try { handle?.cancel(); } catch {}
+        clearTimeout(timer);
+        if (idle) clearTimeout(idle);
+        if (err) reject(err);
+        else resolve({ job, text: parts.join(""), status });
+      };
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      this.mux.openStream("job/follow", { request: { sessionId, jobId, ...(offset ? { offset } : {}) } }, {
+        onItem: (f) => {
+          if (!f || typeof f !== "object") return;
+          if (idle) clearTimeout(idle);
+          idle = setTimeout(() => finish(null), 1200);
+          if (f.type === "opened") {
+            job = f.job ?? job;
+            status = job?.status ?? status;
+          }
+          if (typeof f.text === "string") parts.push(f.text);
+          if (f.type === "settled" || f.type === "terminal") {
+            status = f.job?.status ?? f.status ?? status;
+            finish(null);
+          }
+        },
+        onError: (e) => finish(new Error(e?.message ?? "job/follow failed")),
+        onEnd: () => finish(null),
+      }).then((h) => { handle = h; }).catch((e) => finish(e));
+    });
+  }
+
   async #read(type, payload, requestId) {
     switch (type) {
+      case "jobs.list": {
+        const { sessionId } = payload ?? {};
+        if (typeof sessionId !== "string") {
+          return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId required" } });
+        }
+        const frame = await this.#jobsList(sessionId);
+        return this.relay.respond(requestId, type, { ok: true, data: { jobs: frame?.jobs ?? [] } });
+      }
+      case "jobs.follow": {
+        const { sessionId, jobId, offset } = payload ?? {};
+        if (typeof sessionId !== "string" || typeof jobId !== "string") {
+          return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and jobId required" } });
+        }
+        const out = await this.#jobsFollow(sessionId, jobId, Number(offset) || 0);
+        return this.relay.respond(requestId, type, { ok: true, data: out });
+      }
       case "sessions.list": {
         // 归档集合来自 workspace/follow 基线（新版无 workspace/list unary）
         const ws = await this.ensureWorkspaceBaseline();
@@ -1689,6 +1769,17 @@ export class Adapter {
 
   async #write(type, payload, requestId) {
     switch (type) {
+      case "jobs.kill": {
+        const { sessionId, jobId, reason } = payload ?? {};
+        if (typeof sessionId !== "string" || typeof jobId !== "string") {
+          return this.relay.respond(requestId, type, { ok: false, error: { code: "bad-request", message: "sessionId and jobId required" } });
+        }
+        const r = await this.dsh.unary("job/kill", {
+          request: { sessionId, jobId, ...(typeof reason === "string" && reason ? { reason } : {}) },
+        }, { timeoutMs: 15000 });
+        if (!r.ok) return this.relay.respond(requestId, type, { ok: false, error: r.error });
+        return this.relay.respond(requestId, type, { ok: true, data: r.value ?? {} });
+      }
       case "sessions.markSeen": {
         // 清除「完成未查看」标记（绿点）：手机端打开会话后调用
         const { sessionId } = payload ?? {};

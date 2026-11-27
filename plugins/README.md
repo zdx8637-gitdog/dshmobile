@@ -155,6 +155,49 @@ node scripts/smoke-grant.mjs <u> <p>    # phone-grant smoke test
 The complete three-part stack (phone App / relay / protocol) lives in the main repo
 [zdx8637-gitdog/dshmobile](https://github.com/zdx8637-gitdog/dshmobile).
 
+## Cross-machine agents (1.1.0+)
+
+Lets a conversation on one computer drive conversations on your other computers
+(same relay account only). **Off by default.**
+
+### Enable
+
+1. Relay: start with `REMOTE_RPC=on` (adds `POST /devices/:id/rpc`; without it the
+   route answers 404 and nothing else changes).
+2. This plugin: create `~/.dsh-mobile/multi-agent.json`:
+
+   ```json
+   { "enabled": true }
+   ```
+
+   Absent or `enabled: false` means no tools, no timers, no requests.
+
+### Tools
+
+| Tool | Purpose |
+|---|---|
+| `computers_list` | Devices of this account with online status |
+| `sessions_list(computer, limit?)` | Conversations of one computer (id, title, **cwd**, running) |
+| `agent_run(computer, prompt, sessionId?/cwd?, idemKey?, softTimeoutMs?, depth?, chain?)` | Start a **DSH background job** that dispatches the prompt and collects the final answer; read it with the built-in `job_output` |
+| `remote_jobs(computer, sessionId)` | Background jobs of that conversation (needs the **updated bridge** on that computer) |
+| `remote_job_output(computer, sessionId, jobId, offset?)` | Retained output of one remote job |
+| `remote_job_kill(computer, sessionId, jobId, reason?)` | Kill one remote job |
+
+### Semantics
+
+- `agent_run` returns a `jobId` immediately. The remote turn is tracked by
+  `turn/end` events in the remote history, so transient network failures or
+  `409 device is offline` do **not** fail the job; it reports
+  `remote-unreachable` only after ~30 s of consecutive history failures.
+- **Soft timeout** (default 30 min): the job keeps running and the owning agent
+  gets a notice to check in; it may keep waiting or call `job_kill`.
+- `idemKey` makes retries safe: the same key returns the existing job.
+- Guards: chain `depth` ≤ 3, a target already present in `chain` is refused,
+  at most 2 active `remote-agent` jobs per conversation.
+- Old bridges (DSH ≤ 0.2.1 era) still work for `computers_list`,
+  `sessions_list` and `agent_run`; only the `remote_job_*` tools need the
+  updated bridge on the target machine.
+
 ## License
 
 MIT

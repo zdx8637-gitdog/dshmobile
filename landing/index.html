@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="description" content="DSH Mobile — DeepSeek Harness 的 Android 远程客户端。电脑在插件管理器里装一次插件，手机扫码即连；无需公网 IP、无需内网穿透。" />
+<meta name="description" content="DSH Mobile — DeepSeek Harness 的 Android 远程客户端。电脑装一次插件，手机扫码即连；无需公网 IP、无需内网穿透。1.1.0 起支持 Superagent Harness：一个对话即可指挥账号下多台电脑上的 Agent。" />
 <title>DSH Mobile · 离开电脑，继续你的 Agent 工作</title>
 <link rel="icon" href="icon/favicon.ico" sizes="any" />
 <link rel="icon" type="image/svg+xml" href="icon/dsh-mobile-app.svg" />
@@ -471,7 +471,33 @@
     </div>
   </section>
 
-  <!-- ⑥ 三步上手 -->
+  <!-- ⑥ Superagent -->
+  <section class="sec" id="superagent">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="chip">Superagent Harness · 1.1.0+</span>
+        <h2>一句话，<span class="hl">指挥多台电脑的 Agent</span></h2>
+        <p class="sec-sub">同一账号下的每台电脑都是一个可调度的 Agent。主 Agent 派活、后台等待、完成后自动回报，不需要 SSH、不需要内网穿透。</p>
+      </div>
+
+      <div class="card case reveal">
+        <div>
+          <div class="k">Cross-machine</div>
+          <h3>主 Agent 派活，副 Agent 完成后自动回到对话</h3>
+          <p>
+            主 Agent 调用 <code>agent_run</code> 把任务派给另一台电脑上的会话：可新建、可复用已有会话，<code>cwd</code> 决定项目目录。
+            任务以 DSH 后台 job 运行，完成后自动通知主 Agent 读取结果；网络抖动不会误判失败，长任务用软超时提醒而不是硬停。
+          </p>
+          <p>
+            还能查看远端后台任务与日志（<code>remote_jobs</code> / <code>remote_job_output</code>）、按 job id 终止（<code>remote_job_kill</code>）；
+            支持幂等键与链式调用，并内建深度 / 环路 / 并发护栏。默认关闭，在插件配置里显式开启。
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑦ 三步上手 -->
   <section class="sec" id="start">
     <div class="wrap steps-wrap">
       <div class="reveal">

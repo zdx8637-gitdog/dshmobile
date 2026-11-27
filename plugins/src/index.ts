@@ -28,6 +28,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateIdentityKeypair, randomPairingSecret } from "../bridge/crypto.js";
 import { killOtherBridges } from "../bridge/scan.js";
+import { installMultiAgent } from "./multi-agent.js";
 
 export const name = "dshmobile-bridge";
 
@@ -2048,6 +2049,16 @@ export function apply(ctx: any, _config: any = {}) {
   // 首次装载：默认 autoConnect=true ⇒ 有凭据就**自动起桥、自动出码**（自动登录，对标微信/淘宝）；
   // 只有显式 autoConnect=false 时才停在"未连接"，等用户点「保存并连接」。
   scheduleConfig();
+  // ── 跨机协作工具（P1b，默认关闭：~/.dsh-mobile/multi-agent.json 且 enabled=true）──
+  // 关闭时 installMultiAgent 直接返回 false：不注册工具、不发请求、不建定时器。
+  try {
+    if (installMultiAgent(ctx, { stateDir: STATE_DIR, log: hostLog })) {
+      hostLog("multi-agent: enabled (tools: computers_list, sessions_list)");
+    }
+  } catch (err: any) {
+    hostLog(`multi-agent: setup failed: ${err?.message ?? err}`);
+  }
+
   booted = true; // 启动期结束：此后端口解析成功会主动补起桥（见 recordWebServer）
 
   return () => teardown("插件卸载（apply 返回的 disposer）");

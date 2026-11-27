@@ -136,6 +136,40 @@ node scripts/smoke-grant.mjs <u> <p>    # 手机授权模式冒烟
 完整三端（手机 App / relay / 协议）见主仓库
 [zdx8637-gitdog/dshmobile](https://github.com/zdx8637-gitdog/dshmobile)。
 
+## 跨机 Superagent（1.1.0+）
+
+让一台电脑上的对话，驱动你账号下**其它电脑**上的对话（仅限同账号）。默认关闭。
+
+### 开启
+
+1. relay 启动时带 `REMOTE_RPC=on`（新增 `POST /devices/:id/rpc`；不带时该路由 404，其余行为不变）。
+2. 本插件：创建 `~/.dsh-mobile/multi-agent.json`：
+
+   ```json
+   { "enabled": true }
+   ```
+
+   文件不存在或 `enabled: false` 时不注册工具、不建定时器、不发请求。
+
+### 工具
+
+| 工具 | 用途 |
+|---|---|
+| `computers_list` | 本账号电脑与在线状态 |
+| `sessions_list(computer, limit?)` | 某台电脑的会话（含 **cwd**、运行状态） |
+| `agent_run(computer, prompt, sessionId?/cwd?, idemKey?, softTimeoutMs?, depth?, chain?)` | 以 **DSH 后台 job** 形式派活并收集最终回复；用内建 `job_output` 读取 |
+| `remote_jobs(computer, sessionId)` | 远端会话的后台任务（需目标机为新版桥） |
+| `remote_job_output(computer, sessionId, jobId, offset?)` | 读远端任务输出 |
+| `remote_job_kill(computer, sessionId, jobId, reason?)` | 终止远端任务 |
+
+### 语义
+
+- `agent_run` 立即返回 `jobId`；远端回合以历史里的 `turn/end` 判定，网络抖动/`409` 不会误判失败；连续约 30 秒不可达才报 `remote-unreachable`。
+- **软超时**（默认 30 分钟）：任务继续跑，主 Agent 收到提醒后自行决定继续等待或 `job_kill`。
+- `idemKey` 幂等：同 key 复用同一任务，避免重复派发。
+- 护栏：链式 `depth` ≤ 3、`chain` 命中目标即拒绝、每会话最多 2 个 `remote-agent` 任务。
+- 老桥（DSH ≤ 0.2.1）仍支持 `computers_list` / `sessions_list` / `agent_run`；仅 `remote_job_*` 需要目标机升级桥。
+
 ## License
 
 MIT
