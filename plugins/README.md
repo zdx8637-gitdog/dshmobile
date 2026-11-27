@@ -157,7 +157,7 @@ The complete three-part stack (phone App / relay / protocol) lives in the main r
 
 ## Cross-machine agents (1.1.0+)
 
-Lets a conversation on one computer drive conversations on your other computers
+Lets an agent delegate tasks to agents on your other computers and get the result back
 (same relay account only). **On by default** — disable it from the side panel
 (Superagent row → 关闭) or by writing `{"enabled": false}` to
 `~/.dsh-mobile/multi-agent.json`.
