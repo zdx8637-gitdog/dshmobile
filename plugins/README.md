@@ -176,6 +176,10 @@ Lets a conversation on one computer drive conversations on your other computers
 
    Deleting the file returns to the default (enabled).
 
+   The relay URL is resolved **when a tool is called**, so tools register even if the
+   relay address is saved after DSH startup (saving or reconnecting the panel also
+   retries registration).
+
 ### Tools
 
 | Tool | Purpose |

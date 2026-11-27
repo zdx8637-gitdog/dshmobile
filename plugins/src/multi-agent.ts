@@ -191,21 +191,29 @@ export function isMultiAgentInstalled(): boolean {
 export function installMultiAgent(ctx: any, deps: Deps): boolean {
   if (installed) return true;
   if (!crossMachineEnabled(deps.stateDir)) return false;
-  const cfg = existsSync(path.join(deps.stateDir, "multi-agent.json"))
-    ? readJson(path.join(deps.stateDir, "multi-agent.json"))
-    : null;
 
-  const relayUrl = String(cfg?.relayUrl || relayFromConfig(deps.stateDir) || "").replace(/\/$/, "");
-  if (!relayUrl) {
-    deps.log("multi-agent: relayUrl missing; tools not installed");
-    return false;
-  }
+  /** relay 地址**调用时**再读：插件启动时配置可能还没保存（YC 实测踩过这个坑）。 */
+  const currentRelayUrl = () => {
+    let fromToggle = "";
+    try {
+      const f = path.join(deps.stateDir, "multi-agent.json");
+      if (existsSync(f)) fromToggle = String(readJson(f)?.relayUrl || "");
+    } catch {
+      /* 坏文件忽略 */
+    }
+    return String(fromToggle || relayFromConfig(deps.stateDir) || "").replace(/\/$/, "");
+  };
+  const requireRelay = () => {
+    const u = currentRelayUrl();
+    if (!u) throw new Error("relay URL 未配置：请先在插件面板保存 relay 地址");
+    return u;
+  };
 
   /** 一次跨机 RPC（relay 代理 → 桥），统一超时与错误。 */
   const rpc = (deviceId: string, type: string, payload: unknown = {}, timeoutMs = 20_000): Promise<any> =>
     relayJson(
       deps.stateDir,
-      relayUrl,
+      requireRelay(),
       `/devices/${encodeURIComponent(deviceId)}/rpc`,
       { method: "POST", body: { type, payload, timeoutMs } },
       deps.log,
@@ -251,7 +259,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
         parameters: { type: "object", properties: {}, additionalProperties: false },
         output: { schema: { type: "array" }, render: (_a: any, v: any) => [{ type: "text", text: JSON.stringify(v) }] },
         execute: async () => {
-          const j = await relayJson(deps.stateDir, relayUrl, "/devices", {}, deps.log);
+          const j = await relayJson(deps.stateDir, requireRelay(), "/devices", {}, deps.log);
           const list = Array.isArray(j?.data) ? j.data : [];
           return list.map((d: any) => ({
             deviceId: String(d?.id ?? d?.deviceId ?? ""),
@@ -280,7 +288,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
           const wanted = String(args?.computer ?? "").trim();
           if (!wanted) throw new Error("computer is required");
 
-          const devJson = await relayJson(deps.stateDir, relayUrl, "/devices", {}, deps.log);
+          const devJson = await relayJson(deps.stateDir, requireRelay(), "/devices", {}, deps.log);
           const devices: any[] = Array.isArray(devJson?.data) ? devJson.data : [];
           const byId = devices.find((d) => String(d?.id ?? d?.deviceId) === wanted);
           const byLabel = devices.filter((d) => String(d?.label ?? "").toLowerCase() === wanted.toLowerCase());
@@ -297,7 +305,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
 
           const j = await relayJson(
             deps.stateDir,
-            relayUrl,
+            requireRelay(),
             `/devices/${encodeURIComponent(deviceId)}/rpc`,
             { method: "POST", body: { type: "sessions.list", payload: {}, timeoutMs: 15_000 } },
             deps.log,
@@ -363,7 +371,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
             86_400_000,
           );
 
-          const devJson = await relayJson(deps.stateDir, relayUrl, "/devices", {}, deps.log);
+          const devJson = await relayJson(deps.stateDir, requireRelay(), "/devices", {}, deps.log);
           const devices: any[] = Array.isArray(devJson?.data) ? devJson.data : [];
           const byId = devices.find((d) => String(d?.id ?? d?.deviceId) === wanted);
           const byLabel = devices.filter((d) => String(d?.label ?? "").toLowerCase() === wanted.toLowerCase());
@@ -568,7 +576,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
       });
 
       const resolveDevice = async (wanted: string) => {
-        const devJson = await relayJson(deps.stateDir, relayUrl, "/devices", {}, deps.log);
+        const devJson = await relayJson(deps.stateDir, requireRelay(), "/devices", {}, deps.log);
         const devices: any[] = Array.isArray(devJson?.data) ? devJson.data : [];
         const byId = devices.find((d) => String(d?.id ?? d?.deviceId) === wanted);
         const byLabel = devices.filter((d) => String(d?.label ?? "").toLowerCase() === wanted.toLowerCase());

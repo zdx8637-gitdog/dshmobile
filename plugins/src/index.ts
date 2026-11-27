@@ -1882,10 +1882,13 @@ export function apply(ctx: any, _config: any = {}) {
         }
         savePanelState(state);
         scheduleConfig();
+        // 配置刚保存：启动时 relayUrl 可能还没写入（YC 实测），这里补装一次跨机工具
+        installMultiAgent(ctx, { stateDir: STATE_DIR, log: hostLog });
         break;
       }
       case "connect": {
         await bootInteractively();
+        installMultiAgent(ctx, { stateDir: STATE_DIR, log: hostLog });
         break;
       }
       case "disconnect": {
