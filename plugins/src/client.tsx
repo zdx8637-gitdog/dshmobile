@@ -675,6 +675,16 @@ function DshmobileCard(props: any) {
           {channelText(snap?.channel)}
         </span>
       </div>
+      {/* Superagent Harness：跨机派活能力（默认关闭；开关在 ~/.dsh-mobile/multi-agent.json） */}
+      <div className="dsm-row">
+        <span className="dsm-k">Superagent</span>
+        <span
+          className="dsm-v"
+          title="一个对话指挥账号下多台电脑上的 Agent：agent_run / remote_jobs / remote_job_output / remote_job_kill（需 relay REMOTE_RPC=on）"
+        >
+          {value.multiAgentEnabled ? "已开启 · 跨机 6 工具" : "未开启（multi-agent.json）"}
+        </span>
+      </div>
     </>
   );
 

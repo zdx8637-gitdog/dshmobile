@@ -1037,8 +1037,15 @@ export function apply(ctx: any, _config: any = {}) {
     ensureE2eeCode();
     // E2EE 运行时状态随每次取状态现读（策略文件 + device-key.json），面板刷新即可反映手机端操作
     const rt = readE2eeRuntime();
+    // Superagent Harness 开关（仅面板展示；真正的安装逻辑在 multi-agent.ts）
+    let multiAgentEnabled = false;
+    try {
+      const p = path.join(STATE_DIR, "multi-agent.json");
+      if (existsSync(p)) multiAgentEnabled = JSON.parse(readFileSync(p, "utf8"))?.enabled === true;
+    } catch { /* 文件坏了当关闭 */ }
     return {
       ...state,
+      multiAgentEnabled,
       // ④ 面板据此把"没凭据"显示成「未连接」。loggedIn **现场推导**（会话在手 或 本次填了密码），
       //    不再拿"用户名非空"当登录判据 —— 用户名只是预填值，不代表可用凭据。
       loggedIn: session !== null || Boolean(state.username && state.password),
