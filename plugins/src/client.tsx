@@ -886,6 +886,16 @@ function DshmobileCard(props: any) {
       <span className="dsm-bar__item" title="面板 ↔ 宿主的数据通道：rpc = 官方 connection 同源通道；http = 本地 17653 兜底">
         通道 {channelText(snap?.channel)}
       </span>
+      {/* Superagent：默认开启，一键关闭/开启（横版也要有，窄版在 statusRows 里） */}
+      <button
+        type="button"
+        className="dsm-bar__item"
+        style={{ border: 0, background: "transparent", color: "inherit", cursor: "pointer", padding: 0, font: "inherit" }}
+        title="Superagent Harness：一个对话指挥账号下多台电脑上的 Agent（点击切换开关）"
+        onClick={() => { void actions.setMultiAgent(!value.multiAgentEnabled); }}
+      >
+        Superagent {value.multiAgentEnabled ? "开" : "关"}
+      </button>
       <a className="dsm-bar__link" style={{ textDecoration: "none" }} href="https://github.com/zdx8637-gitdog/dshmobile#readme" target="_blank" rel="noreferrer">帮助文档</a>
       {props.onClose ? (
         <button type="button" className="dsm-bar__close" onClick={props.onClose} title="关闭">✕</button>
