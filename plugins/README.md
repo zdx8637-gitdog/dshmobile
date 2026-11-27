@@ -199,6 +199,9 @@ Lets an agent delegate tasks to agents on your other computers and get the resul
   `remote-unreachable` only after ~30 s of consecutive history failures.
 - **Soft timeout** (default 30 min): the job keeps running and the owning agent
   gets a notice to check in; it may keep waiting or call `job_kill`.
+- **Native integration**: the tools belong to DSH's native tool system; tasks run
+  as DSH background jobs (they keep running after the conversation closes) and
+  remote execution follows the same sandbox and approval policy as local tools.
 - `idemKey` makes retries safe: the same key returns the existing job.
 - Guards: chain `depth` ≤ 3, a target already present in `chain` is refused,
   at most 2 active `remote-agent` jobs per conversation.

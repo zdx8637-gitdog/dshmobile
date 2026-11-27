@@ -165,6 +165,7 @@ node scripts/smoke-grant.mjs <u> <p>    # 手机授权模式冒烟
 ### 语义
 
 - `agent_run` 立即返回 `jobId`；远端回合以历史里的 `turn/end` 判定，网络抖动/`409` 不会误判失败；连续约 30 秒不可达才报 `remote-unreachable`。
+- 原生集成：这组工具属于 DSH 原生工具系统，任务以 DSH 后台 job 运行（关掉对话也会继续），远端执行同样受沙盒与审批策略约束。
 - **软超时**（默认 30 分钟）：任务继续跑，主 Agent 收到提醒后自行决定继续等待或 `job_kill`。
 - `idemKey` 幂等：同 key 复用同一任务，避免重复派发。
 - 护栏：链式 `depth` ≤ 3、`chain` 命中目标即拒绝、每会话最多 2 个 `remote-agent` 任务。

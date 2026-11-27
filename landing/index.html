@@ -502,6 +502,10 @@
             还能查看远端后台任务与日志（<code>remote_jobs</code> / <code>remote_job_output</code>）、按 job id 终止（<code>remote_job_kill</code>）；
             支持幂等键与链式调用，并内建深度 / 环路 / 并发护栏。默认开启，插件面板可一键开关。
           </p>
+          <p>
+            这组工具属于 DSH 原生工具系统，和本地工具用同一套调用方式；任务在 DSH 的后台 job 中运行，关掉当前对话也会继续跑；
+            远端执行同样受沙盒与审批策略约束，操作习惯和本地一致。
+          </p>
         </div>
       </div>
     </div>
