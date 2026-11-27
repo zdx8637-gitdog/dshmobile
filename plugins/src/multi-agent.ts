@@ -149,13 +149,53 @@ function lastAssistantText(items: any[]): string {
   return "";
 }
 
-export function installMultiAgent(ctx: any, deps: Deps): boolean {
-  const cfgPath = path.join(deps.stateDir, "multi-agent.json");
-  if (!existsSync(cfgPath)) return false;
-  const cfg = readJson(cfgPath);
-  if (!cfg || cfg.enabled !== true) return false;
+/** 跨机能力默认**开启**；只有显式写 `{"enabled":false}` 才关闭。 */
+export function crossMachineEnabled(stateDir: string): boolean {
+  const cfgPath = path.join(stateDir, "multi-agent.json");
+  if (!existsSync(cfgPath)) return true;
+  try {
+    return readJson(cfgPath)?.enabled !== false;
+  } catch {
+    return true;
+  }
+}
 
-  const relayUrl = String(cfg.relayUrl || relayFromConfig(deps.stateDir) || "").replace(/\/$/, "");
+export function setCrossMachineEnabled(stateDir: string, enabled: boolean): void {
+  try {
+    writeFileSync(path.join(stateDir, "multi-agent.json"), JSON.stringify({ enabled }));
+  } catch (err: any) {
+    /* 写不进去时下次启动仍按旧状态；调用方负责提示 */
+    void err;
+  }
+}
+
+let installed = false;
+const disposers: Array<() => void> = [];
+
+/** 注销全部跨机工具（面板"关闭"或插件卸载时调用）。 */
+export function disposeMultiAgent(): void {
+  for (const d of disposers.splice(0)) {
+    try {
+      d();
+    } catch {
+      /* 单个 dispose 失败不影响其它 */
+    }
+  }
+  installed = false;
+}
+
+export function isMultiAgentInstalled(): boolean {
+  return installed;
+}
+
+export function installMultiAgent(ctx: any, deps: Deps): boolean {
+  if (installed) return true;
+  if (!crossMachineEnabled(deps.stateDir)) return false;
+  const cfg = existsSync(path.join(deps.stateDir, "multi-agent.json"))
+    ? readJson(path.join(deps.stateDir, "multi-agent.json"))
+    : null;
+
+  const relayUrl = String(cfg?.relayUrl || relayFromConfig(deps.stateDir) || "").replace(/\/$/, "");
   if (!relayUrl) {
     deps.log("multi-agent: relayUrl missing; tools not installed");
     return false;
@@ -197,8 +237,14 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
       if (!jobs?.start) {
         deps.log("multi-agent: jobs service unavailable; agent_run not installed");
       }
+      /** 统一登记 disposer，面板关闭时能整体注销。 */
+      const reg = (def: any) => {
+        const d = tools.register(def);
+        disposers.push(d);
+        return d;
+      };
 
-      tools.register({
+      reg({
         name: "computers_list",
         description:
           "List the computers (DSH hosts) under this relay account, with online status. Use the returned deviceId or label as the `computer` argument of other cross-machine tools.",
@@ -217,7 +263,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
         },
       });
 
-      tools.register({
+      reg({
         name: "sessions_list",
         description:
           "List conversations of one of this account's computers. Pass `computer` as a deviceId (preferred) or a unique label from computers_list.",
@@ -270,7 +316,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
         },
       });
 
-      tools.register({
+      reg({
         name: "agent_run",
         description:
           "Run a prompt on another computer of this account as a background job and collect that conversation's final answer. Returns a jobId; when the job settles you get a completion notice — read the report with job_output.",
@@ -535,7 +581,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
         return a?.data ?? a;
       };
 
-      tools.register({
+      reg({
         name: "remote_jobs",
         description:
           "List background jobs of a conversation on another computer. Needs the updated bridge on that computer; older bridges answer unsupported.",
@@ -558,7 +604,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
         },
       });
 
-      tools.register({
+      reg({
         name: "remote_job_output",
         description:
           "Read retained output of one background job on another computer, from a byte offset (default 0). Returns {job, text, status}.",
@@ -588,7 +634,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
         },
       });
 
-      tools.register({
+      reg({
         name: "remote_job_kill",
         description: "Kill a background job on another computer (newer bridges only).",
         parameters: {
@@ -617,6 +663,7 @@ export function installMultiAgent(ctx: any, deps: Deps): boolean {
         },
       });
 
+      installed = true;
       deps.log("multi-agent: tools registered (computers_list, sessions_list, agent_run)");
     } catch (err: any) {
       deps.log(`multi-agent: registration failed: ${err?.message ?? err}`);

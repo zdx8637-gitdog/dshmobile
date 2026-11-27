@@ -675,14 +675,20 @@ function DshmobileCard(props: any) {
           {channelText(snap?.channel)}
         </span>
       </div>
-      {/* Superagent Harness：跨机派活能力（默认关闭；开关在 ~/.dsh-mobile/multi-agent.json） */}
+      {/* Superagent Harness：默认开启，面板可直接关闭/开启（写 ~/.dsh-mobile/multi-agent.json） */}
       <div className="dsm-row">
         <span className="dsm-k">Superagent</span>
-        <span
-          className="dsm-v"
-          title="一个对话指挥账号下多台电脑上的 Agent：agent_run / remote_jobs / remote_job_output / remote_job_kill（需 relay REMOTE_RPC=on）"
-        >
-          {value.multiAgentEnabled ? "已开启 · 跨机 6 工具" : "未开启（multi-agent.json）"}
+        <span className="dsm-v" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {value.multiAgentEnabled ? "已开启" : "已关闭"}
+          <button
+            type="button"
+            className="dsm-btn dsm-btn--ghost"
+            style={{ padding: "2px 8px", fontSize: 11 }}
+            title="跨机 Agent 能力：一个对话指挥账号下多台电脑上的 Agent（agent_run / remote_jobs …）"
+            onClick={() => { void actions.setMultiAgent(!value.multiAgentEnabled); }}
+          >
+            {value.multiAgentEnabled ? "关闭" : "开启"}
+          </button>
         </span>
       </div>
     </>
@@ -1113,6 +1119,10 @@ export function apply(ctx: any) {
     disconnect: async () => { await request("action", { action: "disconnect" }); },
     // 清除本机凭据：只清本机、不再主动连（与 logout 严格区分）
     clearCredentials: async () => { await request("action", { action: "clearCredentials" }); },
+    // Superagent Harness：默认开启，面板一键关闭/开启（写 ~/.dsh-mobile/multi-agent.json）
+    setMultiAgent: async (enabled: boolean) => {
+      await request("action", { action: "setMultiAgent", payload: { enabled } });
+    },
     register: async (req: { username: string; password: string }) => {
       await request("action", { action: "register", payload: req });
     },

@@ -140,16 +140,16 @@ node scripts/smoke-grant.mjs <u> <p>    # 手机授权模式冒烟
 
 让一台电脑上的对话，驱动你账号下**其它电脑**上的对话（仅限同账号）。默认关闭。
 
-### 开启
+### 开启 / 关闭
 
-1. relay 启动时带 `REMOTE_RPC=on`（新增 `POST /devices/:id/rpc`；不带时该路由 404，其余行为不变）。
-2. 本插件：创建 `~/.dsh-mobile/multi-agent.json`：
+1. relay 启动时带 `REMOTE_RPC=on`（新增 `POST /devices/:id/rpc`；不带时该路由 404，其余不变）。这是服务端统一开关。
+2. 本插件**默认开启**：可直接在侧边栏面板点 **Superagent → 关闭/开启**，或编辑 `~/.dsh-mobile/multi-agent.json`：
 
    ```json
-   { "enabled": true }
+   { "enabled": false }
    ```
 
-   文件不存在或 `enabled: false` 时不注册工具、不建定时器、不发请求。
+   删除该文件即回到默认（开启）。关闭时不注册工具、不建定时器、不发请求。
 
 ### 工具
 

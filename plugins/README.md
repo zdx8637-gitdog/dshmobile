@@ -158,19 +158,23 @@ The complete three-part stack (phone App / relay / protocol) lives in the main r
 ## Cross-machine agents (1.1.0+)
 
 Lets a conversation on one computer drive conversations on your other computers
-(same relay account only). **Off by default.**
+(same relay account only). **On by default** — disable it from the side panel
+(Superagent row → 关闭) or by writing `{"enabled": false}` to
+`~/.dsh-mobile/multi-agent.json`.
 
-### Enable
+### Enable / disable
 
 1. Relay: start with `REMOTE_RPC=on` (adds `POST /devices/:id/rpc`; without it the
-   route answers 404 and nothing else changes).
-2. This plugin: create `~/.dsh-mobile/multi-agent.json`:
+   route answers 404 and nothing else changes). This is a server-side switch shared
+   by every computer.
+2. Plugin: on by default. Toggle the **Superagent** row in the side panel, or edit
+   `~/.dsh-mobile/multi-agent.json`:
 
    ```json
-   { "enabled": true }
+   { "enabled": false }
    ```
 
-   Absent or `enabled: false` means no tools, no timers, no requests.
+   Deleting the file returns to the default (enabled).
 
 ### Tools
 

@@ -28,7 +28,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateIdentityKeypair, randomPairingSecret } from "../bridge/crypto.js";
 import { killOtherBridges } from "../bridge/scan.js";
-import { installMultiAgent } from "./multi-agent.js";
+import { installMultiAgent, disposeMultiAgent, crossMachineEnabled, setCrossMachineEnabled } from "./multi-agent.js";
 
 export const name = "dshmobile-bridge";
 
@@ -1037,15 +1037,9 @@ export function apply(ctx: any, _config: any = {}) {
     ensureE2eeCode();
     // E2EE 运行时状态随每次取状态现读（策略文件 + device-key.json），面板刷新即可反映手机端操作
     const rt = readE2eeRuntime();
-    // Superagent Harness 开关（仅面板展示；真正的安装逻辑在 multi-agent.ts）
-    let multiAgentEnabled = false;
-    try {
-      const p = path.join(STATE_DIR, "multi-agent.json");
-      if (existsSync(p)) multiAgentEnabled = JSON.parse(readFileSync(p, "utf8"))?.enabled === true;
-    } catch { /* 文件坏了当关闭 */ }
     return {
       ...state,
-      multiAgentEnabled,
+      multiAgentEnabled: crossMachineEnabled(STATE_DIR),
       // ④ 面板据此把"没凭据"显示成「未连接」。loggedIn **现场推导**（会话在手 或 本次填了密码），
       //    不再拿"用户名非空"当登录判据 —— 用户名只是预填值，不代表可用凭据。
       loggedIn: session !== null || Boolean(state.username && state.password),
@@ -1929,7 +1923,18 @@ export function apply(ctx: any, _config: any = {}) {
         startBridge(state);
         break;
       }
-      case "refreshPairing": {
+      case "setMultiAgent": {
+      const enabled = payload?.enabled !== false;
+      setCrossMachineEnabled(STATE_DIR, enabled);
+      if (enabled) {
+        installMultiAgent(ctx, { stateDir: STATE_DIR, log: hostLog });
+      } else {
+        disposeMultiAgent();
+      }
+      hostLog(`multi-agent: ${enabled ? "enabled" : "disabled"} from panel`);
+      return { ok: true, value: { enabled } };
+    }
+    case "refreshPairing": {
         patchState({ pairingCode: "", pairingExpiresAt: "" });
         scheduleConfig();
         break;
@@ -2009,6 +2014,7 @@ export function apply(ctx: any, _config: any = {}) {
    *  才会落 tombstone 并轮询确认；App 退出 / 热重载（bundles 仍在）时一律不动凭据。 */
   let tornDown = false;
   function teardown(reason: string) {
+    try { disposeMultiAgent(); } catch { /* 注销工具失败不阻断收尾 */ }
     if (tornDown) return;
     tornDown = true;
     stopped = true;
